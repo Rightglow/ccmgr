@@ -1,0 +1,116 @@
+import time
+from pathlib import Path
+
+from ccmgr.discovery import list_projects
+from ccmgr.session_index import list_sessions, is_live
+
+
+def _make_one_project(claude_home, tmp_path, write_session_fixture, sessions: list[tuple[str, list[dict]]]):
+    real = tmp_path / "proj"
+    real.mkdir()
+    encoded = str(real).replace("/", "-")
+    for sid, records in sessions:
+        write_session_fixture(encoded, sid, records)
+    projects = list_projects(claude_home)
+    return projects[0]
+
+
+def test_empty_project_returns_no_sessions(claude_home, write_session_fixture, tmp_path):
+    real = tmp_path / "proj"
+    real.mkdir()
+    encoded = str(real).replace("/", "-")
+    (claude_home / "projects" / encoded).mkdir()
+    projects = list_projects(claude_home)
+    assert list_sessions(projects[0]) == []
+
+
+def test_session_basic_metadata(claude_home, write_session_fixture, tmp_path):
+    project = _make_one_project(claude_home, tmp_path, write_session_fixture, [
+        ("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", [
+            {"type": "user", "message": {"role": "user", "content": "hello"}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}], "usage": {"input_tokens": 10, "output_tokens": 5}}},
+            {"type": "ai-title", "aiTitle": "Hello session"},
+        ]),
+    ])
+    sessions = list_sessions(project)
+    assert len(sessions) == 1
+    s = sessions[0]
+    assert s.session_id == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    assert s.title == "Hello session"
+    assert s.message_count == 2  # 1 user + 1 assistant
+    assert s.token_total == 15
+    assert s.last_mtime > 0
+
+
+def test_most_recent_ai_title_wins(claude_home, write_session_fixture, tmp_path):
+    project = _make_one_project(claude_home, tmp_path, write_session_fixture, [
+        ("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", [
+            {"type": "ai-title", "aiTitle": "First"},
+            {"type": "user", "message": {"role": "user", "content": "hi"}},
+            {"type": "ai-title", "aiTitle": "Second"},
+            {"type": "ai-title", "aiTitle": "Third (latest)"},
+        ]),
+    ])
+    sessions = list_sessions(project)
+    assert sessions[0].title == "Third (latest)"
+
+
+def test_sessions_sorted_by_mtime_desc(claude_home, write_session_fixture, tmp_path):
+    real = tmp_path / "proj"
+    real.mkdir()
+    encoded = str(real).replace("/", "-")
+    p1 = write_session_fixture(encoded, "11111111-1111-1111-1111-111111111111", [{"type": "user", "message": {"role": "user", "content": "old"}}])
+    time.sleep(0.05)
+    p2 = write_session_fixture(encoded, "22222222-2222-2222-2222-222222222222", [{"type": "user", "message": {"role": "user", "content": "new"}}])
+
+    project = list_projects(claude_home)[0]
+    sessions = list_sessions(project)
+    assert [s.session_id for s in sessions] == ["22222222-2222-2222-2222-222222222222", "11111111-1111-1111-1111-111111111111"]
+
+
+def test_session_with_no_title_uses_fallback(claude_home, write_session_fixture, tmp_path):
+    project = _make_one_project(claude_home, tmp_path, write_session_fixture, [
+        ("cccccccc-cccc-cccc-cccc-cccccccccccc", [
+            {"type": "user", "message": {"role": "user", "content": "hi"}},
+        ]),
+    ])
+    sessions = list_sessions(project)
+    assert sessions[0].title is None
+    assert sessions[0].display_title == "session cccccccc"
+
+
+def test_malformed_lines_are_skipped(claude_home, write_session_fixture, tmp_path):
+    real = tmp_path / "proj"
+    real.mkdir()
+    encoded = str(real).replace("/", "-")
+    jpath = (claude_home / "projects" / encoded)
+    jpath.mkdir(parents=True, exist_ok=True)
+    with (jpath / "dddddddd-dddd-dddd-dddd-dddddddddddd.jsonl").open("w") as f:
+        f.write("not json at all\n")
+        f.write('{"type": "user", "message": {"role": "user", "content": "hi"}}\n')
+        f.write("{partial json\n")
+    project = list_projects(claude_home)[0]
+    sessions = list_sessions(project)
+    assert len(sessions) == 1
+    assert sessions[0].message_count == 1
+
+
+def test_is_live_within_threshold(claude_home, write_session_fixture, tmp_path):
+    project = _make_one_project(claude_home, tmp_path, write_session_fixture, [
+        ("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", [{"type": "user", "message": {"role": "user", "content": "hi"}}]),
+    ])
+    s = list_sessions(project)[0]
+    assert is_live(s, threshold_seconds=60.0) is True
+
+
+def test_is_live_outside_threshold(claude_home, write_session_fixture, tmp_path):
+    import os
+    project = _make_one_project(claude_home, tmp_path, write_session_fixture, [
+        ("ffffffff-ffff-ffff-ffff-ffffffffffff", [{"type": "user", "message": {"role": "user", "content": "hi"}}]),
+    ])
+    s = list_sessions(project)[0]
+    # Backdate the mtime by 10 minutes.
+    old = time.time() - 600
+    os.utime(s.jsonl_path, (old, old))
+    s_refreshed = list_sessions(project)[0]
+    assert is_live(s_refreshed, threshold_seconds=60.0) is False
