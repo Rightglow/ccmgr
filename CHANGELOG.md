@@ -7,11 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-05-22
+
 ### Added
 
 - Active-pane focus highlight: bold-cyan border on the focused urwid pane and on the active tmux pane (window-scoped, so it does not leak into other tmux windows).
 - Sessions row redesign to mirror `claude --resume`: title on top, dim `<time ago> · <branch> · <size>` below (branch sourced from the JSONL's `gitBranch`, size from the file's stat).
 - Running-pane → sidebar sync: picking a running session now also switches the Projects and Sessions panes to that session's project.
+- `release.yml` workflow that publishes to PyPI via Trusted Publishing (OIDC) when a `v*` tag is pushed.
 
 ### Changed
 
@@ -29,5 +32,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Key bindings for navigation, focus switching, filtering (`/`), session details popup (`i`), help (`?`), and quit (`q` / `Ctrl-C`).
 - `ccmgr --version` flag.
 
-[Unreleased]: https://github.com/regmi-saugat/ccmgr/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/regmi-saugat/ccmgr/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/regmi-saugat/ccmgr/compare/v0.1.3...v0.1.5
 [0.1.3]: https://github.com/regmi-saugat/ccmgr/releases/tag/v0.1.3
