@@ -1,0 +1,49 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif,
+    "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+
+  --color-primary: #000000;
+  --color-on-primary: #ffffff;
+  --color-canvas: #ffffff;
+  --color-ink: #0a0a0a;
+  --color-ink-soft: #333333;
+  --color-graphite: #555555;
+  --color-slate: #6b7280;
+  --color-scrim: #1a1a1a;
+  --color-footer: #0d0d0d;
+  --color-hairline: #e5e5e5;
+  --color-hairline-soft: #eeeeee;
+  --color-surface-cool: #f4f4f4;
+
+  --animate-float: float 6s ease-in-out infinite;
+  --animate-gradient: gradient 8s ease infinite;
+  --animate-pulse-slow: pulse 4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+
+  @keyframes float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-15px); }
+  }
+  @keyframes gradient {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+  }
+}
+
+@utility tracking-display {
+  letter-spacing: -1.2px;
+}
+
+@utility tracking-display-sm {
+  letter-spacing: -0.9px;
+}
+
+@utility tracking-eyebrow {
+  letter-spacing: 0.35px;
+}
+
+html {
+  scroll-behavior: smooth;
+}
