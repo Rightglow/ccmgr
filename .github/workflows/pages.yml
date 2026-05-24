@@ -32,6 +32,10 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
       - run: npm run build
+      - name: Flatten prerendered basename dir
+        run: |
+          mv build/client/ccmgr/index.html build/client/index.html
+          rmdir build/client/ccmgr
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
