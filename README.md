@@ -2,6 +2,10 @@
 
 A terminal UI to navigate, resume, and start [Claude Code](https://claude.com/claude-code) sessions across all your projects from one place. ccmgr lives in the left pane of a tmux window; the right pane shows the currently-active claude. Each claude session runs as its own detached tmux session in the background, so switching between sessions preserves all in-progress work — no responses or tool calls are interrupted.
 
+> **This is a fork** of [regmi-saugat/ccmgr](https://github.com/regmi-saugat/ccmgr) (v0.1.5). The upstream project is compact and well-designed, but had some rough edges for daily use. This fork is actively maintained with agent-assisted programming: [Claude Code](https://claude.ai/claude-code) CLI paired with the **DeepSeek V4** model reviews, refactors, and co-authors changes alongside human direction. Work will continue on this fork for the foreseeable future.
+>
+> Key additions over upstream: session status dots (idle/busy/blocked), rename & delete sessions, favorites, mouse click support, file-browser for new projects, non-ASCII path handling, cross-pane arrow-key navigation, and a significant refactor of the running-session registry and keybinding system. See the [commit history](https://github.com/Rightglow/ccmgr/commits/main/) for the full list.
+
 ## Install
 
 ```bash
