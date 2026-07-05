@@ -42,15 +42,27 @@ def _format_size(nbytes: int) -> str:
     return f"{nbytes}B"
 
 
+_STATUS_DOTS = {"idle": "🟢", "busy": "🟡", "blocked": "🔴"}
+
+_STATUS_NAMES = {"idle": "idle", "busy": "busy", "blocked": "BLOCKED"}
+
+
 class _SessionRow(urwid.WidgetWrap):
-    def __init__(self, session: SessionMeta, live_threshold: float, is_running: bool = False) -> None:
+    def __init__(self, session: SessionMeta, live_threshold: float,
+                 is_running: bool = False, is_favorite: bool = False,
+                 on_click: "Callable[[], None] | None" = None) -> None:
         self.session = session
+        self._on_click = on_click
         is_active = is_live(session, live_threshold)
 
-        # Two-line layout, matching `claude --resume`:
-        #   Title
+        # Two-line layout:
+        #   [⭐] [🟢] Title  [LIVE]
         #   <relative time> · <branch> · <size>
         title_markup: list = []
+        if is_favorite:
+            title_markup.append("⭐ ")
+        title_markup.append(_STATUS_DOTS.get(session.status, "⚪"))
+        title_markup.append(" ")
         title_markup.append("● " if is_running else "  ")
         title_markup.append(session.display_title)
         if is_active:
@@ -79,9 +91,16 @@ class _SessionRow(urwid.WidgetWrap):
     def keypress(self, size, key):
         return key
 
+    def mouse_event(self, size, event, button, col, row, focus):
+        if event == "mouse press" and button == 1 and self._on_click:
+            self._on_click()
+            return True
+        return super().mouse_event(size, event, button, col, row, focus)
+
 
 class _NewSessionRow(urwid.WidgetWrap):
-    def __init__(self) -> None:
+    def __init__(self, on_click: "Callable[[], None] | None" = None) -> None:
+        self._on_click = on_click
         self._text = urwid.Text("+ New session")
         super().__init__(urwid.AttrMap(self._text, "dim", focus_map="focus"))
 
@@ -90,6 +109,12 @@ class _NewSessionRow(urwid.WidgetWrap):
 
     def keypress(self, size, key):
         return key
+
+    def mouse_event(self, size, event, button, col, row, focus):
+        if event == "mouse press" and button == 1 and self._on_click:
+            self._on_click()
+            return True
+        return super().mouse_event(size, event, button, col, row, focus)
 
 
 class SessionsPane(urwid.WidgetWrap):
@@ -100,35 +125,57 @@ class SessionsPane(urwid.WidgetWrap):
         self._project: Project | None = None
         self._filter = ""
         self._running_ids: set[str] = set()
+        self._favorite_ids: set[str] = set()
 
-        self._new_row = _NewSessionRow()
+        self._new_row = _NewSessionRow(on_click=lambda: self._on_select(None))
+        self._divider = urwid.Divider("─")
         self._walker = urwid.SimpleFocusListWalker([urwid.Text("(no project selected)", align="center")])
         self._listbox = urwid.ListBox(self._walker)
         self._pile = urwid.Pile([
-            ("pack", self._new_row),
-            ("pack", urwid.Divider("─")),
             ("weight", 1, self._listbox),
         ])
         self._linebox = urwid.LineBox(self._pile, title="Sessions")
+        # Start focused on the listbox when it has selectable content.
+        if self._walker:
+            self._pile.focus_position = 0
         super().__init__(self._linebox)
 
-    def set_sessions(self, project: Project | None, sessions: list[SessionMeta], running_ids: set[str] | None = None) -> None:
+    def set_sessions(self, project: Project | None, sessions: list[SessionMeta],
+                     running_ids: set[str] | None = None,
+                     favorite_ids: set[str] | None = None) -> None:
         prior_focus = self._remember_focus()
         self._project = project
         self._sessions = sessions
+        self._favorite_ids = favorite_ids or set()
         if running_ids is not None:
             self._running_ids = running_ids
 
         if project is None:
             self._walker[:] = [urwid.Text("(no project selected)", align="center")]
             self._linebox.set_title("Sessions")
+            self._pile.contents[:] = [
+                (self._listbox, self._pile.options("weight", 1)),
+            ]
+            self._pile.focus_position = 0
             return
+
+        # Show "+ New session" header row when a project is selected.
+        self._pile.contents[:] = [
+            (self._new_row, self._pile.options("pack")),
+            (self._divider, self._pile.options("pack")),
+            (self._listbox, self._pile.options("weight", 1)),
+        ]
 
         # Apply current filter (if any) when rendering.
         if self._filter:
             filtered = [s for s in sessions if self._filter.lower() in s.display_title.lower()]
         else:
-            filtered = sessions
+            filtered = list(sessions)
+
+        # Sort: favorites first, then by mtime descending within each group.
+        f_ids = self._favorite_ids
+        filtered.sort(key=lambda s: (0 if s.session_id in f_ids else 1, -s.last_mtime))
+
         self._render(filtered)
         self._linebox.set_title(f"Sessions ({project.display_name})")
 
@@ -142,7 +189,12 @@ class SessionsPane(urwid.WidgetWrap):
 
     def _render(self, sessions: list[SessionMeta]) -> None:
         rows = [
-            _SessionRow(s, self._live_threshold, is_running=(s.session_id in self._running_ids))
+            _SessionRow(
+                s, self._live_threshold,
+                is_running=(s.session_id in self._running_ids),
+                is_favorite=(s.session_id in self._favorite_ids),
+                on_click=lambda s=s: self._on_select(s),
+            )
             for s in sessions
         ]
         if not rows:
@@ -172,9 +224,11 @@ class SessionsPane(urwid.WidgetWrap):
         self._walker.set_focus(0)
 
     def keypress(self, size, key):
+        listbox_pos = 2 if self._project is not None else 0
+
         if key == "enter":
-            if self._pile.focus_position == 0:
-                # On + New session row
+            # "+ New session" row is only present when a project is loaded.
+            if self._project is not None and self._pile.focus_position == 0:
                 self._on_select(None)
                 return None
             if self._walker:
@@ -186,7 +240,7 @@ class SessionsPane(urwid.WidgetWrap):
         if key == "up" and self._pile.focus_position == 0:
             return None
         if key == "down":
-            if self._pile.focus_position == 2 and self._walker:
+            if self._pile.focus_position == listbox_pos and self._walker:
                 cur = self._walker.focus
                 last_selectable_idx = None
                 for i, w in enumerate(self._walker):

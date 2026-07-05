@@ -24,6 +24,36 @@ def is_live(session: SessionMeta, threshold_seconds: float) -> bool:
     return (time.time() - session.last_mtime) <= threshold_seconds
 
 
+def _extract_text(content) -> str | None:
+    """Pull meaningful display text from a user-message content field.
+
+    Returns None when the content is a system command, tool result, or
+    other internal markup that isn't useful for display.
+    """
+    if isinstance(content, str):
+        s = content.strip()
+        if not s:
+            return None
+        # Skip system commands injected by Claude Code harness.
+        if s.startswith("<command-name>") or s.startswith("<local-command"):
+            return None
+        return s
+    if isinstance(content, list):
+        # Content blocks — prefer text blocks, skip tool results.
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type", "")
+            if btype == "tool_result":
+                continue  # tool output, not user text
+            if btype == "text":
+                t = block.get("text", "")
+                if isinstance(t, str) and t.strip():
+                    return t.strip()
+        return None
+    return None
+
+
 def _scan_session(project: Project, jsonl_path: Path) -> SessionMeta | None:
     session_id = jsonl_path.stem
     if not _looks_like_uuid(session_id):
@@ -31,8 +61,14 @@ def _scan_session(project: Project, jsonl_path: Path) -> SessionMeta | None:
 
     title: str | None = None
     message_count = 0
+    user_count = 0
+    assistant_count = 0
     token_total = 0
     git_branch: str | None = None
+    last_user_message: str | None = None
+    first_user_message: str | None = None
+    last_rtype: str = ""        # "user" or "assistant" — last meaningful record
+    last_stop_reason: str = ""  # only set for assistant records
 
     try:
         with jsonl_path.open("r") as f:
@@ -49,8 +85,21 @@ def _scan_session(project: Project, jsonl_path: Path) -> SessionMeta | None:
                     title = rec.get("aiTitle") or title
                 elif rtype == "user":
                     message_count += 1
+                    user_count += 1
+                    last_rtype = "user"
+                    last_stop_reason = ""
+                    # Extract meaningful text for display.
+                    msg = rec.get("message", {}) or {}
+                    text = _extract_text(msg.get("content", ""))
+                    if text is not None:
+                        last_user_message = text
+                        if first_user_message is None:
+                            first_user_message = text
                 elif rtype == "assistant":
                     message_count += 1
+                    assistant_count += 1
+                    last_rtype = "assistant"
+                    last_stop_reason = (rec.get("message", {}) or {}).get("stop_reason", "")
                     usage = rec.get("message", {}).get("usage", {}) or {}
                     token_total += int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0))
                 if git_branch is None:
@@ -60,10 +109,50 @@ def _scan_session(project: Project, jsonl_path: Path) -> SessionMeta | None:
     except OSError:
         return None
 
+    # Skip sessions that can't be meaningfully resumed:
+    # 1. No messages AND no title → pure metadata stub.
+    # 2. Has user messages but zero assistant replies → orphan (e.g. a fork
+    #    that never received a response).  Claude Code cannot resume these.
+    if message_count == 0 and title is None:
+        return None
+    if user_count > 0 and assistant_count == 0:
+        return None
+
     try:
         mtime = jsonl_path.stat().st_mtime
     except OSError:
         return None
+
+    # Determine status from the last meaningful record.
+    if last_rtype == "user":
+        status = "busy"
+    elif last_rtype == "assistant":
+        if last_stop_reason == "tool_use":
+            # tool_use is ambiguous: it means "I used a tool" but doesn't
+            # say whether it needs approval.  If the JSONL was last touched
+            # >3 s ago, Claude has stopped writing → genuinely waiting.
+            # Otherwise Claude is still processing (auto-approved tool or
+            # rapidly chaining calls) → treat as busy.
+            age = time.time() - mtime
+            status = "blocked" if age > 3 else "busy"
+        else:
+            status = "idle"
+    else:
+        status = "idle"
+
+    # Fallback title: first meaningful user message (truncated).
+    if title is None and first_user_message:
+        first_line = first_user_message.split("\n")[0]
+        title = first_line[:60] + ("..." if len(first_line) > 60 else "")
+
+    # Truncate last user message for display (keep first line, ~120 chars).
+    preview: str | None = None
+    if last_user_message:
+        first_line = last_user_message.split("\n")[0]
+        if len(first_line) > 120:
+            preview = first_line[:117] + "..."
+        else:
+            preview = first_line
 
     return SessionMeta(
         project=project,
@@ -74,6 +163,8 @@ def _scan_session(project: Project, jsonl_path: Path) -> SessionMeta | None:
         token_total=token_total,
         last_mtime=mtime,
         git_branch=git_branch,
+        last_user_message=preview,
+        status=status,
     )
 
 

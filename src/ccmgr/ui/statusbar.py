@@ -4,7 +4,7 @@ from __future__ import annotations
 import urwid
 
 
-HELP_HINT = "↑↓ move · Tab pane · ↵ open · c code · t term · / filter · i info · ? help · q quit"
+HELP_HINT = "↑↓ move · Tab pane · ↵ open · n new · t term · / filter · i info · r rename · f fav · d del · ? help · q quit"
 
 
 class HelpBar(urwid.WidgetWrap):

@@ -31,6 +31,14 @@ class SessionMeta:
     # record). None if the session has no git context. Mirrors the branch
     # column in `claude --resume`.
     git_branch: str | None = None
+    # Last user message content, truncated.  None if the session has no user
+    # messages yet (e.g. a freshly created session).
+    last_user_message: str | None = None
+    # Current state derived from the last JSONL record:
+    #   "idle"    — last assistant turn ended normally (end_turn / stop_sequence)
+    #   "busy"    — last record is a user message (assistant is processing)
+    #   "blocked" — assistant is waiting for tool approval (stop_reason=tool_use)
+    status: str = "idle"
 
     @property
     def display_title(self) -> str:
