@@ -119,9 +119,11 @@ def _scan_session(project: Project, jsonl_path: Path) -> SessionMeta | None:
         return None
 
     try:
-        mtime = jsonl_path.stat().st_mtime
+        st = jsonl_path.stat()
     except OSError:
         return None
+    mtime = st.st_mtime
+    size_bytes = st.st_size
 
     # Determine status from the last meaningful record.
     if last_rtype == "user":
@@ -162,6 +164,7 @@ def _scan_session(project: Project, jsonl_path: Path) -> SessionMeta | None:
         message_count=message_count,
         token_total=token_total,
         last_mtime=mtime,
+        size_bytes=size_bytes,
         git_branch=git_branch,
         last_user_message=preview,
         status=status,

@@ -6,48 +6,24 @@ from collections.abc import Callable
 import urwid
 
 from ccmgr.models import Project
+from ccmgr.ui._widgets import ClickableRow, remember_focus, restore_focus
 
 
-class _ProjectRow(urwid.WidgetWrap):
+class _ProjectRow(ClickableRow):
     def __init__(self, project: Project, selected: bool = False,
                  on_click: "Callable[[], None] | None" = None) -> None:
-        label = f"{project.display_name} [{project.session_count}]"
         self.project = project
-        self._on_click = on_click
-        self._text = urwid.Text(label)
+        label = f"{project.display_name} [{project.session_count}]"
         attr = "selected" if selected else None
-        super().__init__(urwid.AttrMap(self._text, attr, focus_map="focus"))
-
-    def selectable(self) -> bool:
-        return True
-
-    def keypress(self, size, key):
-        return key
-
-    def mouse_event(self, size, event, button, col, row, focus):
-        if event == "mouse press" and button == 1 and self._on_click:
-            self._on_click()
-            return True
-        return super().mouse_event(size, event, button, col, row, focus)
+        super().__init__(urwid.AttrMap(urwid.Text(label), attr, focus_map="focus"), on_click)
 
 
-class _NewProjectRow(urwid.WidgetWrap):
+class _NewProjectRow(ClickableRow):
     def __init__(self, on_click: "Callable[[], None] | None" = None) -> None:
-        self._on_click = on_click
-        self._text = urwid.Text("+ New project", align="left")
-        super().__init__(urwid.AttrMap(self._text, "dim", focus_map="focus"))
-
-    def selectable(self) -> bool:
-        return True
-
-    def keypress(self, size, key):
-        return key
-
-    def mouse_event(self, size, event, button, col, row, focus):
-        if event == "mouse press" and button == 1 and self._on_click:
-            self._on_click()
-            return True
-        return super().mouse_event(size, event, button, col, row, focus)
+        super().__init__(
+            urwid.AttrMap(urwid.Text("+ New project", align="left"), "dim", focus_map="focus"),
+            on_click,
+        )
 
 
 class ProjectsPane(urwid.WidgetWrap):
@@ -121,29 +97,15 @@ class ProjectsPane(urwid.WidgetWrap):
 
         self._restore_focus(prior_focus)
 
+    @staticmethod
+    def _row_key(row: "_ProjectRow") -> str:
+        return row.project.encoded_name
+
     def _remember_focus(self) -> str | None:
-        """Return the encoded_name of the focused project, or None."""
-        if not self._walker:
-            return None
-        focus_w, _ = self._walker.get_focus()
-        if isinstance(focus_w, _ProjectRow):
-            return focus_w.project.encoded_name
-        return None
+        return remember_focus(self._walker, _ProjectRow, self._row_key)
 
     def _restore_focus(self, encoded_name: str | None) -> None:
-        if not self._walker:
-            return
-        if encoded_name is not None:
-            for i, w in enumerate(self._walker):
-                if isinstance(w, _ProjectRow) and w.project.encoded_name == encoded_name:
-                    self._walker.set_focus(i)
-                    return
-        # Fallback: first selectable row.
-        for i, w in enumerate(self._walker):
-            if isinstance(w, _ProjectRow):
-                self._walker.set_focus(i)
-                return
-        self._walker.set_focus(0)
+        restore_focus(self._walker, _ProjectRow, encoded_name, self._row_key)
 
     def focused_project(self) -> Project | None:
         if self._pile.focus_position == 0:

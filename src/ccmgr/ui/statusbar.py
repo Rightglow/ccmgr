@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import urwid
 
+from ccmgr.ui import keymap
 
-HELP_HINT = "↑↓ move · Tab pane · ↵ open · n new · t term · / filter · i info · r rename · f fav · d del · ? help · q quit"
+
+# Generated from the single keymap source of truth so the hint bar can't drift
+# from the actual dispatch.
+HELP_HINT = keymap.hint_text()
 
 
 class HelpBar(urwid.WidgetWrap):

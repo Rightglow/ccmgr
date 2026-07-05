@@ -8,9 +8,6 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Config:
-    leave_focus_key: str = "ctrl a"
-    quit_key: str = "q"
-    filter_key: str = "/"
     claude_binary: str = "claude"
     poll_interval_ms: int = 1000
     live_badge_seconds: int = 3
@@ -29,14 +26,10 @@ def load_config(config_path: Path | None = None) -> Config:
     with config_path.open("rb") as f:
         data = tomllib.load(f)
 
-    keys = data.get("keys", {})
     claude = data.get("claude", {})
     live = data.get("live", {})
 
     return Config(
-        leave_focus_key=keys.get("leave_focus", "ctrl a"),
-        quit_key=keys.get("quit", "q"),
-        filter_key=keys.get("filter", "/"),
         claude_binary=claude.get("binary", "claude"),
         poll_interval_ms=int(live.get("poll_interval_ms", 1000)),
         live_badge_seconds=int(live.get("live_badge_seconds", 3)),

@@ -7,6 +7,7 @@ from pathlib import Path
 import urwid
 
 from ccmgr.models import Project, SessionMeta
+from ccmgr.ui._widgets import ClickableRow
 
 
 class ProjectInfoModal(urwid.WidgetWrap):
@@ -328,21 +329,11 @@ class RenameModal(urwid.WidgetWrap):
         return super().keypress(size, key)
 
 
-class _BrowserRow(urwid.WidgetWrap):
-    """A selectable row for the directory browser."""
+class _BrowserRow(ClickableRow):
+    """A selectable row for the directory browser (navigated by keyboard)."""
     def __init__(self, markup, attr):
-        self._body = urwid.AttrMap(urwid.Text(markup, wrap="clip"),
-                                   attr, focus_map="focus")
-        super().__init__(self._body)
-
-    def selectable(self) -> bool:
-        return True
-
-    def keypress(self, size, key):
-        return key
-
-    def mouse_event(self, size, event, button, col, row, focus):
-        return super().mouse_event(size, event, button, col, row, focus)
+        super().__init__(urwid.AttrMap(urwid.Text(markup, wrap="clip"),
+                                       attr, focus_map="focus"))
 
 
 class PathBrowser(urwid.WidgetWrap):
@@ -441,7 +432,6 @@ class PathBrowserModal(urwid.WidgetWrap):
                  on_cancel: Callable[[], None]) -> None:
         self._on_cancel = on_cancel
         self._browser = PathBrowser(start_path, on_submit)
-        self._close_on_next_esc = False
         super().__init__(self._browser)
 
     def selectable(self) -> bool:

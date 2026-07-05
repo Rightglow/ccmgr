@@ -7,6 +7,8 @@ popup.
 """
 from __future__ import annotations
 
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import urwid
@@ -18,6 +20,7 @@ from ccmgr.favorites import Favorites
 from ccmgr.launcher import build_resume_command, build_new_session_command
 from ccmgr.models import Project, SessionMeta
 from ccmgr.session_cache import SessionCache
+from ccmgr.ui import keymap
 from ccmgr.ui.modals import (
     DeleteConfirmModal,
     HelpModal,
@@ -54,6 +57,27 @@ PALETTE = [
 ]
 
 
+@dataclass
+class _Running:
+    """One claude session opened by this ccmgr instance.
+
+    Replaces the four parallel dicts that previously tracked running sessions
+    (tmux name, label, project, placeholder) and had to be kept in sync by hand.
+    Keyed in ``App._running`` by ``key``: the real session_id, or a
+    ``__new__-N`` placeholder until the session's JSONL appears on disk.
+    """
+    key: str
+    tmux_name: str
+    label: str
+    project: Project | None = None
+    placeholder_path: Path | None = None  # cwd to resolve against, while a placeholder
+    created_at: float = 0.0                # launch time, for placeholder resolution
+
+    @property
+    def is_placeholder(self) -> bool:
+        return self.key.startswith("__new__-")
+
+
 class App:
     def __init__(self, claude_home: Path, config: Config, auto_launched: bool = False) -> None:
         self._claude_home = claude_home
@@ -63,19 +87,10 @@ class App:
         self._selected_project: Project | None = None
         self._session_cache = SessionCache()
         self._favorites = Favorites()
-        # session_id (or "__new__-N" placeholder) -> detached tmux session name
-        self._claude_tmux_sessions: dict[str, str] = {}
-        # detached tmux session name -> human-readable label for the Running pane
-        self._running_labels: dict[str, str] = {}
-        # detached tmux session name -> the Project that session belongs to.
-        # Used by _on_running_select to re-sync the Projects/Sessions panes
-        # when the user jumps between running sessions of different projects.
-        self._running_projects: dict[str, Project] = {}
+        # Every claude session this ccmgr instance has opened, keyed by
+        # session_id (or a "__new__-N" placeholder until the JSONL appears).
+        self._running: dict[str, _Running] = {}
         self._new_session_counter: int = 0
-        # placeholder_key -> (project_real_path, created_at_epoch). Used by
-        # _refresh to promote `__new__-N` placeholders to the real session_id
-        # (and its display title) once claude creates the jsonl on disk.
-        self._placeholders: dict[str, tuple[Path, float]] = {}
         # The right pane in ccmgr's window; runs `tmux attach -t <claude_session>`.
         self._right_pane_id: str | None = None
         self._loop: urwid.MainLoop | None = None
@@ -117,7 +132,7 @@ class App:
         self._selected_project = project
         self._projects_pane.set_selected(project.encoded_name)
         sessions = self._session_cache.list_sessions(project)
-        self._sessions_pane.set_sessions(project, sessions, running_ids=set(self._claude_tmux_sessions.keys()),
+        self._sessions_pane.set_sessions(project, sessions, running_ids=set(self._running),
                 favorite_ids=self._favorites.get_ids())
         self._status.set_message(f"Project: {project.real_path}  ({len(sessions)} sessions)")
         # Auto-focus the sessions pane below so the user can j/k into a session
@@ -140,7 +155,8 @@ class App:
         if not ok:
             self._status.set_message("failed to re-attach")
             return
-        project = self._running_projects.get(entry.tmux_name)
+        r = self._by_tmux(entry.tmux_name)
+        project = r.project if r else None
         if project is not None and (
             self._selected_project is None
             or self._selected_project.encoded_name != project.encoded_name
@@ -151,7 +167,7 @@ class App:
             self._sessions_pane.set_sessions(
                 project,
                 sessions,
-                running_ids=set(self._claude_tmux_sessions.keys()),
+                running_ids=set(self._running),
                 favorite_ids=self._favorites.get_ids(),
             )
         self._status.set_message(f"→ {entry.label}")
@@ -204,50 +220,59 @@ class App:
             tmux_ctl.select_pane(self._right_pane_id)
         return ok
 
+    def _by_tmux(self, tmux_name: str) -> "_Running | None":
+        """Find the running session backed by a given tmux session name."""
+        for r in self._running.values():
+            if r.tmux_name == tmux_name:
+                return r
+        return None
+
+    def _launch(self, key: str, cmd: list[str], cwd: Path, label: str,
+                project: Project | None, placeholder_path: Path | None = None) -> bool:
+        """Create (or reuse) the detached claude tmux session for `key`,
+        register it, and attach it in the right pane. Returns success.
+
+        Shared by resume / new-session / new-project so the tracking bookkeeping
+        lives in exactly one place.
+        """
+        existing = self._running.get(key)
+        tmux_name = existing.tmux_name if existing else self._claude_session_name(key)
+        if not self._ensure_detached_claude(tmux_name, self._shellify(cmd, cwd=cwd)):
+            self._status.set_message("failed to create detached claude session")
+            return False
+        self._running[key] = _Running(
+            key=key, tmux_name=tmux_name, label=label, project=project,
+            placeholder_path=placeholder_path,
+            created_at=time.time() if placeholder_path is not None else 0.0,
+        )
+        if not self._attach_in_right_pane(tmux_name):
+            self._status.set_message("failed to attach to claude session")
+            return False
+        return True
+
     def _launch_resume(self, session_meta: SessionMeta) -> None:
-        sid = session_meta.session_id
-        claude_tmux_name = self._claude_tmux_sessions.get(sid) or self._claude_session_name(sid)
         cmd = build_resume_command(
             claude_binary=self._config.claude_binary,
-            session_id=sid,
+            session_id=session_meta.session_id,
             cwd=session_meta.project.real_path,
         )
-        shell_cmd = self._shellify(cmd, cwd=session_meta.project.real_path)
-        if not self._ensure_detached_claude(claude_tmux_name, shell_cmd):
-            self._status.set_message("failed to create detached claude session")
-            return
-        self._claude_tmux_sessions[sid] = claude_tmux_name
-        self._running_labels[claude_tmux_name] = f"{session_meta.project.display_name}/{session_meta.display_title}"
-        self._running_projects[claude_tmux_name] = session_meta.project
-        if not self._attach_in_right_pane(claude_tmux_name):
-            self._status.set_message("failed to attach to claude session")
-            return
-        self._status.set_message(f"→ {session_meta.display_title}  ({len(self._claude_tmux_sessions)} session(s) running)")
+        label = f"{session_meta.project.display_name}/{session_meta.display_title}"
+        if self._launch(session_meta.session_id, cmd, session_meta.project.real_path,
+                        label, session_meta.project):
+            self._status.set_message(
+                f"→ {session_meta.display_title}  ({len(self._running)} session(s) running)")
 
     def _launch_new_session(self) -> None:
         if self._selected_project is None:
             self._status.set_message("Pick a project first.")
             return
+        proj = self._selected_project
         self._new_session_counter += 1
         placeholder = f"__new__-{self._new_session_counter}"
-        claude_tmux_name = self._claude_session_name(placeholder)
-        cmd = build_new_session_command(
-            claude_binary=self._config.claude_binary,
-            cwd=self._selected_project.real_path,
-        )
-        shell_cmd = self._shellify(cmd, cwd=self._selected_project.real_path)
-        if not self._ensure_detached_claude(claude_tmux_name, shell_cmd):
-            self._status.set_message("failed to create detached session")
-            return
-        self._claude_tmux_sessions[placeholder] = claude_tmux_name
-        self._running_labels[claude_tmux_name] = f"{self._selected_project.display_name}/(new)"
-        self._running_projects[claude_tmux_name] = self._selected_project
-        import time
-        self._placeholders[placeholder] = (self._selected_project.real_path, time.time())
-        if not self._attach_in_right_pane(claude_tmux_name):
-            self._status.set_message("failed to attach")
-            return
-        self._status.set_message(f"→ new session in {self._selected_project.display_name}")
+        cmd = build_new_session_command(claude_binary=self._config.claude_binary, cwd=proj.real_path)
+        if self._launch(placeholder, cmd, proj.real_path, f"{proj.display_name}/(new)",
+                        proj, placeholder_path=proj.real_path):
+            self._status.set_message(f"→ new session in {proj.display_name}")
 
     def _on_new_project_submit(self, path: Path) -> None:
         self._close_modal()
@@ -258,20 +283,10 @@ class App:
             return
         self._new_session_counter += 1
         placeholder = f"__new__-{self._new_session_counter}"
-        claude_tmux_name = self._claude_session_name(placeholder)
         cmd = [self._config.claude_binary]
-        shell_cmd = self._shellify(cmd, cwd=path)
-        if not self._ensure_detached_claude(claude_tmux_name, shell_cmd):
-            self._status.set_message("failed to create detached session")
-            return
-        self._claude_tmux_sessions[placeholder] = claude_tmux_name
-        self._running_labels[claude_tmux_name] = f"{path.name}/(new)"
-        import time
-        self._placeholders[placeholder] = (path, time.time())
-        if not self._attach_in_right_pane(claude_tmux_name):
-            self._status.set_message("failed to attach")
-            return
-        self._status.set_message(f"→ new project: {path}")
+        if self._launch(placeholder, cmd, path, f"{path.name}/(new)",
+                        None, placeholder_path=path):
+            self._status.set_message(f"→ new project: {path}")
 
     @staticmethod
     def _shellify(argv: list[str], cwd: Path) -> str:
@@ -304,16 +319,13 @@ class App:
                 focus_w, _ = running_walker.get_focus()
                 if isinstance(focus_w, _RunningRow):
                     entry = focus_w.entry
-                    # Find session metadata if we know it (i.e. not a placeholder).
-                    sid: str | None = None
-                    for s_id, tmux_name in self._claude_tmux_sessions.items():
-                        if tmux_name == entry.tmux_name:
-                            sid = s_id
-                            break
-                    session = self._find_session_meta(sid) if sid else None
-                    project = self._running_projects.get(entry.tmux_name)
-                    label = self._running_labels.get(entry.tmux_name, entry.tmux_name)
-                    is_placeholder = sid is not None and sid.startswith("__new__-")
+                    r = self._by_tmux(entry.tmux_name)
+                    project = r.project if r else None
+                    label = r.label if r else entry.tmux_name
+                    is_placeholder = r.is_placeholder if r else False
+                    # Session metadata only exists once the placeholder resolved.
+                    sid = r.key if (r and not r.is_placeholder) else None
+                    session = self._find_session_meta(sid, project) if sid else None
                     modal = RunningInfoModal(
                         label=label,
                         tmux_name=entry.tmux_name,
@@ -327,9 +339,9 @@ class App:
         session = self._currently_focused_session_meta()
         running_label = None
         if session is not None:
-            tmux_name = self._claude_tmux_sessions.get(session.session_id)
-            if tmux_name and tmux_ctl.session_exists(tmux_name):
-                running_label = f"detached as '{tmux_name}'"
+            r = self._running.get(session.session_id)
+            if r and tmux_ctl.session_exists(r.tmux_name):
+                running_label = f"detached as '{r.tmux_name}'"
         modal = SessionInfoModal(session=session, running_label=running_label, on_close=self._close_modal)
         self._show_overlay(modal, width=60, height=40)
 
@@ -341,7 +353,7 @@ class App:
         modal = QuitConfirmModal(
             on_confirm=self._confirm_quit,
             on_cancel=self._close_modal,
-            running_count=len(self._claude_tmux_sessions),
+            running_count=len(self._running),
         )
         self._show_overlay(modal, width=50, height=30)
 
@@ -455,9 +467,6 @@ class App:
         if key == "ctrl c":
             self._open_quit_confirm()
             return
-        if key in ("q", "Q"):
-            self._open_quit_confirm()
-            return
         if key in ("tab", "shift tab"):
             self._rotate_focus(reverse=(key == "shift tab"))
             return
@@ -468,32 +477,14 @@ class App:
                 return
             self._enter_filter_mode()
             return
-        if key in ("i", "I"):
-            self._open_info_modal()
-            return
-        if key == "?":
-            self._open_help_modal()
-            return
-        if key in ("c", "C"):
-            self._open_editor_for_active_project()
-            return
-        if key in ("t", "T"):
-            self._open_terminal_for_active_project()
-            return
-        if key in ("d", "D"):
-            self._on_delete_session()
-            return
-        if key in ("r", "R"):
-            self._on_rename_session()
-            return
-        if key in ("f", "F"):
-            self._on_toggle_favorite()
-            return
-        if key in ("n", "N"):
-            self._launch_new_session()
-            return
         if key in ("[", "]"):
             self._resize_divider(key == "]")
+            return
+        # Simple action keys are dispatched from the shared keymap (single
+        # source of truth shared with the hint bar) so the two can't drift.
+        action = keymap.action_for(key)
+        if action is not None:
+            getattr(self, action)()
             return
 
     def _rotate_focus(self, reverse: bool = False) -> None:
@@ -516,12 +507,12 @@ class App:
             except Exception:
                 pass
             self._right_pane_id = None
-        for _, name in list(self._claude_tmux_sessions.items()):
+        for r in list(self._running.values()):
             try:
-                tmux_ctl.kill_session(name)
+                tmux_ctl.kill_session(r.tmux_name)
             except Exception:
                 pass
-        self._claude_tmux_sessions.clear()
+        self._running.clear()
         if self._auto_launched:
             session_name = tmux_ctl.current_session_name()
             if session_name == "ccmgr":
@@ -578,17 +569,14 @@ class App:
         projects = list_projects(self._claude_home)
         self._projects_pane.set_projects(projects)
         # Prune dead claude tmux sessions (e.g. claude exited via /quit).
-        for sid in list(self._claude_tmux_sessions.keys()):
-            if not tmux_ctl.session_exists(self._claude_tmux_sessions[sid]):
-                tmux_name = self._claude_tmux_sessions.pop(sid)
-                self._running_labels.pop(tmux_name, None)
-                self._running_projects.pop(tmux_name, None)
-                self._placeholders.pop(sid, None)
+        for key in list(self._running):
+            if not tmux_ctl.session_exists(self._running[key].tmux_name):
+                del self._running[key]
 
         # Promote any `__new__-N` placeholders to their real session_id +
         # display title once claude has written the jsonl on disk.
         self._resolve_placeholders(projects)
-        running_ids = set(self._claude_tmux_sessions.keys())
+        running_ids = set(self._running)
         if self._selected_project is not None:
             matched = next((p for p in projects if p.encoded_name == self._selected_project.encoded_name), None)
             if matched is not None:
@@ -603,57 +591,55 @@ class App:
 
         # Populate the bottom "Running" pane.
         entries = [
-            RunningEntry(tmux_name=name, label=self._running_labels.get(name, name))
-            for name in self._claude_tmux_sessions.values()
+            RunningEntry(tmux_name=r.tmux_name, label=r.label)
+            for r in self._running.values()
         ]
         self._running_pane.set_running(entries)
 
-        if self._claude_tmux_sessions:
-            n = len(self._claude_tmux_sessions)
+        if self._running:
+            n = len(self._running)
             self._status.set_message(f"● = running ({n}) · Enter on a row re-attaches it · Ctrl-B ← = ccmgr")
 
     def _resolve_placeholders(self, projects: list[Project]) -> None:
-        """Replace any `__new__-N` placeholder key with the real session_id.
+        """Re-key any `__new__-N` placeholder to its real session_id.
 
         For each live placeholder, look at its project's sessions and pick the
         newest one created after the placeholder timestamp whose session_id is
-        not already claimed by another running tmux session. Update both the
-        running-pane label and the _claude_tmux_sessions key.
+        not already claimed by another running session.
         """
-        if not self._placeholders:
+        placeholders = [r for r in self._running.values() if r.is_placeholder]
+        if not placeholders:
             return
         # Index projects by real_path for cheap lookup. New-project flow may
         # create a project dir that didn't exist when ccmgr started, so we
         # rely on `projects` being a fresh list_projects() result.
         by_path = {p.real_path: p for p in projects}
-        claimed = set(self._claude_tmux_sessions.keys())
-        for placeholder, (real_path, created_at) in list(self._placeholders.items()):
-            if placeholder not in self._claude_tmux_sessions:
-                self._placeholders.pop(placeholder, None)
-                continue
-            project = by_path.get(real_path)
+        claimed = set(self._running)
+        for r in placeholders:
+            project = by_path.get(r.placeholder_path)
             if project is None:
                 continue
             sessions = self._session_cache.list_sessions(project)
             # Newest session created since this placeholder was launched, not
-            # already in use by another tmux session.
+            # already in use by another running session.
             candidate: SessionMeta | None = None
             for s in sessions:
                 if s.session_id in claimed:
                     continue
-                if s.last_mtime + 1.0 < created_at:
+                if s.last_mtime + 1.0 < r.created_at:
                     continue
                 if candidate is None or s.last_mtime > candidate.last_mtime:
                     candidate = s
             if candidate is None:
                 continue
-            tmux_name = self._claude_tmux_sessions.pop(placeholder)
-            self._claude_tmux_sessions[candidate.session_id] = tmux_name
-            self._running_labels[tmux_name] = (
-                f"{candidate.project.display_name}/{candidate.display_title}"
-            )
-            self._running_projects[tmux_name] = candidate.project
-            self._placeholders.pop(placeholder, None)
+            # Re-key the entry from the placeholder to the real session_id.
+            del self._running[r.key]
+            r.key = candidate.session_id
+            r.label = f"{candidate.project.display_name}/{candidate.display_title}"
+            r.project = candidate.project
+            r.placeholder_path = None
+            r.created_at = 0.0
+            self._running[candidate.session_id] = r
             claimed.add(candidate.session_id)
 
     def _currently_focused_session_meta(self) -> SessionMeta | None:
@@ -709,27 +695,22 @@ class App:
                 self._status.set_message("No running session selected.")
                 return
             entry = focus_w.entry
-            label = self._running_labels.get(entry.tmux_name, entry.tmux_name)
-            # Find the session_id so we can also delete the JSONL.
-            session_id: str | None = None
-            project: Project | None = None
-            for s_id, tmux_name in self._claude_tmux_sessions.items():
-                if tmux_name == entry.tmux_name:
-                    session_id = s_id
-                    project = self._running_projects.get(tmux_name)
-                    break
-            if session_id and not session_id.startswith("__new__-"):
-                session_meta = self._find_session_meta(session_id, project)
+            r = self._by_tmux(entry.tmux_name)
+            label = r.label if r else entry.tmux_name
+            # Real session_id (and project) only exist once resolved — needed
+            # to also delete the JSONL.
+            session_id = r.key if (r and not r.is_placeholder) else None
+            project = r.project if r else None
+            if session_id:
                 detail = (f"Kill '{label}'?\n\n"
                           "The detached tmux session will be killed.\n"
                           "The session file will be deleted from disk.")
             else:
-                session_meta = None
                 detail = f"Kill '{label}'?\n\nThe detached tmux session will be killed."
             modal = DeleteConfirmModal(
                 title=f"Kill '{label}'?",
                 detail=detail,
-                on_confirm=lambda: self._do_kill_running(entry.tmux_name, session_id, project) if session_id and not session_id.startswith("__new__-") else self._do_kill_running(entry.tmux_name, None, None),
+                on_confirm=lambda: self._do_kill_running(entry.tmux_name, session_id, project),
                 on_cancel=self._close_modal,
             )
             self._show_overlay(modal, width=54, height=30)
@@ -741,13 +722,9 @@ class App:
         """Actually delete a session: remove JSONL + kill detached tmux."""
         self._close_modal()
         # Kill the detached tmux session, if running.
-        tmux_name = self._claude_tmux_sessions.pop(session.session_id, None)
-        if tmux_name is not None:
-            self._running_labels.pop(tmux_name, None)
-            self._running_projects.pop(tmux_name, None)
-            self._placeholders.pop(session.session_id, None)
-            if tmux_ctl.session_exists(tmux_name):
-                tmux_ctl.kill_session(tmux_name)
+        r = self._running.pop(session.session_id, None)
+        if r is not None and tmux_ctl.session_exists(r.tmux_name):
+            tmux_ctl.kill_session(r.tmux_name)
         # Delete the JSONL file.
         try:
             session.jsonl_path.unlink(missing_ok=True)
@@ -762,17 +739,9 @@ class App:
         self._close_modal()
         if tmux_ctl.session_exists(tmux_name):
             tmux_ctl.kill_session(tmux_name)
-        # Remove from tracking.
-        if session_id is not None:
-            self._claude_tmux_sessions.pop(session_id, None)
-            self._placeholders.pop(session_id, None)
-        self._running_labels.pop(tmux_name, None)
-        self._running_projects.pop(tmux_name, None)
-        # Also clean any placeholder that maps to the same tmux_name.
-        for sid in list(self._claude_tmux_sessions.keys()):
-            if self._claude_tmux_sessions.get(sid) == tmux_name:
-                self._claude_tmux_sessions.pop(sid, None)
-                self._placeholders.pop(sid, None)
+        # Remove every registry entry backed by this tmux session.
+        for key in [k for k, r in self._running.items() if r.tmux_name == tmux_name]:
+            del self._running[key]
         # Delete the JSONL if we know the session.
         if session_id is not None and not session_id.startswith("__new__-") and project is not None:
             jsonl_path = project.claude_dir / f"{session_id}.jsonl"

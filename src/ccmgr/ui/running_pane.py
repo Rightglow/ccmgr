@@ -6,6 +6,11 @@ from dataclasses import dataclass
 
 import urwid
 
+from ccmgr.ui._widgets import ClickableRow, remember_focus, restore_focus
+
+
+_FOCUS_REMAP = {None: "focus", "live": "focus"}
+
 
 @dataclass(frozen=True)
 class RunningEntry:
@@ -13,27 +18,12 @@ class RunningEntry:
     label: str      # display label, e.g. "ger-lang/Refactor X" or "claude-chat/(new)"
 
 
-class _RunningRow(urwid.WidgetWrap):
+class _RunningRow(ClickableRow):
     def __init__(self, entry: RunningEntry,
                  on_click: "Callable[[], None] | None" = None) -> None:
         self.entry = entry
-        self._on_click = on_click
-        markup = ["● ", entry.label]
-        self._text = urwid.Text(markup, wrap="clip")
-        focus_remap = {None: "focus", "live": "focus"}
-        super().__init__(urwid.AttrMap(self._text, "live", focus_map=focus_remap))
-
-    def selectable(self) -> bool:
-        return True
-
-    def keypress(self, size, key):
-        return key
-
-    def mouse_event(self, size, event, button, col, row, focus):
-        if event == "mouse press" and button == 1 and self._on_click:
-            self._on_click()
-            return True
-        return super().mouse_event(size, event, button, col, row, focus)
+        text = urwid.Text(["● ", entry.label], wrap="clip")
+        super().__init__(urwid.AttrMap(text, "live", focus_map=_FOCUS_REMAP), on_click)
 
 
 class RunningSessionsPane(urwid.WidgetWrap):
@@ -61,27 +51,15 @@ class RunningSessionsPane(urwid.WidgetWrap):
         self._linebox.set_title(f"Running ({len(entries)})")
         self._restore_focus(prior)
 
+    @staticmethod
+    def _row_key(row: "_RunningRow") -> str:
+        return row.entry.tmux_name
+
     def _remember_focus(self) -> str | None:
-        if not self._walker:
-            return None
-        focus_w, _ = self._walker.get_focus()
-        if isinstance(focus_w, _RunningRow):
-            return focus_w.entry.tmux_name
-        return None
+        return remember_focus(self._walker, _RunningRow, self._row_key)
 
     def _restore_focus(self, tmux_name: str | None) -> None:
-        if not self._walker:
-            return
-        if tmux_name:
-            for i, w in enumerate(self._walker):
-                if isinstance(w, _RunningRow) and w.entry.tmux_name == tmux_name:
-                    self._walker.set_focus(i)
-                    return
-        for i, w in enumerate(self._walker):
-            if isinstance(w, _RunningRow):
-                self._walker.set_focus(i)
-                return
-        self._walker.set_focus(0)
+        restore_focus(self._walker, _RunningRow, tmux_name, self._row_key)
 
     def keypress(self, size, key):
         if key == "enter":

@@ -27,6 +27,7 @@ class SessionMeta:
     message_count: int
     token_total: int
     last_mtime: float
+    size_bytes: int = 0  # JSONL file size, captured at scan time (see session_index)
     # Git branch name recorded in the JSONL (claude writes `gitBranch` on each
     # record). None if the session has no git context. Mirrors the branch
     # column in `claude --resume`.
