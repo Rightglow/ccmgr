@@ -4,6 +4,15 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def isolate_path_cache(tmp_path, monkeypatch):
+    """Redirect discovery's persistent path cache into the test's tmp dir so
+    tests never read or write the real ~/.config/ccmgr/path-cache.json."""
+    import ccmgr.discovery as discovery
+    cache_file = tmp_path / "path-cache.json"
+    monkeypatch.setattr(discovery, "_path_cache_file", lambda: cache_file)
+
+
 @pytest.fixture
 def claude_home(tmp_path: Path) -> Path:
     """A fake ~/.claude/ tree for tests."""

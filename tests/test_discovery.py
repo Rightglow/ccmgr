@@ -45,3 +45,61 @@ def test_list_projects_sorted_by_recency(claude_home, write_session_fixture, tmp
 
     projects = list_projects(claude_home)
     assert [p.real_path for p in projects] == [real_b, real_a]
+
+
+def test_list_projects_skips_missing_dir(claude_home, write_session_fixture, tmp_path):
+    """Projects whose decoded directory no longer exists on disk are not listed."""
+    gone = tmp_path / "deleted_project"  # deliberately never created on disk
+    encoded = str(gone).replace("/", "-")
+    write_session_fixture(encoded, "33333333-3333-3333-3333-333333333333", [
+        {"type": "user", "message": {"role": "user", "content": "x"}},
+    ])
+    assert list_projects(claude_home) == []
+
+
+def test_path_cache_persists_and_is_reused(claude_home, write_session_fixture, tmp_path, monkeypatch):
+    """Second scan resolves via the persistent cache without calling decode()."""
+    import ccmgr.discovery as discovery
+
+    real = tmp_path / "cached_project"
+    real.mkdir()
+    encoded = str(real).replace("/", "-")
+    write_session_fixture(encoded, "44444444-4444-4444-4444-444444444444", [
+        {"type": "user", "message": {"role": "user", "content": "hi"}},
+    ])
+
+    # First scan populates the persistent cache.
+    discovery._cache.clear()
+    assert [p.real_path for p in discovery.list_projects(claude_home)] == [real]
+    assert discovery._load_path_cache().get(encoded) == str(real)
+
+    # Second scan (in-process cache cleared) must NOT call decode — it should
+    # resolve straight from the persistent cache.
+    discovery._cache.clear()
+    monkeypatch.setattr(discovery, "decode", lambda name: (_ for _ in ()).throw(
+        AssertionError("decode() should not be called on a cache hit")))
+    assert [p.real_path for p in discovery.list_projects(claude_home)] == [real]
+
+
+def test_path_cache_prunes_vanished_projects(claude_home, write_session_fixture, tmp_path):
+    """Cache entries for projects whose dir disappeared are pruned on rescan."""
+    import shutil
+    import ccmgr.discovery as discovery
+
+    real = tmp_path / "temp_project"
+    real.mkdir()
+    encoded = str(real).replace("/", "-")
+    proj_entry = write_session_fixture(encoded, "55555555-5555-5555-5555-555555555555", [
+        {"type": "user", "message": {"role": "user", "content": "hi"}},
+    ])
+
+    discovery._cache.clear()
+    discovery.list_projects(claude_home)
+    assert encoded in discovery._load_path_cache()
+
+    # Remove the real project dir AND its .claude/projects entry, then rescan.
+    real.rmdir()
+    shutil.rmtree(proj_entry.parent)
+    discovery._cache.clear()
+    assert discovery.list_projects(claude_home) == []
+    assert encoded not in discovery._load_path_cache()

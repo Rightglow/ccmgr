@@ -12,6 +12,38 @@ import functools
 from pathlib import Path
 
 
+# Per-decode() filesystem memoization. Decoding a single name re-checks the
+# same prefixes hundreds of times (e.g. the backtracker stats '/home' once per
+# candidate segmentation). On a local disk that's cheap, but on an NFS home
+# each stat is a network round-trip, turning one decode into seconds. These
+# module-level dicts dedupe stat/iterdir within a single decode() call; decode()
+# clears them on entry so results never go stale across calls.
+_exists_memo: dict[str, bool] = {}
+_is_dir_memo: dict[str, bool] = {}
+_iterdir_memo: dict[str, list[Path]] = {}
+
+
+def _m_exists(p: Path) -> bool:
+    k = str(p)
+    if k not in _exists_memo:
+        _exists_memo[k] = p.exists()
+    return _exists_memo[k]
+
+
+def _m_is_dir(p: Path) -> bool:
+    k = str(p)
+    if k not in _is_dir_memo:
+        _is_dir_memo[k] = p.is_dir()
+    return _is_dir_memo[k]
+
+
+def _m_iterdir(p: Path) -> list[Path]:
+    k = str(p)
+    if k not in _iterdir_memo:
+        _iterdir_memo[k] = list(p.iterdir())
+    return _iterdir_memo[k]
+
+
 def encode(path: Path) -> str:
     """Encode an absolute filesystem path to Claude's project dir-name form."""
     abs_path = path.resolve()
@@ -23,14 +55,18 @@ def _claude_encode_path(path: str) -> str:
     """Simulate Claude Code's path-to-directory-name encoding.
 
     '/'  -> '-'
+    '.'  -> '-'
+    '_'  -> '-'
     Non-ASCII characters -> '-'
-    ASCII alphanumeric, '.', '_', '-' pass through unchanged.
+    ASCII alphanumeric and '-' pass through unchanged.
+
+    Note: Claude Code collapses '.', '_' and '/' all to '-', so the encoding
+    is lossy for those characters too (not just non-ASCII). Decoding relies on
+    filesystem scanning to recover the originals.
     """
     result = []
     for ch in path:
-        if ch == "/":
-            result.append("-")
-        elif ord(ch) < 128 and (ch.isalnum() or ch in "._-"):
+        if ord(ch) < 128 and (ch.isalnum() or ch == "-"):
             result.append(ch)
         else:
             result.append("-")
@@ -43,7 +79,7 @@ def _verified_depth(segments: list[str]) -> int:
     depth = 0
     for seg in segments:
         p = p / seg
-        if p.exists():
+        if _m_exists(p):
             depth += 1
         else:
             break
@@ -64,7 +100,7 @@ def _scan_recover(encoded: str, best_path: Path) -> Path:
     # Find the deepest prefix that actually exists on disk.
     for split_idx in range(len(parts) - 1, 0, -1):
         prefix = Path(*parts[: split_idx + 1])
-        if not prefix.is_dir():
+        if not _m_is_dir(prefix):
             continue
 
         # Encode the prefix so we can locate where it ends in *encoded*.
@@ -102,14 +138,21 @@ def _resolve_tail(base: Path, tail: str) -> Path | None:
         return base
 
     try:
-        children = sorted(base.iterdir(), key=lambda p: p.name)
+        children = sorted(_m_iterdir(base), key=lambda p: p.name)
     except OSError:
         return None
 
     for child in children:
-        if not child.is_dir():
-            continue
+        # Filter by name first (a free string compare) and only pay for the
+        # is_dir() stat on children that could actually match — this avoids a
+        # stat per entry in large directories, which matters on NFS.
         child_encoded = _claude_encode_path(child.name)
+        if not (tail == child_encoded
+                or tail.startswith("-" + child_encoded)
+                or tail.startswith(child_encoded + "-")):
+            continue
+        if not _m_is_dir(child):
+            continue
 
         # Case 1: "-" + child_encoded  (a single separator dash followed
         #          by the child, the normal case).
@@ -156,6 +199,12 @@ def decode(encoded: str) -> Path:
     if not encoded.startswith("-"):
         raise ValueError(f"encoded name must start with '-': {encoded!r}")
 
+    # Fresh filesystem view for this decode; dedupes the many repeated stats
+    # the backtracker/scanner make on the same prefixes (see memo helpers).
+    _exists_memo.clear()
+    _is_dir_memo.clear()
+    _iterdir_memo.clear()
+
     tokens = encoded[1:].split("-")
     if not tokens or tokens == [""]:
         return Path("/")
@@ -198,13 +247,22 @@ def decode(encoded: str) -> Path:
         # First, lock in the current last segment: check if it exists.
         if segments:
             current_leaf = Path("/" + "/".join(segments))
-            leaf_exists = current_leaf.exists()
-            new_confirmed = confirmed_depth + (1 if leaf_exists else 0)
+            if _m_exists(current_leaf):
+                backtrack(idx + 1, segments + [tok], confirmed_depth + 1)
+            else:
+                # current_leaf doesn't exist, so no path below it can exist
+                # either. Every completion that starts a new segment here shares
+                # the same (frozen) verified depth, so the best-scoring one just
+                # maximizes segment count — split all remaining tokens as
+                # separate segments. Emit that single candidate and skip the
+                # whole 2^(remaining) doomed subtree.
+                consider(segments + tokens[idx:])
         else:
-            new_confirmed = 0
-        backtrack(idx + 1, segments + [tok], new_confirmed)
+            backtrack(idx + 1, [tok], 0)
 
         # Branch B: dash before tok is a literal '-' -> extend the last segment.
+        # Always explored: an extension may exist even when the shorter prefix
+        # does not (e.g. 'foo' absent but 'foo-bar' present).
         if segments:
             extended = segments[:-1] + [segments[-1] + "-" + tok]
             backtrack(idx + 1, extended, confirmed_depth)
@@ -212,7 +270,7 @@ def decode(encoded: str) -> Path:
     backtrack(0, [], 0)
     assert best_path is not None
 
-    if best_path.is_dir() or best_path.exists():
+    if _m_is_dir(best_path) or _m_exists(best_path):
         return best_path
 
     # Non-ASCII recovery: characters like Chinese were replaced by dashes
