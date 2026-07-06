@@ -129,4 +129,16 @@ class ProjectsPane(urwid.WidgetWrap):
             if proj is not None:
                 self._on_select(proj)
                 return None
+        # Consume up/down at pane boundaries — Tab/Shift-Tab is the only way
+        # to switch panes, preventing accidental overscroll into sibling panes.
+        if key == "up" and self._pile.focus_position == 0:
+            return None
+        if key == "down" and self._pile.focus_position == 2 and self._walker:
+            cur = self._walker.focus
+            last = None
+            for i, w in enumerate(self._walker):
+                if isinstance(w, _ProjectRow):
+                    last = i
+            if last is not None and cur == last:
+                return None
         return super().keypress(size, key)

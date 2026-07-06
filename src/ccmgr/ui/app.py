@@ -479,14 +479,6 @@ class App:
     # --- key handling ---
 
     def _on_input(self, key: str) -> None:
-        # Up/down that bubble through unhandled → pane boundary reached.
-        # Move focus to the adjacent pane.
-        if key == "up" and self._sidebar.focus_position > 0:
-            self._sidebar.focus_position = self._sidebar.focus_position - 1
-            return
-        if key == "down" and self._sidebar.focus_position < 2:
-            self._sidebar.focus_position = self._sidebar.focus_position + 1
-            return
         if key == "esc":
             # Esc navigates "up" the pane hierarchy:
             #   Running → Sessions → Projects

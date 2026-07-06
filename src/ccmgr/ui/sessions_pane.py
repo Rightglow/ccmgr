@@ -183,6 +183,7 @@ class SessionsPane(urwid.WidgetWrap):
         restore_focus(self._walker, _SessionRow, session_id, self._row_key)
 
     def keypress(self, size, key):
+        listbox_pos = 2 if self._project is not None else 0
         if key == "enter":
             # "+ New session" row is only present when a project is loaded.
             if self._project is not None and self._pile.focus_position == 0:
@@ -193,4 +194,16 @@ class SessionsPane(urwid.WidgetWrap):
                 if isinstance(focus_w, _SessionRow):
                     self._on_select(focus_w.session)
                     return None
+        # Consume up/down at pane boundaries — Tab/Shift-Tab is the only way
+        # to switch panes, preventing accidental overscroll.
+        if key == "up" and self._pile.focus_position == 0:
+            return None
+        if key == "down" and self._pile.focus_position == listbox_pos and self._walker:
+            cur = self._walker.focus
+            last = None
+            for i, w in enumerate(self._walker):
+                if isinstance(w, _SessionRow):
+                    last = i
+            if last is not None and cur == last:
+                return None
         return super().keypress(size, key)
