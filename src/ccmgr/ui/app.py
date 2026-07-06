@@ -653,7 +653,25 @@ class App:
             return None
         return _scan_session(project, jsonl_path)
 
-    # --- delete session ---
+    # --- kill / delete session ---
+
+    def _on_kill_session(self) -> None:
+        """Kill the running Claude process for the focused session without
+        deleting its JSONL file — the conversation history is preserved."""
+        session = self._currently_focused_session_meta()
+        if session is None:
+            self._status.set_message("No session selected.")
+            return
+        r = self._running.get(session.session_id)
+        if r is None:
+            self._status.set_message(f"'{session.display_title}' is not running.")
+            return
+        if not tmux_ctl.session_exists(r.tmux_name):
+            self._status.set_message(f"tmux session already gone: {r.tmux_name}")
+            return
+        tmux_ctl.kill_session(r.tmux_name)
+        del self._running[session.session_id]
+        self._status.set_message(f"Killed: {session.display_title}  (file kept)")
 
     def _on_delete_session(self) -> None:
         """Delete the focused session from the current pane (with confirmation)."""

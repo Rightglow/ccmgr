@@ -88,14 +88,25 @@ Press `f` to pin a session to the top of the list. Favorites persist across rest
 
 `ccmgr` reads `~/.claude/projects/*` (Claude's per-project session history) and lists everything. Pressing `Enter` on a session does two things: (1) if a detached tmux session named `cc-<short_id>` running `claude --resume <id>` doesn't already exist, ccmgr creates one with `tmux new-session -d`; (2) ccmgr's right pane runs `tmux attach -t cc-<short_id>` so you see and interact with that claude. Switching sessions just respawns the right pane to attach to a different background tmux session — the detached claudes keep running with all their state intact.
 
-## Roadmap
-
-Planned for future releases:
-
-- Cross-session search across projects
-- Cost and token-usage dashboard
-
 Issues and pull requests welcome.
+
+## SSH / remote use
+
+ccmgr works over SSH and benefits from a few tweaks for responsiveness and scrollback:
+
+**Server** (`~/.tmux.conf` on the remote machine):
+
+```tmux
+set -sg escape-time 0         # eliminate delay after Escape key
+set -g  history-limit 10000   # generous scrollback per pane
+```
+
+**Client** (`~/.ssh/config` on your local machine):
+
+```
+Host your-server
+    Compression yes           # smoother tmux pane scrolling over SSH
+```
 
 ## Configuration
 

@@ -103,6 +103,7 @@ class HelpModal(urwid.WidgetWrap):
             ("[ / ]", "Resize divider: shrink / expand ccmgr sidebar"),
             ("r", "Rename the focused session"),
             ("f", "Toggle favorite (pin to top of session list)"),
+            ("k", "Kill the running Claude process (keeps session file)"),
             ("d", "Delete the focused session (prompts for confirmation)"),
             ("?", "This help"),
             ("q or Ctrl-C", "Quit ccmgr (prompts for confirmation, kills all sessions)"),

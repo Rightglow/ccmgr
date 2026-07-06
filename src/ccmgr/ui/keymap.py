@@ -34,6 +34,7 @@ BINDINGS: list[Binding] = [
     Binding(("r", "R"), "r", "rename", "_on_rename_session"),
     Binding(("f", "F"), "f", "fav", "_on_toggle_favorite"),
     Binding(("d", "D"), "d", "del", "_on_delete_session"),
+    Binding(("k", "K"), "k", "kill", "_on_kill_session"),
     Binding(("?",), "?", "help", "_open_help_modal"),
     Binding(("q", "Q"), "q", "quit", "_open_quit_confirm"),
 ]
