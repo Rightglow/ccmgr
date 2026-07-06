@@ -558,14 +558,6 @@ class App:
     # --- periodic refresh ---
 
     def _refresh(self) -> None:
-        # Re-apply pane border styles — they can be lost after terminal pane
-        # splits open/close, causing visual artifacts (miscolored borders).
-        if tmux_ctl.in_tmux() and tmux_ctl.current_pane_id():
-            tmux_ctl.set_window_option("pane-border-style", "fg=colour240")
-            tmux_ctl.set_window_option("pane-active-border-style", "fg=cyan,bold")
-            # Kill dead panes left by exited terminal splits.
-            tmux_ctl._kill_dead_panes()
-
         projects = list_projects(self._claude_home)
         self._projects_pane.set_projects(projects)
         # Prune dead claude tmux sessions (e.g. claude exited via /quit).

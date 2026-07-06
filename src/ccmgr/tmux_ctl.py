@@ -289,33 +289,3 @@ def kill_window(window_id: str) -> bool:
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
-
-
-def _kill_dead_panes() -> None:
-    """Kill panes marked 'dead' in the current window (e.g. terminal exited).
-
-    Dead panes show 'Pane is dead' as their title.  Removing them keeps the
-    tmux layout clean and prevents border-color artifacts.
-    """
-    if not in_tmux():
-        return
-    try:
-        out = subprocess.check_output(
-            ["tmux", "list-panes", "-F", "#{pane_id} #{pane_dead}"],
-            stderr=subprocess.DEVNULL,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return
-    for line in out.decode().strip().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split(None, 1)
-        if len(parts) == 2 and parts[1] == "1":
-            try:
-                subprocess.check_call(
-                    ["tmux", "kill-pane", "-t", parts[0]],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-            except (subprocess.CalledProcessError, FileNotFoundError):
-                pass
