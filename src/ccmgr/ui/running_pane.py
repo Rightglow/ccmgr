@@ -69,4 +69,17 @@ class RunningSessionsPane(urwid.WidgetWrap):
             if isinstance(focus_w, _RunningRow):
                 self._on_select(focus_w.entry)
                 return None
+        # Consume up/down at pane boundaries — Tab/Shift-Tab is the only way
+        # to switch panes, preventing accidental overscroll into sibling panes.
+        if self._walker:
+            if key == "up" and self._walker.focus == 0:
+                return None
+            if key == "down":
+                cur = self._walker.focus
+                last = None
+                for i, w in enumerate(self._walker):
+                    if isinstance(w, _RunningRow):
+                        last = i
+                if last is not None and cur == last:
+                    return None
         return super().keypress(size, key)

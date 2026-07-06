@@ -963,6 +963,30 @@ class App:
                 ["tmux", "set-option", "-t", sess, "set-clipboard", "on"],
                 stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
             )
+            # WSL-specific (harmless elsewhere): explicitly disable mouse on
+            # the outer ccmgr session.  tmux's built-in MouseDown3Pane binding
+            # in the root table fires `display-menu` when mouse_any_flag=0
+            # (i.e. `mouse off`).  Under WSL/Windows Terminal the terminal
+            # emulator may forward mouse events that tmux hasn't requested,
+            # so right-clicks reach this binding and briefly flash tmux's
+            # context menu before urwid repaints.  macOS/Linux terminals
+            # don't exhibit this — they respect tmux's `mouse off` and never
+            # send mouse escape sequences.  (If this block is ever removed,
+            # verify right-click on WSL still works.)
+            _sp.run(
+                ["tmux", "set-option", "-t", sess, "mouse", "off"],
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+            )
+        # WSL-specific (harmless elsewhere): belt-and-suspenders reset of
+        # terminal-level mouse reporting modes.  The escape sequences disable
+        # X10 / button-event / any-event / SGR extended mouse tracking at the
+        # terminal emulator layer.  Needed because Windows Terminal may retain
+        # stale mouse-reporting state from a previous application that survives
+        # tmux's own `mouse off`.  On macOS/Linux this is a no-op since the
+        # terminal is already in the correct state.
+        import sys as _sys
+        _sys.stdout.write("\033[?1000l\033[?1002l\033[?1003l\033[?1006l")
+        _sys.stdout.flush()
 
         self._loop = urwid.MainLoop(self._frame, palette=PALETTE, unhandled_input=self._on_input)
         try:
