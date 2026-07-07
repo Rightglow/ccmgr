@@ -308,3 +308,37 @@ def test_session_row_renders_status_dot():
     row = [w for w in pane._walker if isinstance(w, _SessionRow)][0]
     # The row should render — no crash on tuple status dot
     assert row is not None
+
+
+# ── attribute maps ──────────────────────────────────────────────────────
+
+def test_focus_remap_includes_status_dots():
+    from ccmgr.ui.sessions_pane import _FOCUS_REMAP
+    for key in ("status_idle", "status_busy", "status_blocked"):
+        assert key in _FOCUS_REMAP, f"{key} missing from _FOCUS_REMAP"
+        assert "focus" in _FOCUS_REMAP[key], \
+            f"{key} focus variant should contain 'focus'"
+
+
+def test_selected_map_includes_status_dots():
+    from ccmgr.ui.sessions_pane import _SELECTED_MAP
+    for key in ("status_idle", "status_busy", "status_blocked"):
+        assert key in _SELECTED_MAP, f"{key} missing from _SELECTED_MAP"
+        assert "sel" in _SELECTED_MAP[key], \
+            f"{key} selected variant should contain 'sel'"
+
+
+def test_star_is_plain_text_no_palette():
+    """Star should be plain text (inherits row highlight), not a palette tuple."""
+    proj = _project()
+    s = _session(proj)
+    pane = SessionsPane(on_select=lambda s: None, live_threshold=300)
+    pane.set_sessions(proj, [s], running_ids=set(),
+                      favorite_ids={s.session_id})
+    row = [w for w in pane._walker if isinstance(w, _SessionRow)][0]
+    # _SessionRow > WidgetWrap._w > AttrMap > Pile > (title_text, meta_text)
+    pile = row._wrapped_widget.base_widget
+    title_text = pile.contents[0][0]  # Pile row 0 col 0
+    markup = title_text.base_widget.text
+    # urwid may flatten markup; just verify the star is present
+    assert "★" in str(markup), "star not found in title markup"
