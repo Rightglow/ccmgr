@@ -43,6 +43,7 @@ If you're not already inside a tmux session, ccmgr will launch one automatically
 | `k` | Kill the running Claude process (keeps session file) |
 | `d` | Delete the focused session (prompts for confirmation) |
 | `t` | Open a terminal in the active project directory |
+| `F3` | Fullscreen the Claude pane (toggle) for clean text selection |
 | `?` | Full help popup with all keybindings |
 | `q` or `Ctrl-C` | Quit with confirmation |
 

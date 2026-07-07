@@ -124,6 +124,12 @@ class HelpModal(urwid.WidgetWrap):
             ("Double-click", "Open session and move focus to it"),
             ("Right-click", "Context menu for the session"),
         ]),
+        ("Copy text from Claude", [
+            ("Drag-select",
+             "OSC 52 terminals: copies to local clipboard directly"),
+            ("F3",
+             "Fullscreen Claude (toggle) → drag + Cmd/C to copy → F3"),
+        ]),
         ("tmux", [
             ("Ctrl-B → / ←", "Move focus between ccmgr and Claude panes"),
             ("Ctrl-B d", "Detach from ccmgr (keep sessions alive)"),
