@@ -122,6 +122,7 @@ class HelpModal(urwid.WidgetWrap):
             ("Left click", "Select / preview (non-running) / attach (running)"),
             ("Double-click", "Open session and move focus to it"),
             ("Right-click", "Context menu for the session"),
+            ("Shift + drag", "Select text to copy (bypasses app, uses terminal)"),
         ]),
         ("tmux", [
             ("Ctrl-B → / ←", "Move focus between ccmgr and Claude panes"),
