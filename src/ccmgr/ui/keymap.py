@@ -41,6 +41,9 @@ BINDINGS: list[Binding] = [
 _TRAILING: list[Binding] = [
     Binding(("?",), "?", "help", "_open_help_modal"),
     Binding(("q", "Q"), "q", "quit", "_open_quit_confirm"),
+    # Display-only (handled by a tmux root binding, not ccmgr): F3 fullscreens
+    # the Claude pane for clean text selection; C-b d detaches.
+    Binding((), "F3", "fullscreen"),
     Binding((), "C-b d", "detach"),
 ]
 

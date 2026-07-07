@@ -7,10 +7,10 @@ from dataclasses import dataclass
 import urwid
 
 from ccmgr.ui._widgets import ClickableRow, remember_focus, restore_focus
-from ccmgr.ui.sessions_pane import _STATUS_DOTS
-
-
-_FOCUS_REMAP = {None: "focus", "live": "focus"}
+# Reuse the status-dot glyphs and the focus/selected attribute maps so the
+# coloured ● blends into highlighted rows the same way it does in the Sessions
+# pane (extra keys like "dim"/"live_tag" are harmless here).
+from ccmgr.ui.sessions_pane import _STATUS_DOTS, _FOCUS_REMAP, _SELECTED_MAP
 
 
 @dataclass(frozen=True)
@@ -29,7 +29,10 @@ class _RunningRow(ClickableRow):
         self.entry = entry
         dot = _STATUS_DOTS.get(entry.status, ("dim", "○"))
         text = urwid.Text([dot, " ", entry.label], wrap="clip")
-        row_attr = "selected" if is_selected else "live"
+        # Use the dict map when selected so the coloured dot picks up the
+        # selected background (a bare "selected" string would leave the dot's
+        # own attribute — and thus its background — untouched).
+        row_attr = _SELECTED_MAP if is_selected else "live"
         super().__init__(urwid.AttrMap(text, row_attr, focus_map=_FOCUS_REMAP),
                          on_click, on_double_click, on_right_click)
 

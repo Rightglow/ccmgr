@@ -46,7 +46,13 @@ _SELECTED_MAP = {None: "selected", "dim": "selected",
                  "status_idle": "status_idle_sel",
                  "status_busy": "status_busy_sel",
                  "status_blocked": "status_blocked_sel"}
-_FOCUS_REMAP = {None: "focus", "live": "focus", "dim": "focus", "live_tag": "focus"}
+# Focus highlight (brown bg). Status dots need their own remap so the coloured
+# ● inherits the focus background instead of leaving a black gap; everything
+# else (title, star, meta) collapses to the plain "focus" attribute.
+_FOCUS_REMAP = {None: "focus", "live": "focus", "dim": "focus", "live_tag": "focus",
+                "status_idle": "status_idle_focus",
+                "status_busy": "status_busy_focus",
+                "status_blocked": "status_blocked_focus"}
 
 
 class _SessionRow(ClickableRow):
@@ -60,13 +66,17 @@ class _SessionRow(ClickableRow):
         is_active = is_live(session, live_threshold)
 
         # Two-line layout:
-        #   [⭐] [🟢] Title  [LIVE]
+        #   [●] [★] Title  [LIVE]
         #   <relative time> · <branch> · <size>
+        # Status dot stays in a fixed leftmost column so the status column
+        # aligns across rows; the star sits next to the title it marks.
         title_markup: list = []
-        if is_favorite:
-            title_markup.append(("star", "★ "))
         title_markup.append(_STATUS_DOTS.get(session.status, ("dim", "○")))
         title_markup.append("  ")
+        if is_favorite:
+            # Plain text (no colour) so the star simply inherits the row's
+            # highlight background instead of leaving an un-highlighted gap.
+            title_markup.append("★ ")
         title_markup.append(session.display_title)
         if is_active:
             title_markup.append(("live_tag", " [LIVE]"))

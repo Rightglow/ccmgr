@@ -91,6 +91,25 @@ Host your-server
     Compression yes           # smoother tmux pane scrolling over SSH
 ```
 
+## Copying text from the Claude pane
+
+Selecting text is awkward under tmux: the sidebar and Claude share the screen,
+and over SSH your clipboard lives on the *local* machine.
+
+- **Terminals with OSC 52** (iTerm2, kitty, WezTerm, Alacritty, foot, Windows
+  Terminal): just left-drag to select in the Claude pane — it copies to your
+  local clipboard automatically, even over SSH. (iTerm2: enable *Settings →
+  General → Selection → "Applications in terminal may access clipboard"*.)
+- **Terminal.app and others without OSC 52**: press **F3** to fullscreen the
+  Claude pane, Shift-drag to select, `Cmd/Ctrl+C` to copy, then **F3** again to
+  return. Fullscreening hides the sidebar so the native selection grabs only
+  Claude's text.
+
+On a default Mac, F3 is Mission Control — enable *System Settings → Keyboard →
+"Use F1, F2, etc. keys as standard function keys"*, or press **Fn+F3**.
+`Ctrl-B z` also toggles fullscreen (built into tmux) but zooms whichever pane
+has focus, so it may fullscreen the sidebar instead.
+
 ## Configuration
 
 Optional config at `~/.config/ccmgr/config.toml`:

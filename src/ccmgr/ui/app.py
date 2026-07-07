@@ -51,14 +51,21 @@ PALETTE = [
     ("dim", "dark gray", ""),
     ("live", "light green,bold", ""),
     ("live_tag", "yellow,bold", ""),
-    # Status dots (replaces emoji with compact ● in palette colours).
-    ("star", "yellow,bold", ""),
+    # Status dots — the ● glyph carries its own palette attribute so it keeps
+    # its colour on any row background. Each status has three background
+    # variants so it blends into normal / focused (brown) / selected (cyan)
+    # rows; the highlight variants use brighter foregrounds to stay readable
+    # on those backgrounds. (The star is plain text — no colour — so it just
+    # inherits whatever the row's highlight is.)
     ("status_idle", "dark green,bold", ""),
-    ("status_idle_sel", "dark green,bold", "dark cyan"),
+    ("status_idle_focus", "light green,bold", "brown"),
+    ("status_idle_sel", "light green,bold", "dark cyan"),
     ("status_busy", "yellow,bold", ""),
+    ("status_busy_focus", "yellow,bold", "brown"),
     ("status_busy_sel", "yellow,bold", "dark cyan"),
     ("status_blocked", "dark red,bold", ""),
-    ("status_blocked_sel", "dark red,bold", "dark cyan"),
+    ("status_blocked_focus", "light red,bold", "brown"),
+    ("status_blocked_sel", "light red,bold", "dark cyan"),
     # Pane border. Dim by default; bright cyan + bold when the pane is focused
     # so it's obvious which pane Tab/Shift-Tab landed on.
     ("pane", "dark gray", ""),
@@ -292,6 +299,7 @@ class App:
             tmux_ctl.set_window_option("pane-active-border-style", "fg=cyan,bold")
         # Right pane is now showing a transcript, not a Claude session.
         self._right_pane_claude = None
+        self._install_fullscreen_binding()
         return True
 
     def _restore_from_history_mode(self) -> None:
@@ -382,7 +390,26 @@ class App:
             tmux_ctl.select_pane(self._right_pane_id)
         if ok:
             self._right_pane_claude = claude_tmux_name
+            self._install_fullscreen_binding()
         return ok
+
+    def _install_fullscreen_binding(self) -> None:
+        """(Re)bind F3 to fullscreen-toggle the *claude* (right) pane.
+
+        Unlike tmux's built-in ``Ctrl-B z`` — which zooms whichever pane is
+        active and can therefore fullscreen the ccmgr sidebar by mistake — this
+        targets the right pane's current id explicitly, so F3 always zooms
+        Claude regardless of focus. Rebound whenever the right pane is
+        (re)created because its id changes. Copy workflow: F3 → Shift-drag to
+        select → Cmd/Ctrl+C → F3 to exit.
+        """
+        if not self._right_pane_id:
+            return
+        import subprocess as _sp
+        _sp.run(
+            ["tmux", "bind-key", "-n", "F3", "resize-pane", "-Z", "-t", self._right_pane_id],
+            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+        )
 
     def _by_tmux(self, tmux_name: str) -> "_Running | None":
         """Find the running session backed by a given tmux session name."""
@@ -691,6 +718,13 @@ class App:
 
     def _teardown_tmux(self) -> None:
         """Clean up on quit: kill right pane, every detached claude session, and our own session if we own it."""
+        # Remove the F3 fullscreen binding we installed (it's server-global).
+        try:
+            import subprocess as _sp
+            _sp.run(["tmux", "unbind-key", "-n", "F3"],
+                    stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        except Exception:
+            pass
         if self._right_pane_id:
             try:
                 tmux_ctl.kill_pane(self._right_pane_id)
@@ -1271,6 +1305,10 @@ class App:
                 ["tmux", "set-option", "-t", sess, "set-clipboard", "on"],
                 stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
             )
+            # Force OSC 52 passthrough so a left-drag selection in either pane
+            # copies to the *local* system clipboard (works over SSH / nested
+            # tmux on OSC-52-capable terminals). Pairs with set-clipboard on.
+            tmux_ctl.enable_clipboard_passthrough()
             _sp.run(
                 ["tmux", "set-option", "-t", sess, "mouse", "on"],
                 stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,

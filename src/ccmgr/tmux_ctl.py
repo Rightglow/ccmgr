@@ -30,6 +30,38 @@ def tmux_version() -> tuple[int, int]:
     return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
 
 
+def enable_clipboard_passthrough() -> None:
+    """Force-enable OSC 52 clipboard passthrough so selected text reaches the
+    user's *local* system clipboard.
+
+    ccmgr runs a nested tmux (the ccmgr session's right pane attaches the
+    claude session), and over SSH the only channel that can reach the real
+    terminal's clipboard is the OSC 52 escape sequence. ``set-clipboard on``
+    turns that on, but tmux only emits OSC 52 when the terminal's terminfo
+    advertises the ``Ms`` capability — many capable terminals (iTerm2, kitty,
+    WezTerm, Alacritty, foot, Windows Terminal, …) don't advertise it. This
+    force-declares ``Ms`` globally so the drag-select → copy path works
+    regardless of terminfo. Idempotent (only appends the override once).
+    """
+    try:
+        cur = subprocess.check_output(
+            ["tmux", "show-options", "-gv", "terminal-overrides"],
+            stderr=subprocess.DEVNULL,
+        ).decode()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        cur = ""
+    if "Ms=" in cur:
+        return
+    try:
+        subprocess.check_call(
+            ["tmux", "set-option", "-ga", "terminal-overrides",
+             r",*:Ms=\E]52;%p1%s;%p2%s\007"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+
 def in_tmux() -> bool:
     """True if the current process is running inside tmux."""
     return os.environ.get("TMUX") is not None
