@@ -126,6 +126,10 @@ class HelpModal(urwid.WidgetWrap):
         ("tmux", [
             ("Ctrl-B → / ←", "Move focus between ccmgr and Claude panes"),
             ("Ctrl-B d", "Detach from ccmgr (keep sessions alive)"),
+            ("Ctrl-B [", "Enter copy-mode to select text (left pane)"),
+            ("Drag (no Shift, right pane)", "Select text — copies to tmux buffer"),
+            ("  macOS: needs reattach-to-user-namespace for Cmd+C"),
+            ("  WSL: copy-mode via keyboard only (Ctrl-B [ then arrows)"),
         ]),
         ("", [
             ("Each session runs in its own detached tmux session.",
