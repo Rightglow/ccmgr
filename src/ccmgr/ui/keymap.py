@@ -36,14 +36,13 @@ BINDINGS: list[Binding] = [
     Binding(("d", "D"), "d", "del", "_on_delete_session"),
     # Utility keys (lower priority, before help).
     Binding(("t", "T"), "t", "term", "_open_terminal_for_active_project"),
+    # Display-only: handled by a tmux root binding, not ccmgr.
+    Binding((), "F3", "fullscreen"),
 ]
 
 _TRAILING: list[Binding] = [
     Binding(("?",), "?", "help", "_open_help_modal"),
     Binding(("q", "Q"), "q", "quit", "_open_quit_confirm"),
-    # Display-only (handled by a tmux root binding, not ccmgr): F3 fullscreens
-    # the Claude pane for clean text selection; C-b d detaches.
-    Binding((), "F3", "fullscreen"),
     Binding((), "C-b d", "detach"),
 ]
 

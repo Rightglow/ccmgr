@@ -116,14 +116,13 @@ class HelpModal(urwid.WidgetWrap):
             ("k", "Kill the running Claude process (keeps session file)"),
             ("d", "Delete the focused session (prompts for confirmation)"),
             ("t", "Open a terminal in the active project"),
+            ("F3", "Fullscreen the Claude pane (toggle) for clean text copy"),
             ("q or Ctrl-C", "Quit ccmgr (prompts for confirmation)"),
         ]),
         ("Mouse", [
             ("Left click", "Select / preview (non-running) / attach (running)"),
             ("Double-click", "Open session and move focus to it"),
             ("Right-click", "Context menu for the session"),
-            ("F3", "Fullscreen the Claude pane (toggle) — then Shift-drag +"),
-            ("", "Cmd/Ctrl+C to copy cleanly; F3 again to return"),
         ]),
         ("tmux", [
             ("Ctrl-B → / ←", "Move focus between ccmgr and Claude panes"),
