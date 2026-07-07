@@ -23,6 +23,7 @@ from ccmgr.models import Project, SessionMeta
 from ccmgr.session_cache import SessionCache
 from ccmgr.ui import keymap
 from ccmgr.ui.modals import (
+    ContextMenu,
     DeleteConfirmModal,
     HelpModal,
     PathBrowserModal,
@@ -50,10 +51,20 @@ PALETTE = [
     ("dim", "dark gray", ""),
     ("live", "light green,bold", ""),
     ("live_tag", "yellow,bold", ""),
+    # Status dots (replaces emoji with compact ● in palette colours).
+    ("star", "yellow,bold", ""),
+    ("status_idle", "dark green,bold", ""),
+    ("status_idle_sel", "dark green,bold", "dark cyan"),
+    ("status_busy", "yellow,bold", ""),
+    ("status_busy_sel", "yellow,bold", "dark cyan"),
+    ("status_blocked", "dark red,bold", ""),
+    ("status_blocked_sel", "dark red,bold", "dark cyan"),
     # Pane border. Dim by default; bright cyan + bold when the pane is focused
     # so it's obvious which pane Tab/Shift-Tab landed on.
     ("pane", "dark gray", ""),
     ("pane_focus", "light cyan,bold", ""),
+    # Help-hint buttons in the trailing bar.
+    ("help_btn", "light gray", "dark gray"),
 ]
 
 
@@ -72,10 +83,38 @@ class _Running:
     project: Project | None = None
     placeholder_path: Path | None = None  # cwd to resolve against, while a placeholder
     created_at: float = 0.0                # launch time, for placeholder resolution
+    status: str = "idle"                   # "idle" | "busy" | "blocked"
 
     @property
     def is_placeholder(self) -> bool:
         return self.key.startswith("__new__-")
+
+
+class _CloseOnClickOverlay(urwid.Overlay):
+    """An ``urwid.Overlay`` that calls *on_click_outside* when the user
+    left-clicks anywhere outside the overlay's area."""
+
+    def __init__(self, top_w: urwid.Widget, bottom_w: urwid.Widget,
+                 align, width, valign, height,
+                 on_click_outside: Callable[[], None]) -> None:
+        self._on_click_outside = on_click_outside
+        super().__init__(top_w, bottom_w, align, width, valign, height)
+
+    def mouse_event(self, size, event, button, col, row, focus):
+        # Let Overlay dispatch first.  A click inside the overlay area
+        # goes to the top widget and returns True if handled.
+        handled = super().mouse_event(size, event, button, col, row, focus)
+        if not handled and event == "mouse press" and button == 1:
+            self._on_click_outside()
+            return True
+        return handled
+
+
+@dataclass
+class _RightPaneState:
+    """What to restore when exiting history-preview mode."""
+    kind: str  # "empty" | "claude"
+    tmux_name: str | None = None  # for "claude"
 
 
 class App:
@@ -97,14 +136,35 @@ class App:
         self._last_screen_size: tuple[int, int] | None = None
         self._help_right_was_open: bool = False
         self._help_saved_width: str = ""
+        # History-preview mode: when the right pane shows a session transcript
+        # (less) instead of a Claude session.  We remember what was there before
+        # so we can restore it when the user exits less.
+        self._in_history_mode: bool = False
+        self._restore_state: _RightPaneState | None = None
+        self._right_pane_claude: str | None = None  # tmux_name of claude session in right pane
+        self._ccmgr_pane_id: str | None = None  # set in run()
+        self._has_less: bool = shutil.which("less") is not None
 
         projects = list_projects(claude_home)
         self._projects_pane = ProjectsPane(projects, on_select=self._on_project_select)
         self._sessions_pane = SessionsPane(
             on_select=self._on_session_select,
             live_threshold=float(config.live_badge_seconds),
+            on_preview=self._on_session_preview,
+            on_context=self._open_session_context_menu,
         )
-        self._running_pane = RunningSessionsPane(on_select=self._on_running_select)
+        self._running_pane = RunningSessionsPane(
+            on_select=self._on_running_select,
+            on_context=self._on_running_context_menu,
+        )
+        # Warn early if dependencies are missing so the user doesn't
+        # discover it by getting a cryptic error in the right pane.
+        if not tmux_ctl.has_tmux():
+            self._status.set_message(
+                "ERROR: tmux not found on PATH — ccmgr cannot run without tmux")
+        elif not shutil.which(self._config.claude_binary):
+            self._status.set_message(
+                f"WARNING: '{self._config.claude_binary}' not on PATH — sessions cannot launch")
 
         # Wrap each pane in AttrMap so its LineBox border highlights when
         # focused. The `pane`/`pane_focus` palette entries color only cells
@@ -115,7 +175,11 @@ class App:
             ("weight", 3, urwid.AttrMap(self._sessions_pane, "pane", focus_map="pane_focus")),
             ("weight", 1, urwid.AttrMap(self._running_pane, "pane", focus_map="pane_focus")),
         ])
-        self._help_bar = HelpBar()
+        self._help_bar = HelpBar(
+            on_help=self._open_help_modal,
+            on_quit=self._open_quit_confirm,
+            on_detach=self._on_detach,
+        )
         footer = urwid.Pile([
             ("pack", self._help_bar),
             ("pack", self._status),
@@ -143,17 +207,25 @@ class App:
         if self._loop is not None:
             self._sidebar.focus_position = 1
 
-    def _on_session_select(self, session: SessionMeta | None) -> None:
+    def _on_session_select(self, session: SessionMeta | None,
+                            steal_focus: bool = True) -> None:
+        # Opening a real session (or creating a new one) — clear any
+        # history-preview state so the launch takes over the right pane.
+        self._in_history_mode = False
+        self._restore_state = None
         if session is None:
             self._launch_new_session()
             return
-        self._launch_resume(session)
+        self._launch_resume(session, steal_focus=steal_focus)
 
-    def _on_running_select(self, entry: RunningEntry) -> None:
+    def _on_running_select(self, entry: RunningEntry,
+                            steal_focus: bool = True) -> None:
         # Re-attach the right pane to this already-running claude session AND
         # sync the Projects/Sessions panes to that session's project, so the
         # sidebar reflects what's actually showing on the right.
-        ok = self._attach_in_right_pane(entry.tmux_name)
+        self._in_history_mode = False
+        self._restore_state = None
+        ok = self._attach_in_right_pane(entry.tmux_name, steal_focus=steal_focus)
         if not ok:
             self._status.set_message("failed to re-attach")
             return
@@ -174,6 +246,79 @@ class App:
             )
         self._status.set_message(f"→ {entry.label}")
 
+    # --- history preview (right pane shows transcript via less, not a Claude session) ---
+
+    def _on_session_preview(self, session: SessionMeta) -> None:
+        """Show session history in the right pane without launching Claude.
+
+        Called by ``ClickableRow`` after the double-click window has
+        passed, so this only fires on a genuine single-click.
+        """
+        if not self._has_less:
+            self._status.set_message("'less' not installed — cannot preview history")
+            return
+        if not self._in_history_mode:
+            self._save_restore_state()
+        if self._show_transcript(session.jsonl_path):
+            self._in_history_mode = True
+
+    def _save_restore_state(self) -> None:
+        """Remember what's in the right pane before taking it over for history."""
+        if self._right_pane_id and tmux_ctl.pane_alive(self._right_pane_id):
+            if self._right_pane_claude and tmux_ctl.session_exists(self._right_pane_claude):
+                self._restore_state = _RightPaneState("claude", tmux_name=self._right_pane_claude)
+                return
+        self._restore_state = _RightPaneState("empty")
+
+    def _show_transcript(self, jsonl_path: Path) -> bool:
+        """Create or respawn the right pane with a ``less -R`` transcript viewer.
+
+        Returns True on success.
+        """
+        import shlex
+        import sys as _sys
+        cmd = f"{_sys.executable} -m ccmgr.transcript {shlex.quote(str(jsonl_path))} | less -R +G"
+        if self._right_pane_id and tmux_ctl.pane_alive(self._right_pane_id):
+            if not tmux_ctl.respawn_pane(self._right_pane_id, cmd):
+                self._status.set_message("failed to respawn right pane for transcript")
+                return False
+        else:
+            new_id = tmux_ctl.split_window_h(cmd, size_percent=70)
+            if not new_id:
+                self._status.set_message("failed to create right pane for transcript")
+                return False
+            self._right_pane_id = new_id
+            tmux_ctl.set_window_option("pane-border-style", "fg=colour240")
+            tmux_ctl.set_window_option("pane-active-border-style", "fg=cyan,bold")
+        # Right pane is now showing a transcript, not a Claude session.
+        self._right_pane_claude = None
+        return True
+
+    def _restore_from_history_mode(self) -> None:
+        """Restore whatever was in the right pane before we entered history mode."""
+        restore = self._restore_state
+        self._restore_state = None
+        if restore is None or restore.kind == "empty":
+            return
+        if restore.kind == "claude" and restore.tmux_name:
+            if tmux_ctl.session_exists(restore.tmux_name):
+                self._attach_in_right_pane(restore.tmux_name)
+                # Sync the sidebar to the restored session's project so the
+                # user doesn't see a stale project after less exits.
+                r = self._by_tmux(restore.tmux_name)
+                if r is not None and r.project is not None:
+                    proj = r.project
+                    if (self._selected_project is None
+                            or self._selected_project.encoded_name != proj.encoded_name):
+                        self._selected_project = proj
+                        self._projects_pane.set_selected(proj.encoded_name)
+                        sess = self._session_cache.list_sessions(proj)
+                        self._sessions_pane.set_sessions(
+                            proj, sess,
+                            running_ids=set(self._running),
+                            favorite_ids=self._favorites.get_ids(),
+                        )
+
     # --- tmux integration (detached session per claude + attach in right pane) ---
 
     @staticmethod
@@ -191,17 +336,32 @@ class App:
             return True
         return tmux_ctl.new_detached_session(name, shell_cmd)
 
-    def _attach_in_right_pane(self, claude_tmux_name: str) -> bool:
+    def _attach_in_right_pane(self, claude_tmux_name: str, *,
+                               steal_focus: bool = True) -> bool:
         """Make the right pane display the named claude tmux session.
 
         Either creates the right-pane split (first time) or respawns the existing
         right pane to attach to the new claude session. Either way the previous
         claude tmux session stays alive, detached.
 
-        TMUX= prefix clears the env var so the nested `tmux attach` works; tmux
+        When *steal_focus* is False the right pane content is updated but tmux
+        focus stays on the ccmgr pane so the user can keep browsing the sidebar.
+
+        TMUX= prefix clears the env var so the nested ``tmux attach`` works; tmux
         otherwise refuses to attach from within another tmux session.
         """
         import shlex
+        # Fast path: the right pane is already showing this session.  Skip the
+        # expensive respawn and just optionally move focus.  This also prevents
+        # focus flicker on double-click (the first click's respawn kills and
+        # restarts tmux attach, which briefly shifts focus).
+        if (self._right_pane_id is not None
+                and self._right_pane_claude == claude_tmux_name
+                and tmux_ctl.pane_alive(self._right_pane_id)):
+            if steal_focus:
+                tmux_ctl.select_pane(self._right_pane_id)
+            return True
+
         attach_cmd = f"TMUX= exec tmux attach-session -t {shlex.quote(claude_tmux_name)}"
         if self._right_pane_id and tmux_ctl.pane_alive(self._right_pane_id):
             ok = tmux_ctl.respawn_pane(self._right_pane_id, attach_cmd)
@@ -218,8 +378,10 @@ class App:
             tmux_ctl.set_window_option("pane-border-style", "fg=colour240")
             tmux_ctl.set_window_option("pane-active-border-style", "fg=cyan,bold")
             ok = True
-        if ok and self._right_pane_id:
+        if ok and self._right_pane_id and steal_focus:
             tmux_ctl.select_pane(self._right_pane_id)
+        if ok:
+            self._right_pane_claude = claude_tmux_name
         return ok
 
     def _by_tmux(self, tmux_name: str) -> "_Running | None":
@@ -230,7 +392,8 @@ class App:
         return None
 
     def _launch(self, key: str, cmd: list[str], cwd: Path, label: str,
-                project: Project | None, placeholder_path: Path | None = None) -> bool:
+                project: Project | None, placeholder_path: Path | None = None,
+                *, steal_focus: bool = True) -> bool:
         """Create (or reuse) the detached claude tmux session for `key`,
         register it, and attach it in the right pane. Returns success.
 
@@ -247,12 +410,13 @@ class App:
             placeholder_path=placeholder_path,
             created_at=time.time() if placeholder_path is not None else 0.0,
         )
-        if not self._attach_in_right_pane(tmux_name):
+        if not self._attach_in_right_pane(tmux_name, steal_focus=steal_focus):
             self._status.set_message("failed to attach to claude session")
             return False
         return True
 
-    def _launch_resume(self, session_meta: SessionMeta) -> None:
+    def _launch_resume(self, session_meta: SessionMeta,
+                        *, steal_focus: bool = True) -> None:
         cmd = build_resume_command(
             claude_binary=self._config.claude_binary,
             session_id=session_meta.session_id,
@@ -260,7 +424,7 @@ class App:
         )
         label = f"{session_meta.project.display_name}/{session_meta.display_title}"
         if self._launch(session_meta.session_id, cmd, session_meta.project.real_path,
-                        label, session_meta.project):
+                        label, session_meta.project, steal_focus=steal_focus):
             self._status.set_message(
                 f"→ {session_meta.display_title}  ({len(self._running)} session(s) running)")
 
@@ -339,13 +503,16 @@ class App:
                     self._show_overlay(modal, width=60, height=35)
             return
         session = self._currently_focused_session_meta()
+        if session is not None:
+            self._sessions_pane.set_selected_session(session.session_id)
         running_label = None
         if session is not None:
             r = self._running.get(session.session_id)
             if r and tmux_ctl.session_exists(r.tmux_name):
                 running_label = f"detached as '{r.tmux_name}'"
         modal = SessionInfoModal(session=session, running_label=running_label, on_close=self._close_modal)
-        self._show_overlay(modal, width=60, height=40)
+        self._show_overlay(modal, width=60, height=40,
+                           click_outside_to_close=True)
 
     def _open_help_modal(self) -> None:
         # Temporarily shrink the right pane so help gets full terminal width.
@@ -369,7 +536,9 @@ class App:
             )
 
         modal = HelpModal(on_close=self._close_help_modal)
-        self._show_overlay(modal, width=60, height=80)
+        self._show_overlay(modal, width=60, height=80,
+                           click_outside_to_close=True,
+                           on_click_outside=self._close_help_modal)
 
     def _close_help_modal(self) -> None:
         self._close_modal()
@@ -391,10 +560,10 @@ class App:
         )
         self._show_overlay(modal, width=50, height=30)
 
-    # --- project shortcuts: editor + terminal ---
+    # --- project shortcut: terminal ---
 
     def _active_project(self) -> Project | None:
-        """Project to act on for c/t shortcuts.
+        """Project to act on for the terminal shortcut.
 
         Prefer the focused project in the Projects pane; fall back to the
         currently-selected (loaded-into-Sessions) project.
@@ -404,27 +573,6 @@ class App:
             if focused is not None:
                 return focused
         return self._selected_project
-
-    def _open_editor_for_active_project(self) -> None:
-        import subprocess
-        proj = self._active_project()
-        if proj is None:
-            self._status.set_message("no project focused/selected")
-            return
-        if shutil.which("code") is None:
-            self._status.set_message("'code' not found on PATH (install VS Code)")
-            return
-        try:
-            subprocess.Popen(
-                ["code", str(proj.real_path)],
-                cwd=str(proj.real_path),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            self._status.set_message(f"opened VS Code: {proj.real_path}")
-        except OSError as e:
-            self._status.set_message(f"failed to open code: {e}")
 
     def _open_terminal_for_active_project(self) -> None:
         import os
@@ -451,25 +599,42 @@ class App:
         tmux_ctl.select_pane(new_pane)
         self._status.set_message(f"terminal: {proj.display_name}  (Ctrl-B then arrow = move panes)")
 
+    def _on_detach(self) -> None:
+        """Detach from the ccmgr tmux session (keep all Claude sessions alive)."""
+        import subprocess as _sp
+        _sp.run(["tmux", "detach-client"], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+
     def _confirm_quit(self) -> None:
         self._close_modal()
         self._teardown_tmux()
         raise urwid.ExitMainLoop()
 
-    def _show_overlay(self, modal: urwid.Widget, width: int, height: int) -> None:
+    def _show_overlay(self, modal: urwid.Widget, width: int, height: int,
+                       *, click_outside_to_close: bool = False,
+                       fixed_width: bool = False,
+                       fixed_height: bool = False,
+                       on_click_outside: Callable[[], None] | None = None) -> None:
         if self._loop is None:
             return
-        overlay = urwid.Overlay(
-            modal,
-            self._frame,
-            align="center", width=("relative", width),
-            valign="middle", height=("relative", height),
+        width_spec = width if fixed_width else ("relative", width)
+        height_spec = height if fixed_height else ("relative", height)
+        overlay_cls = _CloseOnClickOverlay if click_outside_to_close else urwid.Overlay
+        kw = {}
+        if click_outside_to_close:
+            kw["on_click_outside"] = on_click_outside or self._close_modal
+        overlay = overlay_cls(
+            modal, self._frame,
+            align="center", width=width_spec,
+            valign="middle", height=height_spec,
+            **kw,
         )
         self._loop.widget = overlay
 
     def _close_modal(self) -> None:
         if self._loop is not None:
             self._loop.widget = self._frame
+        self._sessions_pane.set_selected_session(None)
+        self._running_pane.set_selected(None)
         # Keep tmux focus on ccmgr's pane so the next keystroke doesn't
         # accidentally land in Claude (can happen after mouse clicks).
         pane_id = tmux_ctl.current_pane_id()
@@ -590,6 +755,28 @@ class App:
             if not tmux_ctl.session_exists(self._running[key].tmux_name):
                 del self._running[key]
 
+        # If the Claude session we were showing in the right pane has exited,
+        # kill the right pane so the TUI returns to full-screen.  Must happen
+        # before the pane_alive→restore check so we never try to restore a
+        # dead session into a zombie pane.
+        if self._right_pane_id and self._right_pane_claude:
+            if not tmux_ctl.session_exists(self._right_pane_claude):
+                tmux_ctl.kill_pane(self._right_pane_id)
+                self._right_pane_id = None
+                self._right_pane_claude = None
+
+        # Detect when the right pane was closed (user pressed q in less, the
+        # pane was cleaned up above, or it was killed externally).  In history
+        # mode, restore whatever was there before; otherwise just clear our
+        # tracking.
+        if self._right_pane_id and not tmux_ctl.pane_alive(self._right_pane_id):
+            if self._in_history_mode:
+                self._in_history_mode = False
+                self._restore_from_history_mode()
+            else:
+                self._right_pane_id = None
+                self._right_pane_claude = None
+
         # Promote any `__new__-N` placeholders to their real session_id +
         # display title once claude has written the jsonl on disk.
         self._resolve_placeholders(projects)
@@ -614,8 +801,11 @@ class App:
             s = self._find_session_meta(r.key, r.project)
             if s is not None and s.title:
                 r.label = f"{s.project.display_name}/{s.display_title}"
+            if s is not None:
+                r.status = s.status
         entries = [
-            RunningEntry(tmux_name=r.tmux_name, label=r.label)
+            RunningEntry(tmux_name=r.tmux_name, label=r.label,
+                         status=r.status)
             for r in self._running.values()
         ]
         self._running_pane.set_running(entries)
@@ -922,15 +1112,116 @@ class App:
 
     # --- toggle favorite ---
 
-    def _on_toggle_favorite(self) -> None:
-        """Toggle favorite status for the focused session."""
+    def _on_toggle_star(self) -> None:
+        """Toggle star status for the focused session."""
         session = self._currently_focused_session_meta()
         if session is None:
             self._status.set_message("No session selected.")
             return
-        now_fav = self._favorites.toggle(session.session_id)
-        label = "⭐" if now_fav else "unstarred"
+        now_star = self._favorites.toggle(session.session_id)
+        label = "★" if now_star else "unstarred"
         self._status.set_message(f"{label} {session.display_title}")
+
+    # --- context menu (right-click) ---
+
+    def _on_running_context_menu(self, entry: RunningEntry) -> None:
+        r = self._by_tmux(entry.tmux_name)
+        if r is None or r.is_placeholder or r.project is None:
+            return
+        session = self._find_session_meta(r.key, r.project)
+        if session is None:
+            return
+        self._running_pane.set_selected(entry.tmux_name)
+        self._open_session_context_menu(session)
+
+    def _open_session_context_menu(self, session: SessionMeta) -> None:
+        # Ensure tmux focus is on our pane so the 200 ms poll doesn't
+        # auto-close the menu (can happen if focus was on the right pane).
+        if self._ccmgr_pane_id:
+            tmux_ctl.select_pane(self._ccmgr_pane_id)
+        self._sessions_pane.set_selected_session(session.session_id)
+        r = self._running.get(session.session_id)
+        is_alive = r is not None and not r.is_placeholder
+        is_starred = session.session_id in self._favorites.get_ids()
+        items: list[tuple[str, Callable[[], None]]] = [
+            (" Open      ↵", lambda s=session: self._do_context_open(s)),
+            (" Info       i", lambda s=session: self._do_context_info(s)),
+            (" Rename     r", lambda s=session: self._do_context_rename(s)),
+            (" Unstar    s" if is_starred else " Star      s",
+             lambda s=session: self._do_context_star(s)),
+            (" Kill       k", lambda s=session: self._do_context_kill(s)
+             if is_alive else None),
+            (" Term       t", lambda s=session: self._do_context_term(s)),
+            (" Delete     d", lambda s=session: self._do_context_delete(s)),
+        ]
+        # Filter out None callbacks (e.g. Kill for non-running sessions).
+        items = [(label, cb) for label, cb in items if cb is not None]
+        menu = ContextMenu(items, on_close=self._close_modal)
+        self._show_overlay(menu, width=32, height=14,
+                           click_outside_to_close=True,
+                           fixed_width=True, fixed_height=True)
+
+    def _do_context_open(self, session: SessionMeta) -> None:
+        self._on_session_select(session, steal_focus=True)
+
+    def _do_context_rename(self, session: SessionMeta) -> None:
+        modal = RenameModal(
+            current_title=session.display_title,
+            on_submit=lambda new_title, s=session: self._do_rename(s, new_title),
+            on_cancel=self._close_modal,
+        )
+        self._show_overlay(modal, width=50, height=22)
+
+    def _do_context_info(self, session: SessionMeta) -> None:
+        r = self._running.get(session.session_id)
+        running_label = None
+        if r and tmux_ctl.session_exists(r.tmux_name):
+            running_label = f"detached as '{r.tmux_name}'"
+        modal = SessionInfoModal(session=session, running_label=running_label,
+                                 on_close=self._close_modal)
+        self._show_overlay(modal, width=60, height=40,
+                           click_outside_to_close=True)
+
+    def _do_context_star(self, session: SessionMeta) -> None:
+        now_star = self._favorites.toggle(session.session_id)
+        self._session_cache.invalidate()
+        self._refresh()
+        label = "★" if now_star else "unstarred"
+        self._status.set_message(f"{label} {session.display_title}")
+
+    def _do_context_kill(self, session: SessionMeta) -> None:
+        r = self._running.get(session.session_id)
+        if r and tmux_ctl.session_exists(r.tmux_name):
+            tmux_ctl.kill_session(r.tmux_name)
+        self._running.pop(session.session_id, None)
+        self._status.set_message(f"Killed: {session.display_title}  (file kept)")
+
+    def _do_context_term(self, session: SessionMeta) -> None:
+        import os
+        import shlex
+        import subprocess as _sp
+        shell = os.environ.get("SHELL", "/bin/bash")
+        cmd = f"cd {shlex.quote(str(session.project.real_path))} && exec {shlex.quote(shell)}"
+        target = self._right_pane_id if (self._right_pane_id and tmux_ctl.pane_alive(self._right_pane_id)) else None
+        new_pane = tmux_ctl.split_window_v(cmd, target=target)
+        if not new_pane:
+            self._status.set_message("failed to split for terminal")
+            return
+        _sp.run(["tmux", "set-option", "-p", "-t", new_pane, "remain-on-exit", "off"],
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        tmux_ctl.select_pane(new_pane)
+        self._status.set_message(f"terminal: {session.project.display_name}")
+
+    def _do_context_delete(self, session: SessionMeta) -> None:
+        title = session.display_title
+        detail = f"Permanently delete '{title}'?\n\nThis removes the session file from disk\nand kills its background tmux session."
+        modal = DeleteConfirmModal(
+            title=f"Delete '{title}'?",
+            detail=detail,
+            on_confirm=lambda s=session: self._do_delete_session(s),
+            on_cancel=self._close_modal,
+        )
+        self._show_overlay(modal, width=54, height=30)
 
     # --- resize divider ---
 
@@ -946,16 +1237,33 @@ class App:
 
     def _on_tick(self, loop, _user_data) -> None:
         self._refresh()
-        loop.set_alarm_in(self._config.poll_interval_ms / 1000.0, self._on_tick)
+        # When a click-outside overlay is showing OR we're in history mode
+        # (less running in the right pane), poll faster so the user sees a
+        # quick response when pressing q in less or clicking the right pane.
+        fast_poll = (
+            self._in_history_mode
+            or (self._ccmgr_pane_id is not None
+                and self._loop is not None
+                and isinstance(self._loop.widget, _CloseOnClickOverlay))
+        )
+        if fast_poll:
+            if (self._ccmgr_pane_id is not None
+                    and self._loop is not None
+                    and isinstance(self._loop.widget, _CloseOnClickOverlay)):
+                if tmux_ctl.current_pane_id() != self._ccmgr_pane_id:
+                    self._close_modal()
+            interval_s = 0.2
+        else:
+            interval_s = self._config.poll_interval_ms / 1000.0
+        loop.set_alarm_in(interval_s, self._on_tick)
 
     # --- lifecycle ---
 
     def run(self) -> None:
-        # Enable clipboard sync in the outer ccmgr session so mouse
-        # selection in either pane is copied to the system clipboard.
-        # Mouse mode is NOT enabled here — it would break right-click
-        # in the Claude pane.  Inner Claude sessions have mouse on
-        # for scroll/copy-mode (see tmux_ctl.new_detached_session).
+        # - mouse on: tmux switches pane focus on clicks so keyboard input
+        #   tracks the active pane and the border colour updates accordingly.
+        # - set-clipboard on: text selection in either pane is copied to the
+        #   system clipboard.
         import subprocess as _sp
         if tmux_ctl.in_tmux():
             sess = tmux_ctl.current_session_name() or "ccmgr"
@@ -963,32 +1271,23 @@ class App:
                 ["tmux", "set-option", "-t", sess, "set-clipboard", "on"],
                 stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
             )
-            # WSL-specific (harmless elsewhere): explicitly disable mouse on
-            # the outer ccmgr session.  tmux's built-in MouseDown3Pane binding
-            # in the root table fires `display-menu` when mouse_any_flag=0
-            # (i.e. `mouse off`).  Under WSL/Windows Terminal the terminal
-            # emulator may forward mouse events that tmux hasn't requested,
-            # so right-clicks reach this binding and briefly flash tmux's
-            # context menu before urwid repaints.  macOS/Linux terminals
-            # don't exhibit this — they respect tmux's `mouse off` and never
-            # send mouse escape sequences.  (If this block is ever removed,
-            # verify right-click on WSL still works.)
             _sp.run(
-                ["tmux", "set-option", "-t", sess, "mouse", "off"],
+                ["tmux", "set-option", "-t", sess, "mouse", "on"],
                 stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
             )
-        # WSL-specific (harmless elsewhere): belt-and-suspenders reset of
-        # terminal-level mouse reporting modes.  The escape sequences disable
-        # X10 / button-event / any-event / SGR extended mouse tracking at the
-        # terminal emulator layer.  Needed because Windows Terminal may retain
-        # stale mouse-reporting state from a previous application that survives
-        # tmux's own `mouse off`.  On macOS/Linux this is a no-op since the
-        # terminal is already in the correct state.
-        import sys as _sys
-        _sys.stdout.write("\033[?1000l\033[?1002l\033[?1003l\033[?1006l")
-        _sys.stdout.flush()
+            # Unbind tmux's built-in right-click context menu so right-click
+            # passes through to the application (Claude / less) instead of
+            # flashing display-menu.  Left-click (MouseDown1Pane) is left at
+            # its default: tmux switches pane focus then forwards the event.
+            _sp.run(
+                ["tmux", "unbind-key", "-T", "root", "MouseDown3Pane"],
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+            )
 
+        self._ccmgr_pane_id = tmux_ctl.current_pane_id()
         self._loop = urwid.MainLoop(self._frame, palette=PALETTE, unhandled_input=self._on_input)
+        from ccmgr.ui._widgets import ClickableRow
+        ClickableRow._main_loop = self._loop
         try:
             self._loop.screen.set_terminal_properties(colors=256)
         except Exception:

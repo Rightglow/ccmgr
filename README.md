@@ -2,9 +2,7 @@
 
 A terminal UI to navigate, resume, and start [Claude Code](https://claude.com/claude-code) sessions across all your projects from one place. ccmgr lives in the left pane of a tmux window; the right pane shows the currently-active claude. Each claude session runs as its own detached tmux session in the background, so switching between sessions preserves all in-progress work — no responses or tool calls are interrupted.
 
-> **This is a fork** of [regmi-saugat/ccmgr](https://github.com/regmi-saugat/ccmgr) (v0.1.5). The upstream project is compact and well-designed, but had some rough edges for daily use. This fork is actively maintained with agent-assisted programming: [Claude Code](https://claude.ai/claude-code) CLI paired with the **DeepSeek V4** model reviews, refactors, and co-authors changes alongside human direction. Work will continue on this fork for the foreseeable future.
->
-> Key additions over upstream: session status dots (idle/busy/blocked), rename & delete sessions, favorites, mouse click support, file-browser for new projects, non-ASCII path handling, cross-pane arrow-key navigation, and a significant refactor of the running-session registry and keybinding system. See the [commit history](https://github.com/Rightglow/ccmgr/commits/main/) for the full list.
+> **This is a fork** of [regmi-saugat/ccmgr](https://github.com/regmi-saugat/ccmgr) (v0.1.5), developed with agent-assisted programming using [Claude Code](https://claude.ai/claude-code).
 
 ## Install
 
@@ -12,7 +10,7 @@ A terminal UI to navigate, resume, and start [Claude Code](https://claude.com/cl
 pip install ccmgr
 ```
 
-Requires Python 3.12+ and `tmux` on `PATH`.
+Requires Python 3.12+, `tmux`, and `less` on `PATH`.
 
 ## Run
 
@@ -20,7 +18,7 @@ Requires Python 3.12+ and `tmux` on `PATH`.
 ccmgr
 ```
 
-If you're not already inside a tmux session, ccmgr will launch one automatically (`tmux new-session -A -s ccmgr`). The most recent project is auto-selected on startup.
+If you're not already inside a tmux session, ccmgr will launch one automatically. The most recent project is auto-selected on startup.
 
 ## Keys
 
@@ -28,67 +26,52 @@ If you're not already inside a tmux session, ccmgr will launch one automatically
 
 | Key | Action |
 |-----|--------|
-| `↑` / `↓` (or `j` / `k`) | Move selection within the focused pane |
+| `↑` / `↓` | Move selection within the focused pane |
 | `Tab` / `Shift-Tab` | Cycle focus through Projects, Sessions, Running panes |
 | `Esc` | Move focus up: Running → Sessions → Projects |
-| `Ctrl-B` `←` | Move focus from claude back to ccmgr sidebar |
-| `Ctrl-B` `→` | Move focus from ccmgr to claude (right pane) |
-| `Ctrl-B` `d` | Detach from ccmgr — keep all sessions alive, return to bash |
 | `/` | Filter the focused pane by name |
-| **Mouse** | Click any row to select it (same as Enter) |
 
 ### Session actions
 
 | Key | Action |
 |-----|--------|
-| `Enter` | Resume or start the selected session in the right pane |
-| `r` | Rename the focused session (writes a new title to the JSONL) |
-| `f` | Toggle favorite — favorited sessions are pinned to the top with a ⭐ |
-| `d` | Delete the focused session (prompts for confirmation; removes JSONL + kills tmux) |
+| `Enter` | Resume or start the selected session |
 | `n` | Start a fresh claude session in the current project |
-
-### Info & tools
-
-| Key | Action |
-|-----|--------|
-| `i` | Popup with session details: title, project, messages, tokens, last user input |
-| `?` | Full help popup with all keybindings |
-| `c` | Open the active project in VS Code (`code <path>`) |
+| `i` | Popup with session details |
+| `r` | Rename the focused session |
+| `s` | Toggle star — starred sessions pinned to top with ⭐ |
+| `k` | Kill the running Claude process (keeps session file) |
+| `d` | Delete the focused session (prompts for confirmation) |
 | `t` | Open a terminal in the active project directory |
+| `?` | Full help popup with all keybindings |
+| `q` or `Ctrl-C` | Quit with confirmation |
 
-### Quit
+### Mouse
 
-| Key | Action |
-|-----|--------|
-| `q` or `Ctrl-C` | Quit with confirmation (shows how many sessions will be killed) |
+| Action | Effect |
+|--------|--------|
+| Left-click (non-running) | Preview session history in the right pane |
+| Left-click (running) | Attach to the running session (focus stays left) |
+| Double-click | Open/attach and move focus to the right pane |
+| Right-click | Context menu (Open, Info, Rename, Star, Kill, Term, Delete) |
 
-## Session list features
+## History preview
 
-### Status indicators
+Left-click a non-running session to view its conversation history in the right pane without starting Claude. The transcript is colour-coded (user = cyan, assistant = green, tool use = yellow) and displayed via `less`. Press `q` to exit — the right pane restores whatever was there before. Double-click to skip the preview and open the session directly.
 
-Each session shows a colored dot reflecting its current state (read from the last JSONL record):
+Clicking a running session attaches to it immediately (focus stays left so you can keep browsing). Double-clicking steals focus to the right pane for both running and non-running sessions.
 
-- 🟢 **idle** — assistant last responded normally
-- 🟡 **busy** — assistant is processing a user message
-- 🔴 **blocked** — assistant is waiting for tool approval (needs your input)
+## Status indicators
 
+Each session shows a coloured ● reflecting its current state:
 
-### Favorites
-
-Press `f` to pin a session to the top of the list. Favorites persist across restarts in `~/.config/ccmgr/favorites.json`.
-
-### Session management
-
-- **Rename** (`r`): edit the session title. If no AI-generated title exists, the first user message is used as a fallback.
-- **Delete** (`d`): permanently removes the session file from disk and kills its background tmux session. Requires confirmation.
-- **New session** (`n` or `Enter` on `+ New session`): starts a fresh `claude` in the current project.
-- **New project** (`Enter` on `+ New project`): prompt for a directory path, create it if needed, and start claude there.
+- **Green** — idle (assistant last responded normally)
+- **Yellow** — busy (assistant is processing)
+- **Red** — blocked (waiting for tool approval)
 
 ## How it works
 
-`ccmgr` reads `~/.claude/projects/*` (Claude's per-project session history) and lists everything. Pressing `Enter` on a session does two things: (1) if a detached tmux session named `cc-<short_id>` running `claude --resume <id>` doesn't already exist, ccmgr creates one with `tmux new-session -d`; (2) ccmgr's right pane runs `tmux attach -t cc-<short_id>` so you see and interact with that claude. Switching sessions just respawns the right pane to attach to a different background tmux session — the detached claudes keep running with all their state intact.
-
-Issues and pull requests welcome.
+`ccmgr` reads `~/.claude/projects/*` (Claude's per-project session history) and lists everything. Pressing `Enter` on a session does two things: (1) if a detached tmux session running `claude --resume <id>` doesn't already exist, ccmgr creates one with `tmux new-session -d`; (2) ccmgr's right pane runs `tmux attach -t cc-<id>` so you see and interact with that claude. Switching sessions just respawns the right pane to attach to a different background tmux session — the detached claudes keep running with all their state intact.
 
 ## SSH / remote use
 

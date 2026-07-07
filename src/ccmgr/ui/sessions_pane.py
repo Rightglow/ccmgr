@@ -38,14 +38,24 @@ def _format_size(nbytes: int) -> str:
     return f"{nbytes}B"
 
 
-_STATUS_DOTS = {"idle": "🟢", "busy": "🟡", "blocked": "🔴"}
+_STATUS_DOTS = {"idle": ("status_idle", "●"), "busy": ("status_busy", "●"),
+                "blocked": ("status_blocked", "●")}
+# When a row is selected (right-click context menu), map the status-dot
+# attributes to variants with the selected background so the dot blends in.
+_SELECTED_MAP = {None: "selected", "dim": "selected",
+                 "status_idle": "status_idle_sel",
+                 "status_busy": "status_busy_sel",
+                 "status_blocked": "status_blocked_sel"}
 _FOCUS_REMAP = {None: "focus", "live": "focus", "dim": "focus", "live_tag": "focus"}
 
 
 class _SessionRow(ClickableRow):
     def __init__(self, session: SessionMeta, live_threshold: float,
                  is_running: bool = False, is_favorite: bool = False,
-                 on_click: "Callable[[], None] | None" = None) -> None:
+                 is_selected: bool = False,
+                 on_click: "Callable[[], None] | None" = None,
+                 on_double_click: "Callable[[], None] | None" = None,
+                 on_right_click: "Callable[[], None] | None" = None) -> None:
         self.session = session
         is_active = is_live(session, live_threshold)
 
@@ -54,10 +64,9 @@ class _SessionRow(ClickableRow):
         #   <relative time> · <branch> · <size>
         title_markup: list = []
         if is_favorite:
-            title_markup.append("⭐ ")
-        title_markup.append(_STATUS_DOTS.get(session.status, "⚪"))
-        title_markup.append(" ")
-        title_markup.append("● " if is_running else "  ")
+            title_markup.append(("star", "★ "))
+        title_markup.append(_STATUS_DOTS.get(session.status, ("dim", "○")))
+        title_markup.append("  ")
         title_markup.append(session.display_title)
         if is_active:
             title_markup.append(("live_tag", " [LIVE]"))
@@ -73,8 +82,14 @@ class _SessionRow(ClickableRow):
         meta_text = urwid.Text(("dim", "  " + " · ".join(parts)), wrap="clip")
 
         body = urwid.Pile([title_text, meta_text])
-        row_attr = "live" if is_running else None
-        super().__init__(urwid.AttrMap(body, row_attr, focus_map=_FOCUS_REMAP), on_click)
+        if is_selected:
+            row_attr: str | dict | None = _SELECTED_MAP
+        elif is_running:
+            row_attr = "live"
+        else:
+            row_attr = None
+        super().__init__(urwid.AttrMap(body, row_attr, focus_map=_FOCUS_REMAP),
+                         on_click, on_double_click, on_right_click)
 
 
 class _NewSessionRow(ClickableRow):
@@ -84,14 +99,20 @@ class _NewSessionRow(ClickableRow):
 
 
 class SessionsPane(urwid.WidgetWrap):
-    def __init__(self, on_select: Callable[[SessionMeta | None], None], live_threshold: float) -> None:
+    def __init__(self, on_select: Callable[[SessionMeta | None], None],
+                 live_threshold: float,
+                 on_preview: "Callable[[SessionMeta], None] | None" = None,
+                 on_context: "Callable[[SessionMeta], None] | None" = None) -> None:
         self._on_select = on_select
+        self._on_preview = on_preview
+        self._on_context = on_context
         self._live_threshold = live_threshold
         self._sessions: list[SessionMeta] = []
         self._project: Project | None = None
         self._filter = ""
         self._running_ids: set[str] = set()
         self._favorite_ids: set[str] = set()
+        self._selected_session_id: str | None = None
 
         self._new_row = _NewSessionRow(on_click=lambda: self._on_select(None))
         self._divider = urwid.Divider("─")
@@ -140,6 +161,12 @@ class SessionsPane(urwid.WidgetWrap):
 
         self._restore_focus(prior_focus)
 
+    def set_selected_session(self, session_id: str | None) -> None:
+        if self._selected_session_id == session_id:
+            return
+        self._selected_session_id = session_id
+        self._render(self._visible_sessions())
+
     def set_filter(self, needle: str) -> None:
         self._filter = needle
         if self._project is not None:
@@ -159,15 +186,25 @@ class SessionsPane(urwid.WidgetWrap):
         return sessions
 
     def _render(self, sessions: list[SessionMeta]) -> None:
-        rows = [
-            _SessionRow(
+        rows: list = []
+        for s in sessions:
+            is_running = s.session_id in self._running_ids
+            is_fav = s.session_id in self._favorite_ids
+            is_sel = s.session_id == self._selected_session_id
+            if is_running:
+                on_click = lambda s=s: self._on_select(s, steal_focus=False)
+                on_dbl = lambda s=s: self._on_select(s)
+            else:
+                on_click = (lambda s=s: self._on_preview(s)) if self._on_preview else None
+                on_dbl = lambda s=s: self._on_select(s)  # double-click opens
+            rows.append(_SessionRow(
                 s, self._live_threshold,
-                is_running=(s.session_id in self._running_ids),
-                is_favorite=(s.session_id in self._favorite_ids),
-                on_click=lambda s=s: self._on_select(s),
-            )
-            for s in sessions
-        ]
+                is_running=is_running, is_favorite=is_fav,
+                is_selected=is_sel,
+                on_click=on_click, on_double_click=on_dbl,
+                on_right_click=(lambda s=s: self._on_context(s))
+                               if self._on_context else None,
+            ))
         if not rows:
             rows = [urwid.Text("  (no matches)" if self._filter else "  (no sessions yet)", align="left")]
         self._walker[:] = rows

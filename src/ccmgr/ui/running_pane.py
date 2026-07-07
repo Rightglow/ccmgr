@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import urwid
 
 from ccmgr.ui._widgets import ClickableRow, remember_focus, restore_focus
+from ccmgr.ui.sessions_pane import _STATUS_DOTS
 
 
 _FOCUS_REMAP = {None: "focus", "live": "focus"}
@@ -16,14 +17,21 @@ _FOCUS_REMAP = {None: "focus", "live": "focus"}
 class RunningEntry:
     tmux_name: str  # detached tmux session name (cc-<id>)
     label: str      # display label, e.g. "ger-lang/Refactor X" or "claude-chat/(new)"
+    status: str = "idle"  # "idle" | "busy" | "blocked"
 
 
 class _RunningRow(ClickableRow):
     def __init__(self, entry: RunningEntry,
-                 on_click: "Callable[[], None] | None" = None) -> None:
+                 is_selected: bool = False,
+                 on_click: "Callable[[], None] | None" = None,
+                 on_double_click: "Callable[[], None] | None" = None,
+                 on_right_click: "Callable[[], None] | None" = None) -> None:
         self.entry = entry
-        text = urwid.Text(["● ", entry.label], wrap="clip")
-        super().__init__(urwid.AttrMap(text, "live", focus_map=_FOCUS_REMAP), on_click)
+        dot = _STATUS_DOTS.get(entry.status, ("dim", "○"))
+        text = urwid.Text([dot, " ", entry.label], wrap="clip")
+        row_attr = "selected" if is_selected else "live"
+        super().__init__(urwid.AttrMap(text, row_attr, focus_map=_FOCUS_REMAP),
+                         on_click, on_double_click, on_right_click)
 
 
 class RunningSessionsPane(urwid.WidgetWrap):
@@ -32,8 +40,11 @@ class RunningSessionsPane(urwid.WidgetWrap):
     Enter on a row re-attaches the right pane to that detached claude session.
     """
 
-    def __init__(self, on_select: Callable[[RunningEntry], None]) -> None:
+    def __init__(self, on_select: Callable[[RunningEntry], None],
+                 on_context: "Callable[[RunningEntry], None] | None" = None) -> None:
         self._on_select = on_select
+        self._on_context = on_context
+        self._selected_tmux_name: str | None = None
         self._walker = urwid.SimpleFocusListWalker(
             [urwid.Text(("dim", "  (no running sessions)"), align="left")]
         )
@@ -41,13 +52,33 @@ class RunningSessionsPane(urwid.WidgetWrap):
         self._linebox = urwid.LineBox(self._listbox, title="Running")
         super().__init__(self._linebox)
 
+    def set_selected(self, tmux_name: str | None) -> None:
+        if self._selected_tmux_name == tmux_name:
+            return
+        self._selected_tmux_name = tmux_name
+        # Re-render the current entries with the new selection.
+        entries = [w.entry for w in self._walker
+                   if isinstance(w, _RunningRow)]
+        if entries:
+            self.set_running(entries)
+
     def set_running(self, entries: list[RunningEntry]) -> None:
         prior = self._remember_focus()
         if not entries:
             self._walker[:] = [urwid.Text(("dim", "  (no running sessions)"), align="left")]
             self._linebox.set_title("Running")
             return
-        self._walker[:] = [_RunningRow(e, on_click=lambda e=e: self._on_select(e)) for e in entries]
+        self._walker[:] = [
+            _RunningRow(
+                e,
+                is_selected=(e.tmux_name == self._selected_tmux_name),
+                on_click=lambda e=e: self._on_select(e, steal_focus=False),
+                on_double_click=lambda e=e: self._on_select(e),
+                on_right_click=(lambda e=e: self._on_context(e))
+                               if self._on_context else None,
+            )
+            for e in entries
+        ]
         self._linebox.set_title(f"Running ({len(entries)})")
         self._restore_focus(prior)
 
