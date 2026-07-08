@@ -153,7 +153,8 @@ class App:
         self._has_less: bool = shutil.which("less") is not None
 
         projects = list_projects(claude_home)
-        self._projects_pane = ProjectsPane(projects, on_select=self._on_project_select)
+        self._projects_pane = ProjectsPane(projects, on_select=self._on_project_select,
+                                           on_double_click=self._on_project_double_click)
         self._sessions_pane = SessionsPane(
             on_select=self._on_session_select,
             live_threshold=float(config.live_badge_seconds),
@@ -199,6 +200,7 @@ class App:
     # --- project / session selection callbacks ---
 
     def _on_project_select(self, project: Project | None) -> None:
+        """Single-click / initial auto-select: show sessions, keep focus here."""
         if project is None:
             self._open_new_project_modal()
             return
@@ -208,9 +210,13 @@ class App:
         self._sessions_pane.set_sessions(project, sessions, running_ids=set(self._running),
                 favorite_ids=self._favorites.get_ids())
         self._status.set_message(f"Project: {project.real_path}  ({len(sessions)} sessions)")
-        # Auto-focus the sessions pane below so the user can j/k into a session
-        # without pressing Tab. Only do this when triggered by an actual Enter
-        # press, not from the initial-project auto-select during App.__init__.
+
+    def _on_project_double_click(self, project: Project | None) -> None:
+        """Double-click / Enter on a project: show sessions AND move focus to them."""
+        if project is None:
+            self._open_new_project_modal()
+            return
+        self._on_project_select(project)
         if self._loop is not None:
             self._sidebar.focus_position = 1
 

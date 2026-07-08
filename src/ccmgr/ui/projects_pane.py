@@ -11,11 +11,13 @@ from ccmgr.ui._widgets import ClickableRow, remember_focus, restore_focus
 
 class _ProjectRow(ClickableRow):
     def __init__(self, project: Project, selected: bool = False,
-                 on_click: "Callable[[], None] | None" = None) -> None:
+                 on_click: "Callable[[], None] | None" = None,
+                 on_double_click: "Callable[[], None] | None" = None) -> None:
         self.project = project
         label = f"{project.display_name} [{project.session_count}]"
         attr = "selected" if selected else None
-        super().__init__(urwid.AttrMap(urwid.Text(label), attr, focus_map="focus"), on_click)
+        super().__init__(urwid.AttrMap(urwid.Text(label), attr, focus_map="focus"),
+                         on_click, on_double_click)
 
 
 class _NewProjectRow(ClickableRow):
@@ -42,9 +44,12 @@ class ProjectsPane(urwid.WidgetWrap):
     so focus does not escape into a sibling sidebar pane.
     """
 
-    def __init__(self, projects: list[Project], on_select: Callable[[Project | None], None]) -> None:
+    def __init__(self, projects: list[Project],
+                 on_select: Callable[[Project | None], None],
+                 on_double_click: Callable[[Project | None], None] | None = None) -> None:
         self._all_projects = projects
         self._on_select = on_select
+        self._on_double_click = on_double_click
         self._filter = ""
         self._selected_encoded_name: str | None = None
 
@@ -66,7 +71,9 @@ class ProjectsPane(urwid.WidgetWrap):
         sel = self._selected_encoded_name
         rows = [
             _ProjectRow(p, selected=(p.encoded_name == sel),
-                        on_click=lambda p=p: self._on_select(p))
+                        on_click=lambda p=p: self._on_select(p),
+                        on_double_click=(lambda p=p: self._on_double_click(p))
+                                        if self._on_double_click else None)
             for p in projects
             if needle in str(p.real_path).lower()
         ]
@@ -127,7 +134,11 @@ class ProjectsPane(urwid.WidgetWrap):
                 return None
             proj = self.focused_project()
             if proj is not None:
-                self._on_select(proj)
+                # Enter = double-click equivalent (steals focus to sessions).
+                if self._on_double_click:
+                    self._on_double_click(proj)
+                else:
+                    self._on_select(proj)
                 return None
         # Consume up/down at pane boundaries — Tab/Shift-Tab is the only way
         # to switch panes, preventing accidental overscroll into sibling panes.

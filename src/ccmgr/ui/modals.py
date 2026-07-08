@@ -333,10 +333,17 @@ class RenameModal(urwid.WidgetWrap):
 
 
 class _BrowserRow(ClickableRow):
-    """A selectable row for the directory browser (navigated by keyboard)."""
-    def __init__(self, markup, attr):
-        super().__init__(urwid.AttrMap(urwid.Text(markup, wrap="clip"),
-                                       attr, focus_map="focus"))
+    """A selectable row for the directory browser.  Stores its ``path`` so
+    that lookup works correctly even when the list is filtered."""
+
+    def __init__(self, markup, attr, path: Path | None = None,
+                 on_click=None):
+        self.path = path
+        super().__init__(
+            urwid.AttrMap(urwid.Text(markup, wrap="clip"),
+                          attr, focus_map="focus"),
+            on_click=on_click,
+        )
 
 
 class PathBrowser(urwid.WidgetWrap):
@@ -408,14 +415,20 @@ class PathBrowser(urwid.WidgetWrap):
 
     def _render_list(self) -> None:
         rows: list = [
-            _BrowserRow(".  (use this path)", "live_tag"),
-            _BrowserRow("..  (parent directory)", "live"),
+            _BrowserRow(".  (use this path)", "live_tag",
+                        path=self._path,
+                        on_click=lambda: self._enter_path(self._path)),
+            _BrowserRow("..  (parent directory)", "live",
+                        path=self._path.parent,
+                        on_click=lambda: self._enter_path(self._path.parent)),
         ]
         for p in self._visible_entries():
             label = p.name + ("/" if p.is_dir() else "")
             rows.append(_BrowserRow(
                 "  " + label,
                 "live" if p.is_dir() else "dim",
+                path=p,
+                on_click=lambda p=p: self._enter_path(p),
             ))
         if len(rows) == 2 and self._filter:
             rows.append(urwid.Text(("dim", "  (no matches)")))
@@ -423,12 +436,21 @@ class PathBrowser(urwid.WidgetWrap):
         self._walker.set_focus(0)
 
     def _cur_path(self) -> Path | None:
+        """Return the path of the focused row (works correctly when filtered)."""
         if not self._walker:
             return None
-        idx = self._walker.focus
-        if 0 <= idx < len(self._items):
-            return self._items[idx]
+        w, _ = self._walker.get_focus()
+        if isinstance(w, _BrowserRow):
+            return w.path
         return None
+
+    def _enter_path(self, p: Path) -> None:
+        """Handle selection of a path: confirm current dir, or descend into subdir."""
+        if p == self._path:
+            self._on_select(self._path)
+        elif p.is_dir():
+            self._path = p
+            self._refresh()
 
     def selectable(self) -> bool:
         return True
@@ -448,12 +470,7 @@ class PathBrowser(urwid.WidgetWrap):
             self._header_pile.focus_position = 3
             p = self._cur_path()
             if p is not None:
-                if p == self._path:
-                    self._on_select(self._path)
-                    return None
-                if p.is_dir():
-                    self._path = p
-                    self._refresh()
+                self._enter_path(p)
             return None
         if key == "backspace":
             self._header_pile.focus_position = 1
