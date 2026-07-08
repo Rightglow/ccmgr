@@ -21,6 +21,7 @@ from ccmgr.favorites import Favorites
 from ccmgr.launcher import build_resume_command, build_new_session_command
 from ccmgr.models import Project, SessionMeta
 from ccmgr.session_cache import SessionCache
+from ccmgr.scroll_manager import ScrollManager
 from ccmgr.ui import keymap
 from ccmgr.ui.modals import (
     ContextMenu,
@@ -125,7 +126,9 @@ class _RightPaneState:
 
 
 class App:
-    def __init__(self, claude_home: Path, config: Config, auto_launched: bool = False) -> None:
+    def __init__(self, claude_home: Path, config: Config,
+                 auto_launched: bool = False,
+                 scroll_coalescing: bool = True) -> None:
         self._claude_home = claude_home
         self._config = config
         self._auto_launched = auto_launched
@@ -151,6 +154,7 @@ class App:
         self._right_pane_claude: str | None = None  # tmux_name of claude session in right pane
         self._ccmgr_pane_id: str | None = None  # set in run()
         self._has_less: bool = shutil.which("less") is not None
+        self._scroll_manager = ScrollManager(enabled=scroll_coalescing)
 
         projects = list_projects(claude_home)
         self._projects_pane = ProjectsPane(projects, on_select=self._on_project_select,
@@ -350,6 +354,13 @@ class App:
             return True
         return tmux_ctl.new_detached_session(name, shell_cmd)
 
+    def _configure_scroll_acceleration(self, claude_tmux_name: str) -> None:
+        """Configure coalescing for the inner pane of the nested tmux client."""
+        self._scroll_manager.configure(claude_tmux_name)
+
+    def _teardown_scroll_acceleration(self) -> None:
+        self._scroll_manager.close()
+
     def _attach_in_right_pane(self, claude_tmux_name: str, *,
                                steal_focus: bool = True) -> bool:
         """Make the right pane display the named claude tmux session.
@@ -365,6 +376,7 @@ class App:
         otherwise refuses to attach from within another tmux session.
         """
         import shlex
+        self._configure_scroll_acceleration(claude_tmux_name)
         # Fast path: the right pane is already showing this session.  Skip the
         # expensive respawn and just optionally move focus.  This also prevents
         # focus flicker on double-click (the first click's respawn kills and
@@ -724,6 +736,7 @@ class App:
 
     def _teardown_tmux(self) -> None:
         """Clean up on quit: kill right pane, every detached claude session, and our own session if we own it."""
+        self._teardown_scroll_acceleration()
         # Remove the F3 fullscreen binding we installed (it's server-global).
         try:
             import subprocess as _sp
@@ -788,6 +801,7 @@ class App:
     # --- periodic refresh ---
 
     def _refresh(self) -> None:
+        self._scroll_manager.maintain()
         projects = list_projects(self._claude_home)
         self._projects_pane.set_projects(projects)
         # Prune dead claude tmux sessions (e.g. claude exited via /quit).

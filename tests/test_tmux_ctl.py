@@ -3,7 +3,20 @@
 import subprocess
 from unittest.mock import patch, MagicMock
 
-from ccmgr.tmux_ctl import enable_clipboard_passthrough
+from ccmgr.tmux_ctl import (
+    _bindings_are_tmux_defaults,
+    _read_key_binding,
+    _set_scroll_bindings,
+    enable_clipboard_passthrough,
+    install_scroll_bindings,
+    prepare_scroll_bindings,
+    restore_scroll_bindings,
+    set_window_user_option,
+    session_pane_id,
+    scroll_lines_per_event,
+    scroll_bindings_owned_by,
+    wait_window_user_option,
+)
 
 
 def _mock_check_output(stdout: str):
@@ -46,3 +59,133 @@ def test_clipboard_handles_check_output_error():
          _mock_check_call() as call:
         enable_clipboard_passthrough()
         call.assert_called_once()
+
+
+def test_session_pane_id_returns_first_pane():
+    with _mock_check_output("%7\n%8\n"):
+        assert session_pane_id("cc-example") == "%7"
+
+
+def test_session_pane_id_handles_empty_session():
+    with _mock_check_output(""):
+        assert session_pane_id("cc-example") is None
+
+
+def test_scroll_bindings_target_agent_and_keep_default_fallback():
+    backup = {
+        (table, key): (
+            f"bind-key -T {table} {key} select-pane \\; "
+            f"send-keys -X -N 5 "
+            f"{'scroll-up' if key == 'WheelUpPane' else 'scroll-down'}"
+        )
+        for table in ("copy-mode", "copy-mode-vi")
+        for key in ("WheelUpPane", "WheelDownPane")
+    }
+    with _mock_check_call() as call:
+        assert _set_scroll_bindings("%99", backup)
+    assert call.call_count == 4
+    for invocation in call.call_args_list:
+        args = invocation.args[0]
+        assert args[:4] == ["tmux", "bind-key", "-T", args[3]]
+        assert "#{@ccmgr_scroll_agent}" in args
+        assert any("send-keys -t %99" in arg for arg in args)
+        assert any("send-keys -X -N 5" in arg for arg in args)
+
+
+def test_read_key_binding_scans_whole_table_for_tmux_27():
+    output = (
+        "bind-key -T copy-mode C-a cursor-left\n"
+        "bind-key -T copy-mode WheelUpPane select-pane \\; "
+        "send-keys -X -N 2 scroll-up\n"
+    )
+    with _mock_check_output(output) as call:
+        binding = _read_key_binding("copy-mode", "WheelUpPane")
+    assert "WheelUpPane" in binding
+    assert call.call_args.args[0] == ["tmux", "list-keys", "-T", "copy-mode"]
+
+
+def test_custom_wheel_binding_disables_install_without_overwriting_it():
+    custom = {
+        ("copy-mode", "WheelUpPane"): "bind-key -T copy-mode WheelUpPane page-up",
+        ("copy-mode", "WheelDownPane"): "bind-key -T copy-mode WheelDownPane page-down",
+        ("copy-mode-vi", "WheelUpPane"): "bind-key -T copy-mode-vi WheelUpPane page-up",
+        ("copy-mode-vi", "WheelDownPane"): "bind-key -T copy-mode-vi WheelDownPane page-down",
+    }
+    assert not _bindings_are_tmux_defaults(custom)
+    with patch("ccmgr.tmux_ctl.read_scroll_bindings", return_value=custom), \
+         patch("ccmgr.tmux_ctl._set_scroll_bindings") as install:
+        assert install_scroll_bindings("%99") is None
+    install.assert_not_called()
+
+
+def test_tmux_older_than_27_disables_scroll_coalescing():
+    with patch("ccmgr.tmux_ctl.tmux_version", return_value=(2, 6)), \
+         patch("ccmgr.tmux_ctl.read_scroll_bindings") as read:
+        assert prepare_scroll_bindings() is None
+    read.assert_not_called()
+
+
+def test_window_user_option_uses_tmux_27_compatible_command():
+    with _mock_check_call() as call:
+        assert set_window_user_option("cc-session", "@ccmgr_scroll_agent", "1")
+    assert call.call_args.args[0] == [
+        "tmux", "set-window-option", "-t", "cc-session",
+        "@ccmgr_scroll_agent", "1",
+    ]
+
+
+def test_scroll_distance_is_read_from_original_binding():
+    backup = {
+        ("copy-mode", "WheelUpPane"): "send-keys -X -N 5 scroll-up",
+        ("copy-mode", "WheelDownPane"): "send-keys -X -N 5 scroll-down",
+    }
+    assert scroll_lines_per_event(backup) == 5
+
+
+def test_inconsistent_scroll_distances_are_rejected():
+    backup = {
+        ("copy-mode", "WheelUpPane"): "send-keys -X -N 5 scroll-up",
+        ("copy-mode", "WheelDownPane"): "send-keys -X -N 2 scroll-down",
+    }
+    assert scroll_lines_per_event(backup) == 0
+
+
+def test_scroll_binding_ownership_checks_agent_target():
+    wrapped = (
+        'bind-key -T copy-mode WheelUpPane if-shell -F -t = '
+        '"#{@ccmgr_scroll_agent}" "send-keys -t %9 U" "scroll-up"'
+    )
+    with patch("ccmgr.tmux_ctl.read_scroll_bindings", return_value={
+        ("copy-mode", "WheelUpPane"): wrapped,
+        ("copy-mode-vi", "WheelUpPane"): wrapped,
+        ("copy-mode", "WheelDownPane"): wrapped.replace(" U", " D"),
+        ("copy-mode-vi", "WheelDownPane"): wrapped.replace(" U", " D"),
+    }):
+        assert scroll_bindings_owned_by("%9")
+        assert not scroll_bindings_owned_by("%10")
+
+
+def test_wait_window_user_option_observes_ready_value():
+    with _mock_check_output("1") as call:
+        assert wait_window_user_option(
+            "ccmgr-scroll-1", "@ccmgr_scroll_ready", "1", timeout=0.1)
+    assert call.call_args.args[0] == [
+        "tmux", "show-window-options", "-v", "-t", "ccmgr-scroll-1",
+        "@ccmgr_scroll_ready",
+    ]
+
+
+def test_restore_scroll_bindings_replays_saved_binding_and_unbinds_missing():
+    backup = {
+        ("copy-mode", "WheelUpPane"): (
+            "bind-key -T copy-mode WheelUpPane select-pane "
+            r"\; send-keys -X -N 2 scroll-up"
+        ),
+        ("copy-mode", "WheelDownPane"): None,
+    }
+    with _mock_check_call() as call:
+        restore_scroll_bindings(backup)
+    assert call.call_args_list[0].args[0][:2] == ["tmux", "source-file"]
+    assert call.call_args_list[1].args[0] == [
+        "tmux", "unbind-key", "-T", "copy-mode", "WheelDownPane",
+    ]

@@ -9,6 +9,8 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
+import time
 from functools import lru_cache
 
 
@@ -240,6 +242,264 @@ def pane_alive(pane_id: str) -> bool:
         return pane_id in ids
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
+
+
+def session_pane_id(session_name: str) -> str | None:
+    """Return the first pane id in *session_name*.
+
+    Each detached Claude session currently owns one pane. Keeping this lookup
+    here makes the distinction between the outer display pane and the inner
+    Claude pane explicit for mouse/copy-mode handling.
+    """
+    try:
+        out = subprocess.check_output(
+            ["tmux", "list-panes", "-t", session_name, "-F", "#{pane_id}"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    return out.splitlines()[0] if out else None
+
+
+def start_scroll_agent(session_name: str, cmd: str) -> str | None:
+    """Start a detached scroll-coalescing agent and return its pane id."""
+    try:
+        out = subprocess.check_output(
+            ["tmux", "new-session", "-d", "-P", "-F", "#{pane_id}",
+             "-s", session_name, cmd],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        return out or None
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+
+def set_scroll_agent_target(agent_pane_id: str, target_pane_id: str) -> bool:
+    """Tell a running scroll agent which inner Claude pane is visible."""
+    try:
+        subprocess.check_call(
+            ["tmux", "send-keys", "-l", "-t", agent_pane_id,
+             f"T{target_pane_id}\n"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
+def set_window_user_option(target_window: str, name: str, value: str | None) -> bool:
+    """Set or unset a user option on *target_window*.
+
+    ccmgr's detached Claude sessions contain one pane per window, so a window
+    marker is equivalent to a pane marker for this feature. Unlike pane-scoped
+    options (``set-option -p``), window user options work on tmux 2.7.
+    """
+    args = ["tmux", "set-window-option", "-t", target_window]
+    if value is None:
+        args.extend(["-u", name])
+    else:
+        args.extend([name, value])
+    try:
+        subprocess.check_call(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
+def wait_window_user_option(target_window: str, name: str, value: str,
+                            timeout: float = 1.0) -> bool:
+    """Wait until a tmux window user option reaches *value*."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            current = subprocess.check_output(
+                ["tmux", "show-window-options", "-v", "-t", target_window, name],
+                stderr=subprocess.DEVNULL,
+            ).decode().strip()
+            if current == value:
+                return True
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
+        time.sleep(0.02)
+    return False
+
+
+_SCROLL_TABLES = ("copy-mode", "copy-mode-vi")
+_SCROLL_KEYS = ("WheelUpPane", "WheelDownPane")
+ScrollBindingBackup = dict[tuple[str, str], str | None]
+
+
+def _read_key_binding(table: str, key: str) -> str | None:
+    """Return a binding as replayable tmux config, or None when unbound."""
+    try:
+        text = subprocess.check_output(
+            # tmux 2.7 cannot filter list-keys by an individual key, so read
+            # the table and select the binding ourselves.
+            ["tmux", "list-keys", "-T", table],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    pattern = re.compile(
+        rf"^bind-key\s+(?:-r\s+)?-T\s+{re.escape(table)}\s+"
+        rf"{re.escape(key)}(?:\s|$)"
+    )
+    return next((line for line in text.splitlines() if pattern.match(line)), None)
+
+
+def read_scroll_bindings() -> ScrollBindingBackup:
+    """Capture the four wheel bindings changed by scroll coalescing."""
+    return {
+        (table, key): _read_key_binding(table, key)
+        for table in _SCROLL_TABLES
+        for key in _SCROLL_KEYS
+    }
+
+
+def _bindings_are_tmux_defaults(backup: ScrollBindingBackup) -> bool:
+    """Only wrap stock bindings; custom bindings must remain untouched."""
+    for (table, key), binding in backup.items():
+        direction = "scroll-up" if key == "WheelUpPane" else "scroll-down"
+        pattern = re.compile(
+            rf"^bind-key\s+-T\s+{re.escape(table)}\s+{re.escape(key)}\s+"
+            rf"select-pane\s+\\;\s+send-keys\s+-X\s+-N\s+\d+\s+"
+            rf"{direction}$"
+        )
+        if binding is None or not pattern.match(" ".join(binding.split())):
+            return False
+    return True
+
+
+def prepare_scroll_bindings() -> ScrollBindingBackup | None:
+    """Validate capabilities and return bindings safe to wrap.
+
+    tmux 2.7 is the oldest supported implementation of the copy-mode command
+    shape used here. User-customized bindings are deliberately rejected.
+    """
+    if tmux_version() < (2, 7):
+        return None
+    backup = read_scroll_bindings()
+    if not _bindings_are_tmux_defaults(backup):
+        return None
+    return backup if scroll_lines_per_event(backup) > 0 else None
+
+
+def scroll_lines_per_event(backup: ScrollBindingBackup) -> int:
+    """Extract tmux's configured/default wheel distance from a backup."""
+    counts: set[int] = set()
+    for binding in backup.values():
+        if binding:
+            match = re.search(r"\bsend-keys\s+-X\s+-N\s+(\d+)\b", binding)
+            if match:
+                counts.add(int(match.group(1)))
+    return counts.pop() if len(counts) == 1 else 0
+
+
+def scroll_bindings_owned_by(agent_pane_id: str) -> bool:
+    """True when all active wrappers still point at this manager's agent."""
+    current = read_scroll_bindings()
+    for (_table, key), binding in current.items():
+        direction = "U" if key == "WheelUpPane" else "D"
+        if (not binding
+                or "#{@ccmgr_scroll_agent}" not in binding
+                or f"send-keys -t {agent_pane_id} {direction}" not in binding):
+            return False
+    return True
+
+
+def _binding_command(binding: str) -> str:
+    """Extract a list-keys binding body for use as an if-shell branch."""
+    match = re.match(r"^bind-key\s+(?:-r\s+)?-T\s+\S+\s+\S+\s+(.*)$", binding)
+    if not match:
+        raise ValueError(f"unrecognized tmux binding: {binding}")
+    return match.group(1).replace(r"\;", ";")
+
+
+def _set_scroll_bindings(agent_pane_id: str,
+                         backup: ScrollBindingBackup) -> bool:
+    """Point managed copy-mode wheel events at *agent_pane_id*."""
+    try:
+        for table in _SCROLL_TABLES:
+            for key in _SCROLL_KEYS:
+                binding = backup.get((table, key))
+                if binding is None:
+                    return False
+                direction = "U" if key == "WheelUpPane" else "D"
+                accelerated = f"send-keys -t {agent_pane_id} {direction}"
+                fallback = _binding_command(binding)
+                subprocess.check_call(
+                    ["tmux", "bind-key", "-T", table, key,
+                     "if-shell", "-F", "-t", "=", "#{@ccmgr_scroll_agent}",
+                     accelerated, fallback],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+    return True
+
+
+def install_scroll_bindings(agent_pane_id: str) -> ScrollBindingBackup | None:
+    """Install copy-mode wheel bindings that coalesce ccmgr pane scrolling.
+
+    Root-table mouse handling is deliberately untouched: the outer tmux keeps
+    forwarding mouse events to its nested tmux client, and mouse-aware Claude
+    applications keep receiving their events normally. Only once the inner
+    Claude pane is in tmux copy-mode do these bindings redirect wheel deltas to
+    the persistent coalescing agent named by ``@ccmgr_scroll_agent``.
+
+    The previous bindings are returned so the caller can restore user config.
+    """
+    backup = prepare_scroll_bindings()
+    if backup is None:
+        return None
+
+    if not _set_scroll_bindings(agent_pane_id, backup):
+        restore_scroll_bindings(backup)
+        return None
+    return backup
+
+
+def rebind_scroll_agent(agent_pane_id: str,
+                        backup: ScrollBindingBackup) -> bool:
+    """Update installed bindings after an agent pane is recreated."""
+    return _set_scroll_bindings(agent_pane_id, backup)
+
+
+def restore_scroll_bindings(backup: ScrollBindingBackup) -> None:
+    """Restore bindings returned by :func:`install_scroll_bindings`."""
+    configured = [binding for binding in backup.values() if binding]
+    if configured:
+        path = None
+        try:
+            # tmux 2.7 source-file does not document stdin ("-") support.
+            # A short-lived 0600 config file is portable across supported tmux.
+            fd, path = tempfile.mkstemp(prefix="ccmgr-scroll-", suffix=".conf")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(configured) + "\n")
+            subprocess.check_call(
+                ["tmux", "source-file", path],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.CalledProcessError, FileNotFoundError):
+            pass
+        finally:
+            if path:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+
+    for (table, key), binding in backup.items():
+        if binding is None:
+            try:
+                subprocess.check_call(
+                    ["tmux", "unbind-key", "-T", table, key],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                pass
 
 
 def new_detached_session(name: str, cmd: str) -> bool:
