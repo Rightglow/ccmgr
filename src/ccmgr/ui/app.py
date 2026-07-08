@@ -154,6 +154,7 @@ class App:
         self._right_pane_claude: str | None = None  # tmux_name of claude session in right pane
         self._ccmgr_pane_id: str | None = None  # set in run()
         self._has_less: bool = shutil.which("less") is not None
+        self._less_mouse_flag: str = self._detect_less_mouse()
         self._scroll_manager = ScrollManager(enabled=scroll_coalescing)
 
         projects = list_projects(claude_home)
@@ -287,14 +288,33 @@ class App:
                 return
         self._restore_state = _RightPaneState("empty")
 
+    @staticmethod
+    def _detect_less_mouse() -> str:
+        """Return ``"--mouse --wheel-lines=3"`` if less supports it, else ``""``."""
+        import subprocess as _sp
+        try:
+            out = _sp.check_output(
+                ["less", "--version"], stderr=_sp.STDOUT, text=True, timeout=3)
+            # "less 668 (GNU regular expressions)" → major version
+            ver = int(out.strip().split()[1].split(".")[0])
+            if ver >= 590:
+                return "--mouse --wheel-lines=3"
+        except Exception:
+            pass
+        return ""
+
     def _show_transcript(self, jsonl_path: Path) -> bool:
-        """Create or respawn the right pane with a ``less -R`` transcript viewer.
+        """Create or respawn the right pane with a ``less`` transcript viewer.
+
+        Mouse-wheel scrolling works after focusing the right pane (double-click
+        or Ctrl-B →) when less ≥ 590 is installed.
 
         Returns True on success.
         """
         import shlex
         import sys as _sys
-        cmd = f"{_sys.executable} -m ccmgr.transcript {shlex.quote(str(jsonl_path))} | less -R +G"
+        mouse = self._less_mouse_flag
+        cmd = f"{_sys.executable} -m ccmgr.transcript {shlex.quote(str(jsonl_path))} | less -R +G {mouse}"
         if self._right_pane_id and tmux_ctl.pane_alive(self._right_pane_id):
             if not tmux_ctl.respawn_pane(self._right_pane_id, cmd):
                 self._status.set_message("failed to respawn right pane for transcript")
