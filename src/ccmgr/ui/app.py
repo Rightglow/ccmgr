@@ -1200,12 +1200,31 @@ class App:
 
     def _on_running_context_menu(self, entry: RunningEntry) -> None:
         r = self._by_tmux(entry.tmux_name)
-        if r is None or r.is_placeholder or r.project is None:
+        if r is None or r.project is None:
+            return
+        self._running_pane.set_selected(entry.tmux_name)
+        if r.is_placeholder:
+            # Placeholder: no SessionMeta yet, but we can still kill the
+            # running tmux session or switch to it.
+            tmux = r.tmux_name
+            label = r.label
+            items: list[tuple[str, Callable[[], None]]] = [
+                (" Open      ↵", lambda: self._attach_in_right_pane(tmux,
+                                         steal_focus=True)),
+                (" Kill       k", lambda: self._kill_tmux_session(tmux, label)),
+            ]
+            if r.project is not None:
+                proj = r.project
+                items.append(
+                    (" Term       t", lambda: self._open_terminal_for_project(proj)))
+            menu = ContextMenu(items, on_close=self._close_modal)
+            self._show_overlay(menu, width=32, height=12,
+                               click_outside_to_close=True,
+                               fixed_width=True, fixed_height=True)
             return
         session = self._find_session_meta(r.key, r.project)
         if session is None:
             return
-        self._running_pane.set_selected(entry.tmux_name)
         self._open_session_context_menu(session)
 
     def _open_session_context_menu(self, session: SessionMeta) -> None:
@@ -1269,6 +1288,32 @@ class App:
             tmux_ctl.kill_session(r.tmux_name)
         self._running.pop(session.session_id, None)
         self._status.set_message(f"Killed: {session.display_title}  (file kept)")
+
+    def _kill_tmux_session(self, tmux_name: str, label: str) -> None:
+        """Kill a running tmux session by name (no SessionMeta needed)."""
+        if tmux_ctl.session_exists(tmux_name):
+            tmux_ctl.kill_session(tmux_name)
+        # Remove any _running entry keyed by this tmux name.
+        for key in [k for k, r in self._running.items() if r.tmux_name == tmux_name]:
+            del self._running[key]
+        self._status.set_message(f"Killed: {label}  (file kept)")
+
+    def _open_terminal_for_project(self, project: Project) -> None:
+        """Open a terminal in the given project directory."""
+        import os
+        import shlex
+        import subprocess as _sp
+        shell = os.environ.get("SHELL", "/bin/bash")
+        cmd = f"cd {shlex.quote(str(project.real_path))} && exec {shlex.quote(shell)}"
+        target = self._right_pane_id if (self._right_pane_id and tmux_ctl.pane_alive(self._right_pane_id)) else None
+        new_pane = tmux_ctl.split_window_v(cmd, target=target)
+        if not new_pane:
+            self._status.set_message("failed to split for terminal")
+            return
+        _sp.run(["tmux", "set-option", "-p", "-t", new_pane, "remain-on-exit", "off"],
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        tmux_ctl.select_pane(new_pane)
+        self._status.set_message(f"terminal: {project.display_name}")
 
     def _do_context_term(self, session: SessionMeta) -> None:
         import os
