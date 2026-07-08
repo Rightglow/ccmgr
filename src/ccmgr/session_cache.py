@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 from ccmgr.models import Project, SessionMeta
@@ -44,14 +45,21 @@ class SessionCache:
             candidates = candidates[:top_n]
 
         # Phase 3: parse (with cache).
+        now = time.time()
         current_paths: set[Path] = set()
         results: list[SessionMeta] = []
         for mtime, path in candidates:
             current_paths.add(path)
             cached = self._entries.get(path)
             if cached is not None and cached[0] == mtime:
-                results.append(cached[1])
-                continue
+                meta = cached[1]
+                # "busy" status is time-dependent: a tool_use with no
+                # follow-up writes should become "blocked" after 3 s.
+                # The mtime hasn't changed, but the age has — the
+                # cached value is stale.  Re-scan.
+                if meta.status != "busy" or now - mtime <= 3:
+                    results.append(meta)
+                    continue
             meta = _scan_session(project, path)
             if meta is None:
                 continue
