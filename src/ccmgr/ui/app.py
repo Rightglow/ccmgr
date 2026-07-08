@@ -156,6 +156,7 @@ class App:
         self._has_less: bool = shutil.which("less") is not None
         self._less_mouse_flag: str = self._detect_less_mouse()
         self._scroll_manager = ScrollManager(enabled=scroll_coalescing)
+        self._soft_quit_flag: bool = False
 
         projects = list_projects(claude_home)
         self._projects_pane = ProjectsPane(projects, on_select=self._on_project_select,
@@ -198,9 +199,32 @@ class App:
             ("pack", self._status),
         ])
         self._frame = urwid.Frame(body=self._sidebar, footer=footer)
-        # Auto-select the most recent project on startup.
-        if projects:
+        # Recover sessions left alive from a previous soft-quit.
+        self._discover_orphans()
+        # Restore the view from a previous soft-quit, or auto-select the
+        # most recent project as usual.
+        state = self._load_state()
+        if state:
+            # Consume the state file now so a later normal quit does not
+            # restore stale state from a long-past soft quit.
+            try:
+                self._state_path().unlink(missing_ok=True)
+            except OSError:
+                pass
+        restored = False
+        if state:
+            proj_name = state.get("project")
+            if proj_name:
+                match = next((p for p in projects if p.encoded_name == proj_name), None)
+                if match is not None:
+                    self._on_project_select(match)
+                    restored = True
+        if not restored and projects:
             self._on_project_select(projects[0])
+        # Populate the running pane immediately — don't wait for the first
+        # _refresh tick, otherwise the pane shows "(no running sessions)"
+        # for up to 1 s even when _discover_orphans found sessions.
+        self._update_running_pane()
 
     # --- project / session selection callbacks ---
 
@@ -618,12 +642,14 @@ class App:
         self._help_saved_width = ""
 
     def _open_quit_confirm(self) -> None:
+        self._save_state()
         modal = QuitConfirmModal(
             on_confirm=self._confirm_quit,
+            on_soft_quit=self._soft_quit,
             on_cancel=self._close_modal,
             running_count=len(self._running),
         )
-        self._show_overlay(modal, width=50, height=30)
+        self._show_overlay(modal, width=50, height=40)
 
     # --- project shortcut: terminal ---
 
@@ -670,9 +696,121 @@ class App:
         _sp.run(["tmux", "detach-client"], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
 
     def _confirm_quit(self) -> None:
+        """Hard quit: close modal, tear down everything in ``finally``."""
         self._close_modal()
-        self._teardown_tmux()
         raise urwid.ExitMainLoop()
+
+    def _soft_quit(self) -> None:
+        """Soft quit: set flag so ``_teardown_tmux`` skips session kill."""
+        self._soft_quit_flag = True
+        self._close_modal()
+        raise urwid.ExitMainLoop()
+
+    # --- state file (for restart-after-soft-quit) --------------------------
+
+    @staticmethod
+    def _state_path() -> Path:
+        import os as _os
+        return Path(f"/tmp/ccmgr-state-{_os.getuid()}.json")
+
+    def _save_state(self) -> None:
+        """Persist enough state to restore the current view after a restart."""
+        data = {}
+        if self._selected_project is not None:
+            data["project"] = self._selected_project.encoded_name
+        # Also save the focused session so the user lands right back where
+        # they were (helpful when updating mid-task).
+        session = self._currently_focused_session_meta()
+        if session is not None:
+            data["session"] = session.session_id
+        if not data:
+            return
+        import json
+        path = self._state_path()
+        try:
+            path.write_text(json.dumps(data), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _load_state(self) -> dict | None:
+        """Return persisted state dict, or None if unavailable / stale."""
+        import json
+        path = self._state_path()
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def _discover_orphans(self) -> None:
+        """Find detached ``cc-*`` tmux sessions and rebuild ``_running``.
+
+        Called at startup so a soft-quit → restart cycle picks up every
+        Claude session that was left alive.
+
+        tmux session names are truncated (``_safe_name``, 16 chars), so
+        we must resolve each truncated name back to the full session_id
+        by scanning the project's sessions — otherwise the truncated key
+        will not match ``SessionMeta.session_id`` elsewhere.
+        """
+        import subprocess as _sp
+        try:
+            out = _sp.check_output(
+                ["tmux", "list-sessions", "-F",
+                 "#{session_name}\t#{pane_current_path}"],
+                stderr=_sp.DEVNULL, text=True,
+            )
+        except (OSError, _sp.CalledProcessError):
+            return
+        projects = {p.real_path: p for p in list_projects(self._claude_home)}
+        found = 0
+        for line in out.strip().splitlines():
+            if not line.strip():
+                continue
+            parts = line.split("\t", 1)
+            if len(parts) != 2:
+                continue
+            name, cwd_str = parts
+            if not name.startswith("cc-"):
+                continue
+            truncated = name[3:]  # strip "cc-" prefix
+            if truncated.startswith("__new__-"):
+                continue
+            cwd = Path(cwd_str)
+            project = projects.get(cwd)
+            if project is None:
+                continue
+            # Resolve the truncated key back to the full session_id.
+            full_id = self._resolve_truncated_id(truncated, project)
+            if full_id is None:
+                continue
+            if full_id in self._running:
+                continue
+            self._running[full_id] = _Running(
+                key=full_id,
+                tmux_name=name,
+                label=f"{project.display_name}/{full_id[:8]}",
+                project=project,
+            )
+            found += 1
+        if found:
+            self._status.set_message(
+                f"Found {found} running session(s)")
+
+    @staticmethod
+    def _resolve_truncated_id(truncated: str, project: Project) -> str | None:
+        """Find the full session_id whose ``_safe_name`` matches *truncated*."""
+        import os as _os
+        try:
+            with _os.scandir(project.claude_dir) as scan:
+                for entry in scan:
+                    if not entry.name.endswith(".jsonl"):
+                        continue
+                    full_id = entry.name[:-6]  # strip ".jsonl"
+                    if App._safe_name(full_id, 16) == truncated:
+                        return full_id
+        except OSError:
+            pass
+        return None
 
     def _show_overlay(self, modal: urwid.Widget, width: int, height: int,
                        *, click_outside_to_close: bool = False,
@@ -755,7 +893,12 @@ class App:
         self._sidebar.focus_position = (cur - 1) % n if reverse else (cur + 1) % n
 
     def _teardown_tmux(self) -> None:
-        """Clean up on quit: kill right pane, every detached claude session, and our own session if we own it."""
+        """Clean up on quit.
+
+        Called exactly once, from ``run()``'s ``finally`` block, for both
+        hard and soft quit.  On soft quit (``_soft_quit_flag`` is set) the
+        detached Claude sessions and outer tmux session are left alive.
+        """
         self._teardown_scroll_acceleration()
         # Remove the F3 fullscreen binding we installed (it's server-global).
         try:
@@ -770,6 +913,8 @@ class App:
             except Exception:
                 pass
             self._right_pane_id = None
+        if self._soft_quit_flag:
+            return  # <-- soft quit: leave cc-* and outer tmux session alive
         for r in list(self._running.values()):
             try:
                 tmux_ctl.kill_session(r.tmux_name)
@@ -867,8 +1012,17 @@ class App:
                 self._sessions_pane.set_sessions(None, [], running_ids=running_ids,
                                                   favorite_ids=self._favorites.get_ids())
 
-        # Populate the bottom "Running" pane. Sync labels first so AI-
-        # generated titles and renames appear without restarting ccmgr.
+        self._update_running_pane()
+        if self._running:
+            self._status.set_message("Ctrl-B ← returns focus to ccmgr")
+
+    def _update_running_pane(self) -> None:
+        """Sync labels and repopulate the Running pane from ``self._running``.
+
+        Called once during startup (so orphans discovered by
+        ``_discover_orphans`` are visible immediately, before the first
+        poll tick) and on every ``_refresh``.
+        """
         for r in self._running.values():
             if r.is_placeholder or r.project is None:
                 continue
@@ -883,9 +1037,6 @@ class App:
             for r in self._running.values()
         ]
         self._running_pane.set_running(entries)
-
-        if self._running:
-            self._status.set_message("Ctrl-B ← returns focus to ccmgr")
 
     def _resolve_placeholders(self, projects: list[Project]) -> None:
         """Re-key any `__new__-N` placeholder to its real session_id.

@@ -46,28 +46,31 @@ class ProjectInfoModal(urwid.WidgetWrap):
 
 
 class QuitConfirmModal(urwid.WidgetWrap):
-    """Confirm-quit popup. y/Y/Enter confirms; n/N/Esc cancels."""
+    """Confirm-quit popup.  y=kill-all, s=soft (keep sessions), n=cancel."""
 
-    def __init__(self, on_confirm: Callable[[], None], on_cancel: Callable[[], None],
+    def __init__(self, on_confirm: Callable[[], None],
+                 on_soft_quit: Callable[[], None] | None = None,
+                 on_cancel: Callable[[], None] | None = None,
                  running_count: int = 0) -> None:
         self._on_confirm = on_confirm
+        self._on_soft_quit = on_soft_quit
         self._on_cancel = on_cancel
 
         if running_count > 0:
             session_word = "session" if running_count == 1 else "sessions"
-            summary = f"{running_count} Claude {session_word} still running.  Quit will kill them all."
+            summary = f"{running_count} Claude {session_word} still running."
         else:
             summary = "No running sessions."
 
+        soft_line = "s = soft quit (keep sessions alive)"
         body = urwid.Pile([
             urwid.Text("Quit ccmgr?", align="center"),
             urwid.Divider(),
             urwid.Text(("live", summary), align="center"),
             urwid.Divider(),
-            urwid.Text("This will kill the right tmux pane (claude) and the", align="center"),
-            urwid.Text("auto-launched tmux session (if any).", align="center"),
-            urwid.Divider(),
-            urwid.Text(("dim", "y / Enter = yes,  n / Esc = no"), align="center"),
+            urwid.Text(("dim", "y / Enter = quit and kill all sessions"), align="center"),
+            urwid.Text(("dim", soft_line if on_soft_quit else ""), align="center"),
+            urwid.Text(("dim", "n / Esc   = cancel"), align="center"),
         ])
         super().__init__(urwid.LineBox(urwid.Filler(body, valign="middle"), title="Confirm quit"))
 
@@ -78,8 +81,12 @@ class QuitConfirmModal(urwid.WidgetWrap):
         if key in ("y", "Y", "enter"):
             self._on_confirm()
             return None
+        if key in ("s", "S") and self._on_soft_quit is not None:
+            self._on_soft_quit()
+            return None
         if key in ("n", "N", "esc"):
-            self._on_cancel()
+            if self._on_cancel is not None:
+                self._on_cancel()
             return None
         return key
 
