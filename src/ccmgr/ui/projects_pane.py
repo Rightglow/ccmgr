@@ -17,7 +17,8 @@ class _ProjectRow(ClickableRow):
         label = f"{project.display_name} [{project.session_count}]"
         attr = "selected" if selected else None
         super().__init__(urwid.AttrMap(urwid.Text(label), attr, focus_map="focus"),
-                         on_click, on_double_click)
+                         on_click, on_double_click,
+                         click_key=project.encoded_name)
 
 
 class _NewProjectRow(ClickableRow):

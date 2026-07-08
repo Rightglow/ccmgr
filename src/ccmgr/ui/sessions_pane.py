@@ -99,7 +99,8 @@ class _SessionRow(ClickableRow):
         else:
             row_attr = None
         super().__init__(urwid.AttrMap(body, row_attr, focus_map=_FOCUS_REMAP),
-                         on_click, on_double_click, on_right_click)
+                         on_click, on_double_click, on_right_click,
+                         click_key=session.session_id)
 
 
 class _NewSessionRow(ClickableRow):

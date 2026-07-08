@@ -9,12 +9,29 @@ import urwid
 from ccmgr.ui._widgets import ClickableRow, remember_focus, restore_focus
 
 
+# ── fixtures ───────────────────────────────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def _reset_click_state():
+    """Reset class-level double-click state so tests are isolated."""
+    ClickableRow._last_click_key = None
+    ClickableRow._last_click_ts = 0.0
+    ClickableRow._pending_alarm = None
+    ClickableRow._pending_click_cb = None
+    yield
+    # Also reset after test to be safe.
+    ClickableRow._last_click_key = None
+    ClickableRow._last_click_ts = 0.0
+    ClickableRow._pending_alarm = None
+    ClickableRow._pending_click_cb = None
+
+
 # ── helpers ──────────────────────────────────────────────────────────────
 
 def _make_row(on_click=None, on_double_click=None,
-              on_right_click=None) -> ClickableRow:
+              on_right_click=None, click_key: str = "test-row") -> ClickableRow:
     return ClickableRow(urwid.Text("test row"), on_click, on_double_click,
-                        on_right_click)
+                        on_right_click, click_key=click_key)
 
 
 def _click(row: ClickableRow, button: int = 1) -> bool:
@@ -145,8 +162,8 @@ def test_double_click_without_on_click(monkeypatch):
 
     assert _click(row)  # first click — consumed, records timestamp
     # Simulate first click recorded, then advance time
-    row._last_click_ts = time.monotonic()
-    monkeypatch.setattr(time, "monotonic", lambda: row._last_click_ts + 0.2)
+    ClickableRow._last_click_ts = time.monotonic()
+    monkeypatch.setattr(time, "monotonic", lambda: ClickableRow._last_click_ts + 0.2)
     assert _click(row)  # second → double-click
     assert dbl_called == [1]
 

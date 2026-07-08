@@ -343,6 +343,7 @@ class _BrowserRow(ClickableRow):
             urwid.AttrMap(urwid.Text(markup, wrap="clip"),
                           attr, focus_map="focus"),
             on_click=on_click,
+            click_key=str(path) if path is not None else None,
         )
 
 

@@ -34,7 +34,8 @@ class _RunningRow(ClickableRow):
         # own attribute — and thus its background — untouched).
         row_attr = _SELECTED_MAP if is_selected else "live"
         super().__init__(urwid.AttrMap(text, row_attr, focus_map=_FOCUS_REMAP),
-                         on_click, on_double_click, on_right_click)
+                         on_click, on_double_click, on_right_click,
+                         click_key=entry.tmux_name)
 
 
 class RunningSessionsPane(urwid.WidgetWrap):

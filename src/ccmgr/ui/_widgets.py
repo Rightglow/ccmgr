@@ -27,6 +27,11 @@ class ClickableRow(urwid.WidgetWrap):
     immediately on the first press — no delay is needed because there is
     nothing to disambiguate.
 
+    **Double-click state is stored at class level**, keyed by *click_key*,
+    so that polling-driven row rebuilds do not reset the 500 ms window.
+    Two presses on different instances of the same logical row (same
+    *click_key*) are still recognised as a double-click.
+
     .. attribute:: _main_loop
 
        Must be set before any widget receives mouse events (``App.run()``
@@ -37,15 +42,21 @@ class ClickableRow(urwid.WidgetWrap):
     _DOUBLE_CLICK_INTERVAL = 0.5
     _main_loop: urwid.MainLoop | None = None
 
+    # Class-level double-click state — survives row rebuilds from polling.
+    _last_click_key: str | None = None
+    _last_click_ts: float = 0.0
+    _pending_alarm: object | None = None
+    _pending_click_cb: Callable[[], None] | None = None
+
     def __init__(self, widget: urwid.Widget,
                  on_click: "Callable[[], None] | None" = None,
                  on_double_click: "Callable[[], None] | None" = None,
-                 on_right_click: "Callable[[], None] | None" = None) -> None:
+                 on_right_click: "Callable[[], None] | None" = None,
+                 click_key: str | None = None) -> None:
         self._on_click = on_click
         self._on_double_click = on_double_click
         self._on_right_click = on_right_click
-        self._last_click_ts: float = 0.0
-        self._pending_alarm: object | None = None
+        self._click_key = click_key
         super().__init__(widget)
 
     def selectable(self) -> bool:
@@ -64,17 +75,30 @@ class ClickableRow(urwid.WidgetWrap):
         if button == 1:
             if self._on_double_click is not None:
                 now = time.monotonic()
-                if now - self._last_click_ts < self._DOUBLE_CLICK_INTERVAL:
-                    self._last_click_ts = 0.0
-                    self._cancel_pending()
+                key = self._click_key
+                if (key is not None
+                        and ClickableRow._last_click_key is not None
+                        and key == ClickableRow._last_click_key
+                        and now - ClickableRow._last_click_ts < self._DOUBLE_CLICK_INTERVAL):
+                    # Double-click — same logical row within the window,
+                    # even if polling rebuilt the widget instance.
+                    ClickableRow._last_click_ts = 0.0
+                    ClickableRow._last_click_key = None
+                    ClickableRow._cancel_pending()
                     self._on_double_click()
                     return True
-                self._last_click_ts = now
+
+                # First press (or different row, or window expired).
+                # Cancel the previous pending single-click — the user
+                # either moved to a different row or this is a fresh
+                # first press on the same logical row after a rebuild.
+                ClickableRow._cancel_pending()
+                ClickableRow._last_click_key = key
+                ClickableRow._last_click_ts = now
 
                 if self._on_click is not None:
-                    self._schedule_after(self._DOUBLE_CLICK_INTERVAL,
-                                         self._fire_click)
-                    return True
+                    ClickableRow._pending_click_cb = self._on_click
+                    ClickableRow._schedule_after(self._DOUBLE_CLICK_INTERVAL)
                 return True
 
             if self._on_click is not None:
@@ -88,31 +112,37 @@ class ClickableRow(urwid.WidgetWrap):
 
         return super().mouse_event(size, event, button, col, row, focus)
 
-    # ── alarm helpers ─────────────────────────────────────────────────
+    # ── alarm helpers (class-level — only one double-click is in
+    #    flight at a time, so a single shared slot suffices) ──────────
 
-    def _schedule_after(self, delay: float,
-                        callback: Callable[[], None]) -> None:
-        if self._main_loop is not None:
-            self._pending_alarm = self._main_loop.set_alarm_in(
-                delay, lambda _loop, _ud: callback())
+    @classmethod
+    def _schedule_after(cls, delay: float) -> None:
+        if cls._main_loop is not None:
+            cls._pending_alarm = cls._main_loop.set_alarm_in(
+                delay, lambda _loop, _ud: cls._fire_click())
         else:
             # No main loop (e.g. unit tests) — fire immediately so tests
             # see consistent callback counts regardless of timing.
-            callback()
+            cls._fire_click()
 
-    def _fire_click(self) -> None:
-        self._pending_alarm = None
-        if self._on_click is not None:
-            self._on_click()
+    @classmethod
+    def _fire_click(cls) -> None:
+        cls._pending_alarm = None
+        cb = cls._pending_click_cb
+        cls._pending_click_cb = None
+        if cb is not None:
+            cb()
 
-    def _cancel_pending(self) -> None:
-        if self._pending_alarm is not None:
-            if self._main_loop is not None:
+    @classmethod
+    def _cancel_pending(cls) -> None:
+        if cls._pending_alarm is not None:
+            if cls._main_loop is not None:
                 try:
-                    self._main_loop.remove_alarm(self._pending_alarm)
+                    cls._main_loop.remove_alarm(cls._pending_alarm)
                 except Exception:
                     pass
-            self._pending_alarm = None
+            cls._pending_alarm = None
+        cls._pending_click_cb = None
 
 
 def remember_focus(walker: urwid.SimpleFocusListWalker, row_type: type,
