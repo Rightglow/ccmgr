@@ -1203,6 +1203,10 @@ class App:
         if r is None or r.project is None:
             return
         self._running_pane.set_selected(entry.tmux_name)
+        # Ensure tmux focus is on our pane so the 200 ms poll doesn't
+        # auto-close the menu (can happen if focus was on the right pane).
+        if self._ccmgr_pane_id:
+            tmux_ctl.select_pane(self._ccmgr_pane_id)
         if r.is_placeholder:
             # Placeholder: no SessionMeta yet, but we can still kill the
             # running tmux session or switch to it.
