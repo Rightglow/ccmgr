@@ -67,11 +67,19 @@ class HelpBar(urwid.WidgetWrap):
 
 
 class StatusBar(urwid.WidgetWrap):
-    """Dynamic status message line. Use set_message to update."""
+    """Two-line status bar — height is fixed so the sidebar never jitters.
+
+    A ``Pile`` of two ``Text`` widgets, each ``wrap="clip"``.  The
+    first line shows the message (truncated if too wide); the second
+    is always empty, guaranteeing a fixed 2-line height.
+    """
 
     def __init__(self) -> None:
-        self._text = urwid.Text("", align="left")
-        super().__init__(urwid.AttrMap(self._text, "statusbar"))
+        self._line1 = urwid.Text("", align="left", wrap="clip")
+        self._line2 = urwid.Text("", align="left", wrap="clip")
+        body = urwid.Pile([self._line1, self._line2])
+        super().__init__(urwid.AttrMap(body, "statusbar"))
 
     def set_message(self, msg: str) -> None:
-        self._text.set_text(msg)
+        self._line1.set_text(msg)
+        self._line2.set_text("")

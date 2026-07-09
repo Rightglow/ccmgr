@@ -967,11 +967,12 @@ class App:
                     pass
 
     def _enter_filter_mode(self) -> None:
-        # Swap just the status row (second item in the footer Pile) for an
-        # Edit widget; the help-hint row above it stays visible.
+        # Swap the status row for a filter Edit, keeping the 2-line
+        # height so the sidebar doesn't jump.
         edit = urwid.Edit(caption="filter: ")
+        filter_body = urwid.Pile([edit, urwid.Text("")])
         footer_pile = self._frame.contents["footer"][0]
-        footer_pile.contents[1] = (edit, footer_pile.options("pack"))
+        footer_pile.contents[1] = (filter_body, footer_pile.options("pack"))
         footer_pile.focus_position = 1
         self._frame.focus_position = "footer"
 
