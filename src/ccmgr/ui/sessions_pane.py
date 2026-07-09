@@ -8,7 +8,6 @@ from datetime import datetime
 import urwid
 
 from ccmgr.models import Project, SessionMeta
-from ccmgr.session_index import is_live
 from ccmgr.ui._widgets import ClickableRow, remember_focus, restore_focus
 
 
@@ -40,8 +39,8 @@ def _format_size(nbytes: int) -> str:
 
 _STATUS_DOTS = {"idle": ("status_idle", "●"), "busy": ("status_busy", "●"),
                 "blocked": ("status_blocked", "●")}
-# When a row is selected (right-click context menu), map the status-dot
-# attributes to variants with the selected background so the dot blends in.
+# When a row is active in the right pane (or targeted by a context menu), map
+# status-dot attributes to variants with the selected background.
 _SELECTED_MAP = {None: "selected", "dim": "selected",
                  "status_idle": "status_idle_sel",
                  "status_busy": "status_busy_sel",
@@ -49,24 +48,22 @@ _SELECTED_MAP = {None: "selected", "dim": "selected",
 # Focus highlight (brown bg). Status dots need their own remap so the coloured
 # ● inherits the focus background instead of leaving a black gap; everything
 # else (title, star, meta) collapses to the plain "focus" attribute.
-_FOCUS_REMAP = {None: "focus", "live": "focus", "dim": "focus", "live_tag": "focus",
+_FOCUS_REMAP = {None: "focus", "live": "focus", "dim": "focus",
                 "status_idle": "status_idle_focus",
                 "status_busy": "status_busy_focus",
                 "status_blocked": "status_blocked_focus"}
 
 
 class _SessionRow(ClickableRow):
-    def __init__(self, session: SessionMeta, live_threshold: float,
-                 is_running: bool = False, is_favorite: bool = False,
+    def __init__(self, session: SessionMeta, is_running: bool = False,
+                 is_favorite: bool = False,
                  is_selected: bool = False,
                  on_click: "Callable[[], None] | None" = None,
                  on_double_click: "Callable[[], None] | None" = None,
                  on_right_click: "Callable[[], None] | None" = None) -> None:
         self.session = session
-        is_active = is_live(session, live_threshold)
-
         # Two-line layout:
-        #   [●] [★] Title  [LIVE]
+        #   [●] [★] Title
         #   <relative time> · <branch> · <size>
         # Status dot stays in a fixed leftmost column so the status column
         # aligns across rows; the star sits next to the title it marks.
@@ -78,8 +75,6 @@ class _SessionRow(ClickableRow):
             # highlight background instead of leaving an un-highlighted gap.
             title_markup.append("★ ")
         title_markup.append(session.display_title)
-        if is_active:
-            title_markup.append(("live_tag", " [LIVE]"))
         title_text = urwid.Text(title_markup, wrap="clip")
 
         # Size is captured on SessionMeta at scan time — no stat() in the
@@ -100,7 +95,8 @@ class _SessionRow(ClickableRow):
             row_attr = None
         super().__init__(urwid.AttrMap(body, row_attr, focus_map=_FOCUS_REMAP),
                          on_click, on_double_click, on_right_click,
-                         click_key=session.session_id)
+                         click_key=session.session_id,
+                         immediate_click=is_running)
 
 
 class _NewSessionRow(ClickableRow):
@@ -111,18 +107,17 @@ class _NewSessionRow(ClickableRow):
 
 class SessionsPane(urwid.WidgetWrap):
     def __init__(self, on_select: Callable[[SessionMeta | None], None],
-                 live_threshold: float,
                  on_preview: "Callable[[SessionMeta], None] | None" = None,
                  on_context: "Callable[[SessionMeta], None] | None" = None) -> None:
         self._on_select = on_select
         self._on_preview = on_preview
         self._on_context = on_context
-        self._live_threshold = live_threshold
         self._sessions: list[SessionMeta] = []
         self._project: Project | None = None
         self._filter = ""
         self._running_ids: set[str] = set()
         self._favorite_ids: set[str] = set()
+        self._active_session_id: str | None = None
         self._selected_session_id: str | None = None
 
         self._new_row = _NewSessionRow(on_click=lambda: self._on_select(None))
@@ -172,11 +167,26 @@ class SessionsPane(urwid.WidgetWrap):
 
         self._restore_focus(prior_focus)
 
+    def set_active_session(self, session_id: str | None) -> None:
+        """Persistently highlight the conversation displayed in the right pane."""
+        if self._active_session_id == session_id:
+            return
+        self._active_session_id = session_id
+        self._rerender_preserving_focus()
+
     def set_selected_session(self, session_id: str | None) -> None:
+        """Temporarily highlight a context-menu or modal target."""
         if self._selected_session_id == session_id:
             return
         self._selected_session_id = session_id
+        self._rerender_preserving_focus()
+
+    def _rerender_preserving_focus(self) -> None:
+        if self._project is None:
+            return
+        prior_focus = self._remember_focus()
         self._render(self._visible_sessions())
+        self._restore_focus(prior_focus)
 
     def set_filter(self, needle: str) -> None:
         self._filter = needle
@@ -201,7 +211,8 @@ class SessionsPane(urwid.WidgetWrap):
         for s in sessions:
             is_running = s.session_id in self._running_ids
             is_fav = s.session_id in self._favorite_ids
-            is_sel = s.session_id == self._selected_session_id
+            selected_id = self._selected_session_id or self._active_session_id
+            is_sel = s.session_id == selected_id
             if is_running:
                 on_click = lambda s=s: self._on_select(s, steal_focus=False)
                 on_dbl = lambda s=s: self._on_select(s)
@@ -209,7 +220,7 @@ class SessionsPane(urwid.WidgetWrap):
                 on_click = (lambda s=s: self._on_preview(s)) if self._on_preview else None
                 on_dbl = lambda s=s: self._on_select(s)  # double-click opens
             rows.append(_SessionRow(
-                s, self._live_threshold,
+                s,
                 is_running=is_running, is_favorite=is_fav,
                 is_selected=is_sel,
                 on_click=on_click, on_double_click=on_dbl,

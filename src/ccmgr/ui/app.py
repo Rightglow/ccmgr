@@ -42,8 +42,8 @@ from ccmgr.ui.statusbar import HelpBar, StatusBar
 
 PALETTE = [
     ("statusbar", "yellow,bold", "default"),
-    # Focus highlight: bold black on brown (amber) — warm, much easier on the
-    # eyes than the previous bright-white "light gray" background.
+    # Row focus: bold black on brown. Pane focus also remaps otherwise-unstyled
+    # titles to cyan, making the active pane easier to scan.
     ("focus", "black,bold", "brown"),
     # Persistent "currently-active project" highlight, shown even when focus
     # is elsewhere. Cool tone so it doesn't compete with the warm focus color.
@@ -51,7 +51,7 @@ PALETTE = [
     ("title", "white,bold", ""),
     ("dim", "dark gray", ""),
     ("live", "light green,bold", ""),
-    ("live_tag", "yellow,bold", ""),
+    ("current_path", "yellow,bold", ""),
     # Status dots — the ● glyph carries its own palette attribute so it keeps
     # its colour on any row background. Each status has three background
     # variants so it blends into normal / focused (brown) / selected (cyan)
@@ -118,6 +118,23 @@ class _CloseOnClickOverlay(urwid.Overlay):
         return handled
 
 
+class _FocusAwareFrame(urwid.Frame):
+    """Frame that can suppress all descendant focus maps when tmux focus leaves."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        self._window_active = True
+        super().__init__(*args, **kwargs)
+
+    def set_window_active(self, active: bool) -> None:
+        if self._window_active == active:
+            return
+        self._window_active = active
+        self._invalidate()
+
+    def render(self, size, focus: bool = False):
+        return super().render(size, focus=focus and self._window_active)
+
+
 @dataclass
 class _RightPaneState:
     """What to restore when exiting history-preview mode."""
@@ -143,6 +160,10 @@ class App:
         # The right pane in ccmgr's window; runs `tmux attach -t <claude_session>`.
         self._right_pane_id: str | None = None
         self._loop: urwid.MainLoop | None = None
+        self._pending_restore_state: dict | None = None
+        self._pending_project: Project | None = None
+        self._pending_scroll_session: str | None = None
+        self._scroll_alarm_pending: bool = False
         self._last_screen_size: tuple[int, int] | None = None
         self._help_right_was_open: bool = False
         self._help_saved_width: str = ""
@@ -152,7 +173,10 @@ class App:
         self._in_history_mode: bool = False
         self._restore_state: _RightPaneState | None = None
         self._right_pane_claude: str | None = None  # tmux_name of claude session in right pane
+        self._active_session_id: str | None = None
         self._ccmgr_pane_id: str | None = None  # set in run()
+        self._ccmgr_has_focus: bool = True
+        self._divider_active: bool | None = None
         self._has_less: bool = shutil.which("less") is not None
         self._less_mouse_flag: str = self._detect_less_mouse()
         self._scroll_manager = ScrollManager(enabled=scroll_coalescing)
@@ -163,7 +187,6 @@ class App:
                                            on_double_click=self._on_project_double_click)
         self._sessions_pane = SessionsPane(
             on_select=self._on_session_select,
-            live_threshold=float(config.live_badge_seconds),
             on_preview=self._on_session_preview,
             on_context=self._open_session_context_menu,
         )
@@ -180,15 +203,15 @@ class App:
             self._status.set_message(
                 f"WARNING: '{self._config.claude_binary}' not on PATH — sessions cannot launch")
 
-        # Wrap each pane in AttrMap so its LineBox border highlights when
-        # focused. The `pane`/`pane_focus` palette entries color only cells
-        # with no explicit attribute (the border chars) — inner rows have
-        # their own AttrMaps and are unaffected.
+        # The outer AttrMaps highlight both LineBox borders and otherwise-
+        # unstyled titles in the focused pane. A one-column gutter keeps those
+        # right edges visually separate from tmux's center divider.
         self._sidebar = urwid.Pile([
             ("weight", 2, urwid.AttrMap(self._projects_pane, "pane", focus_map="pane_focus")),
             ("weight", 3, urwid.AttrMap(self._sessions_pane, "pane", focus_map="pane_focus")),
             ("weight", 1, urwid.AttrMap(self._running_pane, "pane", focus_map="pane_focus")),
         ])
+        self._sidebar_body = urwid.Padding(self._sidebar, right=1)
         self._help_bar = HelpBar(
             on_help=self._open_help_modal,
             on_quit=self._open_quit_confirm,
@@ -198,41 +221,115 @@ class App:
             ("pack", self._help_bar),
             ("pack", self._status),
         ])
-        self._frame = urwid.Frame(body=self._sidebar, footer=footer)
+        self._frame = _FocusAwareFrame(body=self._sidebar_body, footer=footer)
         # Recover sessions left alive from a previous soft-quit.
         self._discover_orphans()
         # Restore the view from a previous soft-quit, or auto-select the
         # most recent project as usual.
         state = self._load_state()
-        restored = False
+        initial_project: Project | None = None
         if state:
             proj_name = state.get("project")
             if proj_name:
-                match = next((p for p in projects if p.encoded_name == proj_name), None)
-                if match is not None:
-                    self._on_project_select(match)
-                    restored = True
-        if not restored and projects:
-            self._on_project_select(projects[0])
-        # Consume the state file AFTER successful init so a crash between
-        # load and restore doesn't lose the saved state.
-        if state:
-            try:
-                self._state_path().unlink(missing_ok=True)
-            except OSError:
-                pass
-        # Populate the running pane immediately — don't wait for the first
-        # _refresh tick, otherwise the pane shows "(no running sessions)"
-        # for up to 1 s even when _discover_orphans found sessions.
-        self._update_running_pane()
-        # Re-open whatever was in the right pane at soft-quit time.
-        if state:
-            self._restore_right_pane(state)
+                initial_project = next(
+                    (p for p in projects if p.encoded_name == proj_name), None)
+        if initial_project is None and projects:
+            initial_project = projects[0]
+        if initial_project is not None:
+            self._selected_project = initial_project
+            self._projects_pane.set_selected(initial_project.encoded_name)
+            self._pending_project = initial_project
+        # Paint discovered orphans without parsing their JSONLs. Full labels
+        # and statuses are refined after MainLoop renders the first frame.
+        self._render_running_pane()
+        # Re-open the right pane after MainLoop paints the sidebar's first frame.
+        self._pending_restore_state = state
+
+    def _set_active_target(self, session_id: str | None,
+                           tmux_name: str | None) -> None:
+        """Update persistent highlights for whatever the right pane displays."""
+        self._active_session_id = session_id
+        self._sessions_pane.set_active_session(session_id)
+        self._running_pane.set_active(tmux_name)
+
+    def _set_active_tmux_target(self, tmux_name: str) -> None:
+        running = self._by_tmux(tmux_name)
+        session_id = None
+        if running is not None and not running.is_placeholder:
+            session_id = running.key
+        self._set_active_target(session_id, tmux_name)
+
+    def _set_divider_active(self, active: bool, *, force: bool = False) -> None:
+        """Highlight tmux's divider only while a non-ccmgr pane has focus."""
+        if not force and self._divider_active == active:
+            return
+        self._divider_active = active
+        style = "fg=cyan" if active else "fg=colour240"
+        tmux_ctl.set_window_border_style(style)
+
+    def _set_ccmgr_focus(self, active: bool, *, force_border: bool = False) -> None:
+        """Synchronize urwid focus maps and the tmux center divider."""
+        self._ccmgr_has_focus = active
+        self._frame.set_window_active(active)
+        self._set_divider_active(not active, force=force_border)
+
+    def _filter_input(self, keys: list, _raw: list[int]) -> list:
+        """Consume terminal focus reports before normal key dispatch."""
+        filtered = []
+        for key in keys:
+            if key == "focus in":
+                self._set_ccmgr_focus(True)
+            elif key == "focus out":
+                self._set_ccmgr_focus(False)
+            else:
+                filtered.append(key)
+        return filtered
+
+    def _load_pending_project(self, _loop, _user_data) -> None:
+        """Load initial session metadata after the sidebar's first frame."""
+        project = self._pending_project
+        self._pending_project = None
+        if (project is not None
+                and self._selected_project is not None
+                and project.encoded_name == self._selected_project.encoded_name):
+            self._on_project_select(project)
+
+    def _restore_pending_right_pane(self, _loop, _user_data) -> None:
+        """Restore persisted state, retaining its file if restoration raises."""
+        state = self._pending_restore_state
+        self._pending_restore_state = None
+        if state is None:
+            return
+        self._restore_right_pane(state)
+        try:
+            self._state_path().unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _schedule_scroll_acceleration(self, claude_tmux_name: str) -> None:
+        """Configure scrolling after the pane switch has had a chance to draw."""
+        if self._loop is None:
+            self._configure_scroll_acceleration(claude_tmux_name)
+            return
+        self._pending_scroll_session = claude_tmux_name
+        if self._scroll_alarm_pending:
+            return
+        self._scroll_alarm_pending = True
+        self._loop.set_alarm_in(0.05, self._apply_pending_scroll_acceleration)
+
+    def _apply_pending_scroll_acceleration(self, _loop, _user_data) -> None:
+        self._scroll_alarm_pending = False
+        claude_tmux_name = self._pending_scroll_session
+        self._pending_scroll_session = None
+        if (claude_tmux_name is not None
+                and self._right_pane_claude == claude_tmux_name):
+            self._configure_scroll_acceleration(claude_tmux_name)
 
     # --- project / session selection callbacks ---
 
     def _on_project_select(self, project: Project | None) -> None:
         """Single-click / initial auto-select: show sessions, keep focus here."""
+        self._pending_project = None
         if project is None:
             self._open_new_project_modal()
             return
@@ -306,6 +403,7 @@ class App:
             self._save_restore_state()
         if self._show_transcript(session.jsonl_path):
             self._in_history_mode = True
+            self._set_active_target(session.session_id, None)
 
     def _save_restore_state(self) -> None:
         """Remember what's in the right pane before taking it over for history."""
@@ -347,13 +445,12 @@ class App:
                 self._status.set_message("failed to respawn right pane for transcript")
                 return False
         else:
-            new_id = tmux_ctl.split_window_h(cmd, size_percent=70)
+            new_id = tmux_ctl.split_window_h(cmd, size_percent=70, detached=True)
             if not new_id:
                 self._status.set_message("failed to create right pane for transcript")
                 return False
             self._right_pane_id = new_id
-            tmux_ctl.set_window_option("pane-border-style", "fg=colour240")
-            tmux_ctl.set_window_option("pane-active-border-style", "fg=cyan,bold")
+            self._set_ccmgr_focus(self._ccmgr_has_focus, force_border=True)
         # Right pane is now showing a transcript, not a Claude session.
         self._right_pane_claude = None
         self._install_fullscreen_binding()
@@ -423,7 +520,6 @@ class App:
         otherwise refuses to attach from within another tmux session.
         """
         import shlex
-        self._configure_scroll_acceleration(claude_tmux_name)
         # Fast path: the right pane is already showing this session.  Skip the
         # expensive respawn and just optionally move focus.  This also prevents
         # focus flicker on double-click (the first click's respawn kills and
@@ -433,6 +529,8 @@ class App:
                 and tmux_ctl.pane_alive(self._right_pane_id)):
             if steal_focus:
                 tmux_ctl.select_pane(self._right_pane_id)
+                self._set_ccmgr_focus(False)
+            self._set_active_tmux_target(claude_tmux_name)
             return True
 
         attach_cmd = f"TMUX= exec tmux attach-session -t {shlex.quote(claude_tmux_name)}"
@@ -440,21 +538,22 @@ class App:
             ok = tmux_ctl.respawn_pane(self._right_pane_id, attach_cmd)
         else:
             # ccmgr (left) at 30%, claude (right, the new pane) at 70%.
-            new_id = tmux_ctl.split_window_h(attach_cmd, size_percent=70)
+            new_id = tmux_ctl.split_window_h(
+                attach_cmd, size_percent=70, detached=not steal_focus)
             if not new_id:
                 return False
             self._right_pane_id = new_id
-            # tmux only draws pane borders once there are 2+ panes. We just
-            # created the second one, so now is the moment to apply the
-            # active/inactive border palette — matches the bright-cyan focus
-            # highlight ccmgr uses on its own urwid panes.
-            tmux_ctl.set_window_option("pane-border-style", "fg=colour240")
-            tmux_ctl.set_window_option("pane-active-border-style", "fg=cyan,bold")
             ok = True
         if ok and self._right_pane_id and steal_focus:
             tmux_ctl.select_pane(self._right_pane_id)
         if ok:
             self._right_pane_claude = claude_tmux_name
+            self._set_active_tmux_target(claude_tmux_name)
+            self._set_ccmgr_focus(
+                not steal_focus,
+                force_border=True,
+            )
+            self._schedule_scroll_acceleration(claude_tmux_name)
             self._install_fullscreen_binding()
         return ok
 
@@ -695,6 +794,7 @@ class App:
             stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
         )
         tmux_ctl.select_pane(new_pane)
+        self._set_ccmgr_focus(False)
         self._status.set_message(f"terminal: {proj.display_name}  (Ctrl-B then arrow = move panes)")
 
     def _on_detach(self) -> None:
@@ -733,8 +833,8 @@ class App:
         # What's in the right pane — so we can re-open the same thing.
         if self._in_history_mode:
             data["right_kind"] = "preview"
-            if session is not None:
-                data["right_session"] = session.session_id
+            if self._active_session_id is not None:
+                data["right_session"] = self._active_session_id
         elif self._right_pane_claude is not None:
             data["right_kind"] = "claude"
             data["right_tmux"] = self._right_pane_claude
@@ -769,6 +869,7 @@ class App:
                 meta = self._session_cache.get(self._selected_project, sess_id)
                 if meta is not None and self._show_transcript(meta.jsonl_path):
                     self._in_history_mode = True
+                    self._set_active_target(meta.session_id, None)
 
     def _discover_orphans(self) -> None:
         """Find detached ``cc-*`` tmux sessions and rebuild ``_running``.
@@ -874,11 +975,6 @@ class App:
             self._loop.widget = self._frame
         self._sessions_pane.set_selected_session(None)
         self._running_pane.set_selected(None)
-        # Keep tmux focus on ccmgr's pane so the next keystroke doesn't
-        # accidentally land in Claude (can happen after mouse clicks).
-        pane_id = tmux_ctl.current_pane_id()
-        if pane_id:
-            tmux_ctl.select_pane(pane_id)
 
     # --- key handling ---
 
@@ -1020,18 +1116,21 @@ class App:
                 tmux_ctl.kill_pane(self._right_pane_id)
                 self._right_pane_id = None
                 self._right_pane_claude = None
+                self._set_active_target(None, None)
 
         # Detect when the right pane was closed (user pressed q in less, the
         # pane was cleaned up above, or it was killed externally).  In history
         # mode, restore whatever was there before; otherwise just clear our
         # tracking.
         if self._right_pane_id and not tmux_ctl.pane_alive(self._right_pane_id):
+            self._right_pane_id = None
+            self._right_pane_claude = None
             if self._in_history_mode:
                 self._in_history_mode = False
+                self._set_active_target(None, None)
                 self._restore_from_history_mode()
             else:
-                self._right_pane_id = None
-                self._right_pane_claude = None
+                self._set_active_target(None, None)
 
         # Promote any `__new__-N` placeholders to their real session_id +
         # display title once claude has written the jsonl on disk.
@@ -1047,6 +1146,7 @@ class App:
                                                   favorite_ids=self._favorites.get_ids())
             else:
                 self._selected_project = None
+                self._projects_pane.set_selected(None)
                 self._sessions_pane.set_sessions(None, [], running_ids=running_ids,
                                                   favorite_ids=self._favorites.get_ids())
 
@@ -1059,15 +1159,16 @@ class App:
 
         For a session ccmgr has opened, a pending ``tool_use`` with a live
         child process means a tool is actively running (busy); no child means
-        Claude is waiting for approval (blocked).  This is authoritative and
-        time-independent.  Sessions we haven't opened fall back to
-        ``meta.status`` (the JSONL time heuristic).  Used by BOTH panes so the
+        Claude is waiting for approval (blocked). Probe failures fall back to
+        ``meta.status`` (the JSONL time heuristic). Used by both panes so the
         same session never shows two different dots.
         """
         if meta.pending_tool:
             r = self._running.get(meta.session_id)
             if r is not None and not r.is_placeholder:
-                return "busy" if tmux_ctl.session_has_child(r.tmux_name) else "blocked"
+                has_child = tmux_ctl.session_has_child(r.tmux_name)
+                if has_child is not None:
+                    return "busy" if has_child else "blocked"
         return meta.status
 
     def _refine_status(self, meta: SessionMeta) -> SessionMeta:
@@ -1076,14 +1177,7 @@ class App:
         return meta if status == meta.status else replace(meta, status=status)
 
     def _update_running_pane(self) -> None:
-        """Sync labels/status and repopulate the Running pane from ``self._running``.
-
-        Called once during startup (so orphans discovered by
-        ``_discover_orphans`` are visible immediately, before the first
-        poll tick) and on every ``_refresh``.  Status comes from the shared
-        SessionCache + ``_effective_status`` — the same path the Sessions pane
-        uses, so the two panes agree.
-        """
+        """Sync labels/status and repopulate the Running pane."""
         for r in self._running.values():
             if r.is_placeholder or r.project is None:
                 continue
@@ -1092,6 +1186,10 @@ class App:
                 if meta.title:
                     r.label = f"{meta.project.display_name}/{meta.display_title}"
                 r.status = self._effective_status(meta)
+        self._render_running_pane()
+
+    def _render_running_pane(self) -> None:
+        """Render registry values without doing metadata or process I/O."""
         entries = [
             RunningEntry(tmux_name=r.tmux_name, label=r.label, status=r.status)
             for r in self._running.values()
@@ -1139,6 +1237,8 @@ class App:
             r.created_at = 0.0
             self._running[candidate.session_id] = r
             claimed.add(candidate.session_id)
+            if self._right_pane_claude == r.tmux_name:
+                self._set_active_target(candidate.session_id, r.tmux_name)
 
     def _currently_focused_session_meta(self) -> SessionMeta | None:
         if not self._sessions_pane._walker:
@@ -1528,6 +1628,7 @@ class App:
         _sp.run(["tmux", "set-option", "-p", "-t", new_pane, "remain-on-exit", "off"],
                 stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
         tmux_ctl.select_pane(new_pane)
+        self._set_ccmgr_focus(False)
         self._status.set_message(f"terminal: {project.display_name}")
 
     def _do_context_term(self, session: SessionMeta) -> None:
@@ -1544,6 +1645,7 @@ class App:
         _sp.run(["tmux", "set-option", "-p", "-t", new_pane, "remain-on-exit", "off"],
                 stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
         tmux_ctl.select_pane(new_pane)
+        self._set_ccmgr_focus(False)
         self._status.set_message(f"terminal: {session.project.display_name}")
 
     def _do_context_delete(self, session: SessionMeta) -> None:
@@ -1610,6 +1712,10 @@ class App:
             # tmux on OSC-52-capable terminals). Pairs with set-clipboard on.
             tmux_ctl.enable_clipboard_passthrough()
             _sp.run(
+                ["tmux", "set-option", "-t", sess, "focus-events", "on"],
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+            )
+            _sp.run(
                 ["tmux", "set-option", "-t", sess, "mouse", "on"],
                 stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
             )
@@ -1623,7 +1729,15 @@ class App:
             )
 
         self._ccmgr_pane_id = tmux_ctl.current_pane_id()
-        self._loop = urwid.MainLoop(self._frame, palette=PALETTE, unhandled_input=self._on_input)
+        self._set_ccmgr_focus(True, force_border=True)
+        screen = urwid.raw_display.Screen(focus_reporting=True)
+        self._loop = urwid.MainLoop(
+            self._frame,
+            palette=PALETTE,
+            screen=screen,
+            input_filter=self._filter_input,
+            unhandled_input=self._on_input,
+        )
         from ccmgr.ui._widgets import ClickableRow
         ClickableRow._main_loop = self._loop
         try:
@@ -1640,6 +1754,12 @@ class App:
         # Right pane is created lazily on first session launch — startup is
         # ccmgr-only, no empty pane.
         self._loop.set_alarm_in(self._config.poll_interval_ms / 1000.0, self._on_tick)
+        if self._pending_project is not None:
+            self._loop.set_alarm_in(
+                0.05, self._load_pending_project)
+        if self._pending_restore_state is not None:
+            self._loop.set_alarm_in(
+                0.1, self._restore_pending_right_pane)
         try:
             self._loop.run()
         except KeyboardInterrupt:

@@ -431,7 +431,7 @@ class PathBrowser(urwid.WidgetWrap):
 
     def _render_list(self) -> None:
         rows: list = [
-            _BrowserRow(".  (use this path)", "live_tag",
+            _BrowserRow(".  (use this path)", "current_path",
                         path=self._path,
                         on_click=lambda: self._enter_path(self._path)),
             _BrowserRow("..  (parent directory)", "live",

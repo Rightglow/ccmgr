@@ -104,3 +104,28 @@ def test_running_row_uses_status_dot():
     row = _RunningRow(e)
     # Row renders without error with tuple status dot
     assert row is not None
+
+
+def _selected_tmux_names(pane: RunningSessionsPane) -> set[str]:
+    return {
+        row.entry.tmux_name
+        for row in pane._walker
+        if isinstance(row, _RunningRow)
+        and row._wrapped_widget.attr_map.get(None) == "selected"
+    }
+
+
+def test_active_running_entry_persists_after_context_selection_clears():
+    active = _entry("cc-active")
+    context = _entry("cc-context")
+    pane = RunningSessionsPane(on_select=lambda e: None)
+    pane.set_running([active, context])
+
+    pane.set_active(active.tmux_name)
+    assert _selected_tmux_names(pane) == {active.tmux_name}
+
+    pane.set_selected(context.tmux_name)
+    assert _selected_tmux_names(pane) == {context.tmux_name}
+
+    pane.set_selected(None)
+    assert _selected_tmux_names(pane) == {active.tmux_name}

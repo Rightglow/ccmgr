@@ -29,8 +29,6 @@ export default function ConfigSection() {
             <span className="text-on-primary">[live]</span>
             {"\n"}
             <span className="text-on-primary/70">poll_interval_ms = 1000</span>
-            {"\n"}
-            <span className="text-on-primary/70">live_badge_seconds = 60</span>
           </pre>
         </div>
       </div>

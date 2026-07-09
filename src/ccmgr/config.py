@@ -10,7 +10,6 @@ from pathlib import Path
 class Config:
     claude_binary: str = "claude"
     poll_interval_ms: int = 1000
-    live_badge_seconds: int = 3
 
 
 def default_config_path() -> Path:
@@ -32,5 +31,4 @@ def load_config(config_path: Path | None = None) -> Config:
     return Config(
         claude_binary=claude.get("binary", "claude"),
         poll_interval_ms=int(live.get("poll_interval_ms", 1000)),
-        live_badge_seconds=int(live.get("live_badge_seconds", 3)),
     )

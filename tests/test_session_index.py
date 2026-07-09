@@ -2,7 +2,7 @@ import time
 from pathlib import Path
 
 from ccmgr.discovery import list_projects
-from ccmgr.session_index import list_sessions, is_live
+from ccmgr.session_index import list_sessions
 
 
 def _make_one_project(claude_home, tmp_path, write_session_fixture, sessions: list[tuple[str, list[dict]]]):
@@ -95,24 +95,3 @@ def test_malformed_lines_are_skipped(claude_home, write_session_fixture, tmp_pat
     sessions = list_sessions(project)
     assert len(sessions) == 1
     assert sessions[0].message_count == 2  # 1 user + 1 assistant
-
-
-def test_is_live_within_threshold(claude_home, write_session_fixture, tmp_path):
-    project = _make_one_project(claude_home, tmp_path, write_session_fixture, [
-        ("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", [{"type": "user", "message": {"role": "user", "content": "hi"}}]),
-    ])
-    s = list_sessions(project)[0]
-    assert is_live(s, threshold_seconds=60.0) is True
-
-
-def test_is_live_outside_threshold(claude_home, write_session_fixture, tmp_path):
-    import os
-    project = _make_one_project(claude_home, tmp_path, write_session_fixture, [
-        ("ffffffff-ffff-ffff-ffff-ffffffffffff", [{"type": "user", "message": {"role": "user", "content": "hi"}}]),
-    ])
-    s = list_sessions(project)[0]
-    # Backdate the mtime by 10 minutes.
-    old = time.time() - 600
-    os.utime(s.jsonl_path, (old, old))
-    s_refreshed = list_sessions(project)[0]
-    assert is_live(s_refreshed, threshold_seconds=60.0) is False

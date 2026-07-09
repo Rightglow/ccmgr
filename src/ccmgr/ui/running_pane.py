@@ -9,7 +9,7 @@ import urwid
 from ccmgr.ui._widgets import ClickableRow, remember_focus, restore_focus
 # Reuse the status-dot glyphs and the focus/selected attribute maps so the
 # coloured ● blends into highlighted rows the same way it does in the Sessions
-# pane (extra keys like "dim"/"live_tag" are harmless here).
+# pane (extra keys like "dim" are harmless here).
 from ccmgr.ui.sessions_pane import _STATUS_DOTS, _FOCUS_REMAP, _SELECTED_MAP
 
 
@@ -35,7 +35,8 @@ class _RunningRow(ClickableRow):
         row_attr = _SELECTED_MAP if is_selected else "live"
         super().__init__(urwid.AttrMap(text, row_attr, focus_map=_FOCUS_REMAP),
                          on_click, on_double_click, on_right_click,
-                         click_key=entry.tmux_name)
+                         click_key=entry.tmux_name,
+                         immediate_click=True)
 
 
 class RunningSessionsPane(urwid.WidgetWrap):
@@ -48,6 +49,7 @@ class RunningSessionsPane(urwid.WidgetWrap):
                  on_context: "Callable[[RunningEntry], None] | None" = None) -> None:
         self._on_select = on_select
         self._on_context = on_context
+        self._active_tmux_name: str | None = None
         self._selected_tmux_name: str | None = None
         self._walker = urwid.SimpleFocusListWalker(
             [urwid.Text(("dim", "  (no running sessions)"), align="left")]
@@ -56,11 +58,21 @@ class RunningSessionsPane(urwid.WidgetWrap):
         self._linebox = urwid.LineBox(self._listbox, title="Running")
         super().__init__(self._linebox)
 
+    def set_active(self, tmux_name: str | None) -> None:
+        """Persistently highlight the session attached in the right pane."""
+        if self._active_tmux_name == tmux_name:
+            return
+        self._active_tmux_name = tmux_name
+        self._rerender()
+
     def set_selected(self, tmux_name: str | None) -> None:
+        """Temporarily highlight a context-menu target."""
         if self._selected_tmux_name == tmux_name:
             return
         self._selected_tmux_name = tmux_name
-        # Re-render the current entries with the new selection.
+        self._rerender()
+
+    def _rerender(self) -> None:
         entries = [w.entry for w in self._walker
                    if isinstance(w, _RunningRow)]
         if entries:
@@ -75,7 +87,8 @@ class RunningSessionsPane(urwid.WidgetWrap):
         self._walker[:] = [
             _RunningRow(
                 e,
-                is_selected=(e.tmux_name == self._selected_tmux_name),
+                is_selected=(e.tmux_name
+                             == (self._selected_tmux_name or self._active_tmux_name)),
                 on_click=lambda e=e: self._on_select(e, steal_focus=False),
                 on_double_click=lambda e=e: self._on_select(e),
                 on_right_click=(lambda e=e: self._on_context(e))

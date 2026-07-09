@@ -120,6 +120,20 @@ def test_effective_status_running_no_child_is_blocked(app, monkeypatch):
     assert a._effective_status(_meta(pending=True)) == "blocked"
 
 
+def test_effective_status_probe_failure_falls_back_to_jsonl(app, monkeypatch):
+    a, _Running = app
+    a._running[_UID] = _Running(key=_UID, tmux_name="cc-x", label="l")
+    monkeypatch.setattr(tmux_ctl, "session_has_child", lambda name: None)
+    assert a._effective_status(_meta(pending=True)) == "blocked"
+
+    recent = SessionMeta(
+        project=None, session_id=_UID, jsonl_path=Path("/x"), title="t",
+        message_count=1, token_total=1, last_mtime=0.0,
+        status="busy", pending_tool=True,
+    )
+    assert a._effective_status(recent) == "busy"
+
+
 def test_effective_status_not_opened_falls_back_to_time(app, monkeypatch):
     a, _Running = app
     # Not in _running → no live process → use meta.status, never call pgrep.
@@ -142,3 +156,22 @@ def test_effective_status_non_pending_unchanged(app, monkeypatch):
                     status="busy", pending_tool=False)
     assert a._effective_status(m) == "busy"
     assert called == []  # non-pending never inspects the process
+
+
+def test_refresh_clears_visual_selection_for_missing_project(app):
+    a, _Running = app
+    project = Project(
+        real_path=Path("/tmp/missing"),
+        encoded_name="-tmp-missing",
+        claude_dir=Path("/tmp/missing-meta"),
+        session_count=0,
+        last_activity_ts=0.0,
+    )
+    a._selected_project = project
+    a._projects_pane.set_projects([project])
+    a._projects_pane.set_selected(project.encoded_name)
+
+    a._refresh()
+
+    assert a._selected_project is None
+    assert a._projects_pane._selected_encoded_name is None

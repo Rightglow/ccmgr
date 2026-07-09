@@ -18,7 +18,8 @@ class _ProjectRow(ClickableRow):
         attr = "selected" if selected else None
         super().__init__(urwid.AttrMap(urwid.Text(label), attr, focus_map="focus"),
                          on_click, on_double_click,
-                         click_key=project.encoded_name)
+                         click_key=project.encoded_name,
+                         immediate_click=True)
 
 
 class _NewProjectRow(ClickableRow):

@@ -11,7 +11,10 @@ from ccmgr.tmux_ctl import (
     install_scroll_bindings,
     prepare_scroll_bindings,
     restore_scroll_bindings,
+    set_window_border_style,
     set_window_user_option,
+    session_has_child,
+    split_window_h,
     session_pane_id,
     scroll_lines_per_event,
     scroll_bindings_owned_by,
@@ -189,3 +192,54 @@ def test_restore_scroll_bindings_replays_saved_binding_and_unbinds_missing():
     assert call.call_args_list[1].args[0] == [
         "tmux", "unbind-key", "-T", "copy-mode", "WheelDownPane",
     ]
+
+
+def test_session_has_child_distinguishes_no_child_from_probe_error():
+    with _mock_check_output("1234"):
+        with patch("subprocess.run") as run:
+            run.return_value.returncode = 1
+            assert session_has_child("cc-example") is False
+
+            run.return_value.returncode = 2
+            assert session_has_child("cc-example") is None
+
+
+def test_session_has_child_reports_live_child():
+    with _mock_check_output("1234"), patch("subprocess.run") as run:
+        run.return_value.returncode = 0
+        assert session_has_child("cc-example") is True
+
+
+def test_session_has_child_returns_unknown_when_tmux_probe_fails():
+    with patch("subprocess.check_output", side_effect=FileNotFoundError):
+        assert session_has_child("cc-example") is None
+
+
+def test_session_has_child_returns_unknown_without_pane_pid():
+    with _mock_check_output(""):
+        assert session_has_child("cc-example") is None
+
+
+def test_window_border_style_updates_both_segments_in_one_tmux_call():
+    with patch("ccmgr.tmux_ctl.in_tmux", return_value=True), \
+         _mock_check_call() as call:
+        assert set_window_border_style("fg=cyan")
+
+    assert call.call_args.args[0] == [
+        "tmux", "set-window-option", "pane-border-style", "fg=cyan",
+        ";", "set-window-option", "pane-active-border-style", "fg=cyan",
+    ]
+
+
+def test_split_window_h_can_leave_focus_on_current_pane():
+    with patch("ccmgr.tmux_ctl.in_tmux", return_value=True), \
+         patch("ccmgr.tmux_ctl.tmux_version", return_value=(3, 4)), \
+         _mock_check_output("%9") as output:
+        assert split_window_h("cmd", size_percent=70, detached=True) == "%9"
+
+    args = output.call_args.args[0]
+    assert args[:6] == [
+        "tmux", "split-window", "-h", "-P", "-F", "#{pane_id}",
+    ]
+    assert "-d" in args
+    assert "-l" in args

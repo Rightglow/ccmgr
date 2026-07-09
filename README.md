@@ -121,6 +121,4 @@ binary = "claude"
 [live]
 # How often to refresh the session list (ms)
 poll_interval_ms = 1000
-# How long the [LIVE] badge stays after last activity (seconds)
-live_badge_seconds = 60
 ```

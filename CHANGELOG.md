@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Pane focus now follows the actual tmux input target: the sidebar drops focus
+  styling while another pane is active, while the selected conversation and
+  status colours remain visible. Shared tmux dividers now switch as one solid
+  colour instead of mixing active and inactive segments.
+- Removed the redundant `[LIVE]` badge; running state, status dots, and relative
+  activity time remain the session activity indicators.
+- Project and running-session single clicks now act immediately; initial session
+  metadata loading, right-pane restoration, and scroll-acceleration setup are
+  deferred until after the first sidebar frame so startup and pane switching
+  remain responsive.
+- Raised the minimum supported Urwid version to 2.6.16 for focus reporting.
+
+### Fixed
+
+- Unknown child-process probe results now fall back to JSONL-derived status.
+- Removed stale project selection when its project disappears during refresh.
+- Preserve soft-quit state until deferred right-pane restoration completes.
+
 ## [0.1.5] - 2026-05-22
 
 ### Added

@@ -28,7 +28,7 @@ classifiers = [
   "Topic :: Utilities",
 ]
 dependencies = [
-  "urwid>=2.6",
+  "urwid>=2.6.16",
 ]
 
 [project.optional-dependencies]

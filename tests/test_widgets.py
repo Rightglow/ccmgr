@@ -18,20 +18,24 @@ def _reset_click_state():
     ClickableRow._last_click_ts = 0.0
     ClickableRow._pending_alarm = None
     ClickableRow._pending_click_cb = None
+    ClickableRow._main_loop = None
     yield
     # Also reset after test to be safe.
     ClickableRow._last_click_key = None
     ClickableRow._last_click_ts = 0.0
     ClickableRow._pending_alarm = None
     ClickableRow._pending_click_cb = None
+    ClickableRow._main_loop = None
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
 
 def _make_row(on_click=None, on_double_click=None,
-              on_right_click=None, click_key: str = "test-row") -> ClickableRow:
+              on_right_click=None, click_key: str = "test-row",
+              immediate_click: bool = False) -> ClickableRow:
     return ClickableRow(urwid.Text("test row"), on_click, on_double_click,
-                        on_right_click, click_key=click_key)
+                        on_right_click, click_key=click_key,
+                        immediate_click=immediate_click)
 
 
 def _click(row: ClickableRow, button: int = 1) -> bool:
@@ -112,6 +116,28 @@ def test_double_click_fires_on_double_click(monkeypatch):
     assert _click(row)
     assert click_called == [1]  # NOT called again
     assert dbl_called == [1]  # double-click fired
+
+
+def test_immediate_click_skips_alarm_but_keeps_double_click(monkeypatch):
+    click_called = []
+    double_called = []
+    loop = MagicMock()
+    ClickableRow._main_loop = loop
+    row = _make_row(
+        on_click=lambda: click_called.append(1),
+        on_double_click=lambda: double_called.append(1),
+        immediate_click=True,
+    )
+
+    assert _click(row)
+    assert click_called == [1]
+    loop.set_alarm_in.assert_not_called()
+
+    fake_now = time.monotonic() + 0.2
+    monkeypatch.setattr(time, "monotonic", lambda: fake_now)
+    assert _click(row)
+    assert click_called == [1]
+    assert double_called == [1]
 
 
 def test_slow_clicks_fire_on_click_twice(monkeypatch):

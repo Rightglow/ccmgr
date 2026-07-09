@@ -40,6 +40,7 @@ def _minimal_app(*, selected_project=None):
     app._currently_focused_session_meta = MagicMock(return_value=None)
     app._in_history_mode = False
     app._right_pane_claude = None
+    app._active_session_id = None
     return app
 
 
@@ -145,8 +146,7 @@ def test_save_state_with_preview_in_right_pane(tmp_path, monkeypatch):
     monkeypatch.setattr(App, "_state_path", staticmethod(lambda: tmp_path / "state.json"))
     app = _minimal_app(selected_project=_project("myproj"))
     app._in_history_mode = True
-    app._currently_focused_session_meta = MagicMock(
-        return_value=type("s", (), {"session_id": "abc123"})())
+    app._active_session_id = "abc123"
     app._save_state()
     data = app._load_state()
     assert data["right_kind"] == "preview"

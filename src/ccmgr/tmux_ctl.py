@@ -69,16 +69,19 @@ def in_tmux() -> bool:
     return os.environ.get("TMUX") is not None
 
 
-def session_has_child(session_name: str) -> bool:
-    """True if the Claude process in ``session_name`` has live child processes.
+def session_has_child(session_name: str) -> bool | None:
+    """Whether the Claude process has live child processes.
+
+    Returns ``None`` when the probe cannot determine the answer.
 
     Children == Claude is actively executing a tool (bash, curl, pip, …), not
     waiting for approval (approval prompts run inside Claude's own Node.js
     process and spawn nothing).  Used to tell a running tool from a blocked one.
 
     Requires procps-ng >= 3.3.12 (``pgrep -P <pid>`` with no pattern).  On
-    older pgrep it always returns False, so callers fall back to the JSONL
-    time heuristic.  Any error → False (unknown/dead session).
+    older pgrep the probe is unavailable, so callers fall back to the JSONL
+    time heuristic.  Exit status 1 is the only definitive "no children"
+    result; command/setup errors return ``None``.
     """
     try:
         pid = subprocess.check_output(
@@ -86,15 +89,20 @@ def session_has_child(session_name: str) -> bool:
             stderr=subprocess.DEVNULL,
         ).decode().strip()
         if not pid:
-            return False
+            return None
         # pgrep -P exits 0 when children exist, 1 when none.
-        subprocess.check_call(
+        result = subprocess.run(
             ["pgrep", "-P", pid],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            check=False,
         )
-        return True
+        if result.returncode == 0:
+            return True
+        if result.returncode == 1:
+            return False
+        return None
     except (OSError, subprocess.CalledProcessError, ValueError):
-        return False
+        return None
 
 
 def current_pane_id() -> str | None:
@@ -140,7 +148,9 @@ def list_panes() -> list[str]:
         return []
 
 
-def split_window_h(cmd: str = "", target: str | None = None, size_percent: int | None = None) -> str | None:
+def split_window_h(cmd: str = "", target: str | None = None,
+                   size_percent: int | None = None,
+                   detached: bool = False) -> str | None:
     """Create a horizontal split (new pane to the right). Returns the new pane id.
 
     `size_percent` sets the new (right) pane's width as a percentage of the
@@ -150,6 +160,8 @@ def split_window_h(cmd: str = "", target: str | None = None, size_percent: int |
     if not in_tmux():
         return None
     args = ["tmux", "split-window", "-h", "-P", "-F", "#{pane_id}"]
+    if detached:
+        args.append("-d")
     if size_percent is not None:
         # `-l <N>%` is only understood by tmux >= 3.1. Older tmux (e.g. 2.7,
         # shipped on many stable distros) rejects it with "size invalid" and
@@ -223,6 +235,29 @@ def set_window_option(name: str, value: str) -> bool:
     try:
         subprocess.check_call(
             ["tmux", "set-window-option", name, value],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
+def set_window_border_style(value: str) -> bool:
+    """Set active and inactive pane borders to one window-scoped style.
+
+    tmux assigns sections of a shared border to different panes. Updating both
+    options together keeps the full divider one colour and uses one tmux client
+    process per focus transition.
+    """
+    if not in_tmux():
+        return False
+    try:
+        subprocess.check_call(
+            [
+                "tmux", "set-window-option", "pane-border-style", value,
+                ";", "set-window-option", "pane-active-border-style", value,
+            ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )

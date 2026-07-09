@@ -25,11 +25,6 @@ def list_sessions(project: Project) -> list[SessionMeta]:
     return results
 
 
-def is_live(session: SessionMeta, threshold_seconds: float) -> bool:
-    """True if the session's JSONL was modified within `threshold_seconds`."""
-    return (time.time() - session.last_mtime) <= threshold_seconds
-
-
 def _extract_text(content) -> str | None:
     """Pull meaningful display text from a user-message content field.
 

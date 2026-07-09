@@ -51,7 +51,7 @@ def _extract_callbacks(pane: SessionsPane) -> list[dict]:
 # ── initial state ────────────────────────────────────────────────────────
 
 def test_initial_state_shows_placeholder():
-    pane = SessionsPane(on_select=lambda s: None, live_threshold=300)
+    pane = SessionsPane(on_select=lambda s: None)
     assert len(pane._walker) == 1
     assert isinstance(pane._walker[0], urwid.Text)
 
@@ -64,7 +64,6 @@ def test_non_running_sessions_get_preview_and_open():
     open_calls = []
     pane = SessionsPane(
         on_select=lambda s: open_calls.append(s.session_id),
-        live_threshold=300,
         on_preview=lambda s: preview_calls.append(s.session_id),
     )
     proj = _project()
@@ -89,7 +88,6 @@ def test_running_sessions_get_click_and_double_click():
     open_calls = []
     pane = SessionsPane(
         on_select=lambda s, **kw: open_calls.append((s.session_id, kw.get("steal_focus", True))),
-        live_threshold=300,
         on_preview=lambda s: None,
     )
     proj = _project()
@@ -112,7 +110,7 @@ def test_running_sessions_get_click_and_double_click():
 
 def test_non_running_no_preview_callback():
     """When on_preview is None, non-running sessions have no on_click."""
-    pane = SessionsPane(on_select=lambda s: None, live_threshold=300, on_preview=None)
+    pane = SessionsPane(on_select=lambda s: None, on_preview=None)
     proj = _project()
     s = _session(proj)
 
@@ -128,7 +126,6 @@ def test_mixed_running_and_non_running():
     open_calls = []
     pane = SessionsPane(
         on_select=lambda s: open_calls.append(s.session_id),
-        live_threshold=300,
         on_preview=lambda s: preview_calls.append(s.session_id),
     )
     proj = _project()
@@ -154,7 +151,7 @@ def test_mixed_running_and_non_running():
 
 def test_new_session_row_click():
     called = []
-    pane = SessionsPane(on_select=lambda s: called.append(s), live_threshold=300)
+    pane = SessionsPane(on_select=lambda s: called.append(s))
     proj = _project()
     pane.set_sessions(proj, [_session(proj)], running_ids=set(), favorite_ids=set())
 
@@ -166,7 +163,7 @@ def test_new_session_row_click():
 # ── set_sessions / set_filter ────────────────────────────────────────────
 
 def test_set_sessions_no_project():
-    pane = SessionsPane(on_select=lambda s: None, live_threshold=300)
+    pane = SessionsPane(on_select=lambda s: None)
     pane.set_sessions(None, [], running_ids=set(), favorite_ids=set())
     # Should show placeholder text
     assert len(pane._walker) == 1
@@ -174,7 +171,7 @@ def test_set_sessions_no_project():
 
 
 def test_set_filter_filters_by_title():
-    pane = SessionsPane(on_select=lambda s: None, live_threshold=300)
+    pane = SessionsPane(on_select=lambda s: None)
     proj = _project()
     s1 = _session(proj, session_id="a" * 36, title="Shopping research")
     s2 = _session(proj, session_id="b" * 36, title="Refactor ccmgr")
@@ -192,7 +189,7 @@ def test_set_filter_filters_by_title():
 
 
 def test_set_filter_no_matches():
-    pane = SessionsPane(on_select=lambda s: None, live_threshold=300)
+    pane = SessionsPane(on_select=lambda s: None)
     proj = _project()
     pane.set_sessions(proj, [_session(proj)], running_ids=set(), favorite_ids=set())
     pane.set_filter("nonexistent")
@@ -205,7 +202,7 @@ def test_set_filter_no_matches():
 
 def test_enter_on_session_row_opens():
     open_calls = []
-    pane = SessionsPane(on_select=lambda s: open_calls.append(s), live_threshold=300)
+    pane = SessionsPane(on_select=lambda s: open_calls.append(s))
     proj = _project()
     s = _session(proj, session_id="x" * 36)
     pane.set_sessions(proj, [s], running_ids=set(), favorite_ids=set())
@@ -222,7 +219,7 @@ def test_enter_on_session_row_opens():
 
 def test_enter_on_new_session_row():
     open_calls = []
-    pane = SessionsPane(on_select=lambda s: open_calls.append(s), live_threshold=300)
+    pane = SessionsPane(on_select=lambda s: open_calls.append(s))
     proj = _project()
     pane.set_sessions(proj, [_session(proj)], running_ids=set(), favorite_ids=set())
 
@@ -241,7 +238,6 @@ def test_enter_on_running_session_steals_focus():
     open_calls = []
     pane = SessionsPane(
         on_select=lambda s, **kw: open_calls.append(kw.get("steal_focus", True)),
-        live_threshold=300,
     )
     proj = _project()
     s = _session(proj)
@@ -258,7 +254,6 @@ def test_enter_on_non_running_session_steals_focus():
     open_calls = []
     pane = SessionsPane(
         on_select=lambda s, **kw: open_calls.append(kw.get("steal_focus", True)),
-        live_threshold=300,
     )
     proj = _project()
     s = _session(proj)
@@ -303,7 +298,7 @@ def test_session_row_renders_status_dot():
                     jsonl_path=s.jsonl_path, title=s.title,
                     message_count=s.message_count, token_total=s.token_total,
                     last_mtime=s.last_mtime, status="busy")
-    pane = SessionsPane(on_select=lambda s: None, live_threshold=300)
+    pane = SessionsPane(on_select=lambda s: None)
     pane.set_sessions(proj, [s], running_ids=set(), favorite_ids=set())
     row = [w for w in pane._walker if isinstance(w, _SessionRow)][0]
     # The row should render — no crash on tuple status dot
@@ -332,7 +327,7 @@ def test_star_is_plain_text_no_palette():
     """Star should be plain text (inherits row highlight), not a palette tuple."""
     proj = _project()
     s = _session(proj)
-    pane = SessionsPane(on_select=lambda s: None, live_threshold=300)
+    pane = SessionsPane(on_select=lambda s: None)
     pane.set_sessions(proj, [s], running_ids=set(),
                       favorite_ids={s.session_id})
     row = [w for w in pane._walker if isinstance(w, _SessionRow)][0]
@@ -342,3 +337,39 @@ def test_star_is_plain_text_no_palette():
     markup = title_text.base_widget.text
     # urwid may flatten markup; just verify the star is present
     assert "★" in str(markup), "star not found in title markup"
+
+
+def _selected_session_ids(pane: SessionsPane) -> set[str]:
+    return {
+        row.session.session_id
+        for row in pane._walker
+        if isinstance(row, _SessionRow)
+        and row._wrapped_widget.attr_map.get(None) == "selected"
+    }
+
+
+def test_active_session_persists_after_context_selection_clears():
+    proj = _project()
+    active = _session(proj, session_id="a" * 36, title="Active")
+    context = _session(proj, session_id="b" * 36, title="Context")
+    pane = SessionsPane(on_select=lambda s: None)
+    pane.set_sessions(proj, [active, context])
+
+    pane.set_active_session(active.session_id)
+    assert _selected_session_ids(pane) == {active.session_id}
+
+    pane.set_selected_session(context.session_id)
+    assert _selected_session_ids(pane) == {context.session_id}
+
+    pane.set_selected_session(None)
+    assert _selected_session_ids(pane) == {active.session_id}
+
+
+def test_session_title_no_longer_renders_live_badge():
+    proj = _project()
+    session = _session(proj)
+    pane = SessionsPane(on_select=lambda s: None)
+    pane.set_sessions(proj, [session])
+    row = next(w for w in pane._walker if isinstance(w, _SessionRow))
+    title = row._wrapped_widget.base_widget.contents[0][0].text
+    assert "[LIVE]" not in title

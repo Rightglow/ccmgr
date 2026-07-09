@@ -23,6 +23,10 @@ class ClickableRow(urwid.WidgetWrap):
     press arrives within the window the timer is cancelled and
     *on_double_click* fires; otherwise the timer fires *on_click*.
 
+    With *immediate_click*, *on_click* fires on the first press while the same
+    press still starts the double-click window. This suits cheap, reversible
+    selection/attach actions where waiting 500 ms feels like input lag.
+
     When only *on_click* is set (no *on_double_click*) the callback fires
     immediately on the first press — no delay is needed because there is
     nothing to disambiguate.
@@ -52,11 +56,13 @@ class ClickableRow(urwid.WidgetWrap):
                  on_click: "Callable[[], None] | None" = None,
                  on_double_click: "Callable[[], None] | None" = None,
                  on_right_click: "Callable[[], None] | None" = None,
-                 click_key: str | None = None) -> None:
+                 click_key: str | None = None,
+                 immediate_click: bool = False) -> None:
         self._on_click = on_click
         self._on_double_click = on_double_click
         self._on_right_click = on_right_click
         self._click_key = click_key
+        self._immediate_click = immediate_click
         super().__init__(widget)
 
     def selectable(self) -> bool:
@@ -97,8 +103,11 @@ class ClickableRow(urwid.WidgetWrap):
                 ClickableRow._last_click_ts = now
 
                 if self._on_click is not None:
-                    ClickableRow._pending_click_cb = self._on_click
-                    ClickableRow._schedule_after(self._DOUBLE_CLICK_INTERVAL)
+                    if self._immediate_click:
+                        self._on_click()
+                    else:
+                        ClickableRow._pending_click_cb = self._on_click
+                        ClickableRow._schedule_after(self._DOUBLE_CLICK_INTERVAL)
                 return True
 
             if self._on_click is not None:
