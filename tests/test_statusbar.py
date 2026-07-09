@@ -117,6 +117,11 @@ def _lines(bar: StatusBar) -> tuple[str, str]:
     return bar._line1.get_text()[0], bar._line2.get_text()[0]
 
 
+def _cols(s: str) -> int:
+    import urwid
+    return urwid.calc_width(s, 0, len(s))
+
+
 def test_short_message_stays_on_one_line():
     bar = StatusBar()
     bar.set_message("hello", "info")
@@ -132,7 +137,31 @@ def test_long_message_spills_to_second_line():
     bar._reflow(20)
     l1, l2 = _lines(bar)
     assert l1 and l2  # both lines used
-    assert len(l1) <= 20 and len(l2) <= 20
+    assert _cols(l1) <= 20 and _cols(l2) <= 20
+
+
+def test_long_message_breaks_on_word_boundary():
+    bar = StatusBar()
+    bar.set_message("one two three four five six seven eight", "info")
+    bar._reflow(20)
+    l1, l2 = _lines(bar)
+    # Words aren't split across the break: line 1 ends on a whole word and
+    # line 2 starts on one.
+    assert not l1.endswith(" ") and not l2.startswith(" ")
+    assert l1.split()[-1] in {"one", "two", "three", "four", "five"}
+
+
+def test_wide_cjk_message_wraps_by_display_width():
+    # Regression: textwrap counts characters, so a CJK line that fits by
+    # char-count but overflows by display width used to clip on line 1 instead
+    # of wrapping. Each Chinese glyph is two columns.
+    bar = StatusBar()
+    bar.set_message("→ 会话标题很长很长很长的中文名字测试换行 (1 session)", "info")
+    bar._reflow(30)
+    l1, l2 = _lines(bar)
+    assert _cols(l1) <= 30      # line 1 fits the width...
+    assert _cols(l1) >= 20      # ...and isn't wasted on a lone glyph
+    assert l2                   # the rest wrapped to line 2
 
 
 def test_overlong_message_truncated_with_ellipsis():
@@ -141,7 +170,7 @@ def test_overlong_message_truncated_with_ellipsis():
     bar._reflow(12)
     _, l2 = _lines(bar)
     assert l2.endswith("…")
-    assert len(l2) <= 12
+    assert _cols(l2) <= 12
 
 
 def test_level_sets_palette_attr():
@@ -149,6 +178,14 @@ def test_level_sets_palette_attr():
     bar.set_message("boom", "error")
     assert bar._attr.attr_map[None] == _LEVEL_ATTR["error"]
     bar.set_message("note", "info")
+    assert bar._attr.attr_map[None] == _LEVEL_ATTR["info"]
+
+
+def test_tip_shares_info_style():
+    # Tips must render with the same attribute as info (same font/colour), not
+    # a distinct dim style.
+    bar = StatusBar()
+    bar.set_message("a tip", "tip")
     assert bar._attr.attr_map[None] == _LEVEL_ATTR["info"]
 
 

@@ -1,7 +1,6 @@
 """Bottom-of-screen status + help-hint widgets."""
 from __future__ import annotations
 
-import textwrap
 from collections.abc import Callable
 
 import urwid
@@ -14,24 +13,25 @@ from ccmgr.ui import keymap
 HELP_HINT = keymap.hint_text()
 
 
-# Idle tips cycled through the status bar when there's no active message. Kept
-# short so they fit one line at typical sidebar widths; the "return focus" hint
-# lives here now instead of being re-written every poll tick (which used to
-# clobber genuine one-shot messages before the user could read them).
+# Idle tips cycled through the status bar when there's no active message. These
+# intentionally avoid the keys already listed in the always-visible HelpBar
+# (n/r/s/d, /, i, ?, q, Ctrl-B ←/→) — they surface behaviour that isn't obvious
+# from the hint bar, like soft-quit and history preview.
 TIPS: tuple[str, ...] = (
-    "Ctrl-B ← / → moves focus between ccmgr and Claude",
-    "n new · r rename · s star · k kill · d delete",
-    "/ filter the focused pane · i info · ? help",
-    "Ctrl-B d backgrounds ccmgr (sessions keep running) · q quit",
+    "Quit with q, then s to soft-quit — leaves every Claude session running",
+    "Click a stopped session to preview its history without launching Claude",
+    "F3 toggles fullscreen for the focused pane",
+    "t opens a shell in the focused project's directory",
 )
 
-# Message severity → palette attribute. Idle tips render dim; info is neutral
-# green; warn/error escalate so failures actually stand out.
+# Message severity → palette attribute. Idle tips share the neutral info style
+# (same font/colour) so they don't read as a different kind of message; warn and
+# error escalate so failures stand out.
 _LEVEL_ATTR = {
     "error": "status_error",
     "warn": "status_warn",
     "info": "status_info",
-    "tip": "status_tip",
+    "tip": "status_info",
 }
 
 
@@ -119,21 +119,38 @@ class StatusBar(urwid.WidgetWrap):
 
     def _reflow(self, maxcol: int) -> None:
         maxcol = max(1, maxcol)
-        lines = textwrap.wrap(self._text, maxcol) if self._text else [""]
-        if not lines:
-            lines = [""]
-        self._line1.set_text(lines[0])
-        if len(lines) <= 1:
+        line1, rest = self._split_at_width(self._text, maxcol)
+        self._line1.set_text(line1)
+        if not rest:
             self._line2.set_text("")
-        elif len(lines) == 2:
-            self._line2.set_text(lines[1])
-        else:
-            # More than two lines: keep line 2's start, mark the overflow with
-            # an ellipsis so it's clear the message was truncated.
-            second = lines[1]
-            if len(second) >= maxcol:
-                second = second[: maxcol - 1]
-            self._line2.set_text(second + "…")
+            return
+        line2, overflow = self._split_at_width(rest, maxcol)
+        if overflow:
+            # More than two lines' worth: truncate line 2 with an ellipsis so
+            # it's clear the message was cut off. Reserve one column for "…".
+            line2, _ = self._split_at_width(rest, max(1, maxcol - 1))
+            line2 = line2.rstrip() + "…"
+        self._line2.set_text(line2)
+
+    @staticmethod
+    def _split_at_width(text: str, maxcol: int) -> tuple[str, str]:
+        """Split *text* into (head, tail) where head fits in *maxcol* display
+        columns. Uses urwid's column arithmetic so wide (CJK) glyphs — which
+        occupy two columns — wrap correctly; ``textwrap`` counts characters and
+        would let a wide line overflow and get clipped instead of wrapping.
+        Prefers to break on the last space within the width."""
+        if not text:
+            return "", ""
+        pos, _ = urwid.calc_text_pos(text, 0, len(text), maxcol)
+        if pos >= len(text):
+            return text, ""
+        # Prefer a word boundary, but only if it doesn't waste most of the
+        # line — otherwise (e.g. CJK text whose only early space trails a lone
+        # glyph) hard-break at the column limit.
+        brk = text.rfind(" ", 0, pos)
+        if brk > pos // 2:
+            return text[:brk], text[brk + 1:]
+        return text[:pos], text[pos:]
 
     def render(self, size, focus: bool = False):
         # Wrap to the actual available width so resizing stays correct.
