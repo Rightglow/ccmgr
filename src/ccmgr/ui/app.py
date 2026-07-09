@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import shutil
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import urwid
@@ -92,7 +92,6 @@ class _Running:
     placeholder_path: Path | None = None  # cwd to resolve against, while a placeholder
     created_at: float = 0.0                # launch time, for placeholder resolution
     status: str = "idle"                   # "idle" | "busy" | "blocked"
-    _jsonl_mtime: float = 0.0              # mtime of JSONL the last time we scanned it
 
     @property
     def is_placeholder(self) -> bool:
@@ -480,41 +479,6 @@ class App:
             if r.tmux_name == tmux_name:
                 return r
         return None
-
-    @staticmethod
-    def _claude_has_child(tmux_name: str) -> bool:
-        """True if the Claude process in `tmux_name` has live child processes.
-
-        Child processes == Claude is actively executing a tool (bash,
-        curl, pip, etc.), not waiting for user approval.  The signal is
-        reliable because approval prompts run inside Claude Code's own
-        Node.js process and never spawn children.
-
-        Requires procps-ng >= 3.3.12 (``pgrep -P <pid>`` without a pattern
-        argument).  On older versions pgrep exits 1 even when children exist,
-        so the method always returns False — the caller falls back to the
-        JSONL-derived status and the blocked→busy override is skipped.
-
-        Returns False on any error (unknown pane, dead session, etc.) so
-        the caller falls back to the JSONL-derived status.
-        """
-        try:
-            import subprocess as _sp
-            pid_str = _sp.check_output(
-                ["tmux", "list-panes", "-t", tmux_name,
-                 "-F", "#{pane_pid}"],
-                stderr=_sp.DEVNULL, text=True,
-            ).strip()
-            if not pid_str:
-                return False
-            # pgrep -P returns 0 when children exist, 1 when none.
-            _sp.check_call(
-                ["pgrep", "-P", pid_str],
-                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
-            )
-            return True
-        except (OSError, _sp.CalledProcessError, ValueError):
-            return False
 
     def _launch(self, key: str, cmd: list[str], cwd: Path, label: str,
                 project: Project | None, placeholder_path: Path | None = None,
@@ -1052,7 +1016,8 @@ class App:
             matched = next((p for p in projects if p.encoded_name == self._selected_project.encoded_name), None)
             if matched is not None:
                 self._selected_project = matched
-                sessions = self._session_cache.list_sessions(matched)
+                sessions = [self._refine_status(s)
+                            for s in self._session_cache.list_sessions(matched)]
                 self._sessions_pane.set_sessions(matched, sessions, running_ids=running_ids,
                                                   favorite_ids=self._favorites.get_ids())
             else:
@@ -1064,44 +1029,46 @@ class App:
         if self._running:
             self._status.set_message("Ctrl-B ← returns focus to ccmgr")
 
+    def _effective_status(self, meta: SessionMeta) -> str:
+        """Displayed status, refined by the live process when we own the session.
+
+        For a session ccmgr has opened, a pending ``tool_use`` with a live
+        child process means a tool is actively running (busy); no child means
+        Claude is waiting for approval (blocked).  This is authoritative and
+        time-independent.  Sessions we haven't opened fall back to
+        ``meta.status`` (the JSONL time heuristic).  Used by BOTH panes so the
+        same session never shows two different dots.
+        """
+        if meta.pending_tool:
+            r = self._running.get(meta.session_id)
+            if r is not None and not r.is_placeholder:
+                return "busy" if tmux_ctl.session_has_child(r.tmux_name) else "blocked"
+        return meta.status
+
+    def _refine_status(self, meta: SessionMeta) -> SessionMeta:
+        """Return `meta` with its status refined, copying only when it changes."""
+        status = self._effective_status(meta)
+        return meta if status == meta.status else replace(meta, status=status)
+
     def _update_running_pane(self) -> None:
-        """Sync labels and repopulate the Running pane from ``self._running``.
+        """Sync labels/status and repopulate the Running pane from ``self._running``.
 
         Called once during startup (so orphans discovered by
         ``_discover_orphans`` are visible immediately, before the first
-        poll tick) and on every ``_refresh``.
+        poll tick) and on every ``_refresh``.  Status comes from the shared
+        SessionCache + ``_effective_status`` — the same path the Sessions pane
+        uses, so the two panes agree.
         """
         for r in self._running.values():
             if r.is_placeholder or r.project is None:
                 continue
-            jsonl_path = r.project.claude_dir / f"{r.key}.jsonl"
-            try:
-                current_mtime = jsonl_path.stat().st_mtime
-            except OSError:
-                continue
-            # Skip the JSONL scan when the file hasn't changed — avoids
-            # per-tick disk I/O for idle sessions.  The child-process check
-            # below is cheap (single pgrep) and still runs every tick for
-            # blocked sessions so we catch the child→no-child transition.
-            if current_mtime != r._jsonl_mtime:
-                r._jsonl_mtime = current_mtime
-                s = self._find_session_meta(r.key, r.project)
-                if s is not None:
-                    if s.title:
-                        r.label = f"{s.project.display_name}/{s.display_title}"
-                    r.status = s.status
-            # "blocked" means the JSONL ended on tool_use with no recent
-            # writes.  But Claude may be legitimately executing a slow
-            # tool (pip install, curl download, etc.) — check for live
-            # child processes under Claude's pane.  If children exist,
-            # Claude is actively running a tool → override to busy.
-            # If no children AND the JSONL is stale, Claude is likely
-            # waiting for approval → keep blocked.
-            if r.status == "blocked" and self._claude_has_child(r.tmux_name):
-                r.status = "busy"
+            meta = self._session_cache.get(r.project, r.key)
+            if meta is not None:
+                if meta.title:
+                    r.label = f"{meta.project.display_name}/{meta.display_title}"
+                r.status = self._effective_status(meta)
         entries = [
-            RunningEntry(tmux_name=r.tmux_name, label=r.label,
-                         status=r.status)
+            RunningEntry(tmux_name=r.tmux_name, label=r.label, status=r.status)
             for r in self._running.values()
         ]
         self._running_pane.set_running(entries)

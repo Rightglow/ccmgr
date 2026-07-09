@@ -89,12 +89,11 @@ def _scan_session(project: Project, jsonl_path: Path) -> SessionMeta | None:
                 rtype = rec.get("type")
                 if rtype == "ai-title":
                     title = rec.get("aiTitle") or title
-                elif rtype == "last-prompt":
-                    # Claude Code writes this just before sending a prompt to
-                    # the model.  The assistant hasn't replied yet, so the
-                    # session is actively waiting — equivalent to a user turn.
-                    last_rtype = "user"
-                    last_stop_reason = ""
+                # NOTE: "last-prompt" is deliberately NOT treated as a turn.
+                # Claude Code writes it *after* an assistant turn completes
+                # (order in the JSONL is `assistant end_turn → last-prompt →
+                # user`), so counting it as a user turn made every finished
+                # session show "busy" until the next prompt was sent.
                 elif rtype == "user":
                     message_count += 1
                     user_count += 1
@@ -138,18 +137,17 @@ def _scan_session(project: Project, jsonl_path: Path) -> SessionMeta | None:
     size_bytes = st.st_size
 
     # Determine status from the last meaningful record.
+    pending_tool = last_rtype == "assistant" and last_stop_reason == "tool_use"
     if last_rtype == "user":
         status = "busy"
-    elif last_rtype == "assistant":
-        if last_stop_reason == "tool_use":
-            # tool_use is ambiguous: it means "I used a tool" but doesn't
-            # say whether it needs approval.  Auto-approved tools (bash
-            # commands, web fetches) may take many seconds; only flag as
-            # blocked once writing has genuinely ceased.
-            age = time.time() - mtime
-            status = "blocked" if age > _TOOL_BLOCK_AGE_S else "busy"
-        else:
-            status = "idle"
+    elif pending_tool:
+        # tool_use is ambiguous: Claude may still be running the tool or
+        # waiting for approval.  Without the live process (SessionCache path)
+        # we fall back to a time heuristic; auto-approved tools (bash, web
+        # fetch) can run for many seconds, so only flag blocked once writing
+        # has genuinely ceased.  Callers with the tmux session refine this.
+        age = time.time() - mtime
+        status = "blocked" if age > _TOOL_BLOCK_AGE_S else "busy"
     else:
         status = "idle"
 
@@ -179,6 +177,7 @@ def _scan_session(project: Project, jsonl_path: Path) -> SessionMeta | None:
         git_branch=git_branch,
         last_user_message=preview,
         status=status,
+        pending_tool=pending_tool,
     )
 
 

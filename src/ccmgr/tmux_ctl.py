@@ -69,6 +69,34 @@ def in_tmux() -> bool:
     return os.environ.get("TMUX") is not None
 
 
+def session_has_child(session_name: str) -> bool:
+    """True if the Claude process in ``session_name`` has live child processes.
+
+    Children == Claude is actively executing a tool (bash, curl, pip, …), not
+    waiting for approval (approval prompts run inside Claude's own Node.js
+    process and spawn nothing).  Used to tell a running tool from a blocked one.
+
+    Requires procps-ng >= 3.3.12 (``pgrep -P <pid>`` with no pattern).  On
+    older pgrep it always returns False, so callers fall back to the JSONL
+    time heuristic.  Any error → False (unknown/dead session).
+    """
+    try:
+        pid = subprocess.check_output(
+            ["tmux", "list-panes", "-t", session_name, "-F", "#{pane_pid}"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        if not pid:
+            return False
+        # pgrep -P exits 0 when children exist, 1 when none.
+        subprocess.check_call(
+            ["pgrep", "-P", pid],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return True
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        return False
+
+
 def current_pane_id() -> str | None:
     """Return the tmux pane id of the current process, or None."""
     if not in_tmux():

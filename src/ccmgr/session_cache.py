@@ -50,21 +50,9 @@ class SessionCache:
         results: list[SessionMeta] = []
         for mtime, path in candidates:
             current_paths.add(path)
-            cached = self._entries.get(path)
-            if cached is not None and cached[0] == mtime:
-                meta = cached[1]
-                # "busy" status is time-dependent: a tool_use with no
-                # follow-up writes should become "blocked" after the
-                # block-age window closes.  The mtime hasn't changed,
-                # but the age has — the cached value is stale.  Re-scan.
-                if meta.status != "busy" or now - mtime <= _TOOL_BLOCK_AGE_S:
-                    results.append(meta)
-                    continue
-            meta = _scan_session(project, path)
-            if meta is None:
-                continue
-            self._entries[path] = (meta.last_mtime, meta)
-            results.append(meta)
+            meta = self._meta_for(project, path, mtime, now)
+            if meta is not None:
+                results.append(meta)
 
         # Evict stale cache entries for files no longer in top-N or deleted.
         for stale in list(self._entries.keys()):
@@ -73,6 +61,36 @@ class SessionCache:
 
         results.sort(key=lambda s: s.last_mtime, reverse=True)
         return results
+
+    def get(self, project: Project, session_id: str) -> SessionMeta | None:
+        """Cache-backed lookup of a single session's metadata by id.
+
+        Used by the Running pane so its status comes from the same source as
+        the Sessions pane (no separate scan path to drift out of sync)."""
+        path = project.claude_dir / f"{session_id}.jsonl"
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            return None
+        return self._meta_for(project, path, mtime, time.time())
+
+    def _meta_for(self, project: Project, path: Path, mtime: float,
+                  now: float) -> SessionMeta | None:
+        """Cached-or-scanned SessionMeta for `path`.
+
+        A cached "busy" entry whose age has crossed the block window is
+        re-scanned even though its mtime is unchanged — "busy" vs "blocked"
+        is time-dependent, so a stale hit would never transition.
+        """
+        cached = self._entries.get(path)
+        if cached is not None and cached[0] == mtime:
+            meta = cached[1]
+            if meta.status != "busy" or now - mtime <= _TOOL_BLOCK_AGE_S:
+                return meta
+        meta = _scan_session(project, path)
+        if meta is not None:
+            self._entries[path] = (meta.last_mtime, meta)
+        return meta
 
     def invalidate(self) -> None:
         self._entries.clear()

@@ -40,6 +40,11 @@ class SessionMeta:
     #   "busy"    — last record is a user message (assistant is processing)
     #   "blocked" — assistant is waiting for tool approval (stop_reason=tool_use)
     status: str = "idle"
+    # True when the session's last meaningful record is an assistant tool_use
+    # with no follow-up — i.e. Claude is either running a tool or waiting for
+    # its approval.  `status` resolves that ambiguity with a time heuristic;
+    # callers that can inspect the live process refine it further.
+    pending_tool: bool = False
 
     @property
     def display_title(self) -> str:
