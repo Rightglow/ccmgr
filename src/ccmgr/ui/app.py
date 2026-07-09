@@ -92,6 +92,7 @@ class _Running:
     placeholder_path: Path | None = None  # cwd to resolve against, while a placeholder
     created_at: float = 0.0                # launch time, for placeholder resolution
     status: str = "idle"                   # "idle" | "busy" | "blocked"
+    _jsonl_mtime: float = 0.0              # mtime of JSONL the last time we scanned it
 
     @property
     def is_placeholder(self) -> bool:
@@ -480,6 +481,41 @@ class App:
                 return r
         return None
 
+    @staticmethod
+    def _claude_has_child(tmux_name: str) -> bool:
+        """True if the Claude process in `tmux_name` has live child processes.
+
+        Child processes == Claude is actively executing a tool (bash,
+        curl, pip, etc.), not waiting for user approval.  The signal is
+        reliable because approval prompts run inside Claude Code's own
+        Node.js process and never spawn children.
+
+        Requires procps-ng >= 3.3.12 (``pgrep -P <pid>`` without a pattern
+        argument).  On older versions pgrep exits 1 even when children exist,
+        so the method always returns False — the caller falls back to the
+        JSONL-derived status and the blocked→busy override is skipped.
+
+        Returns False on any error (unknown pane, dead session, etc.) so
+        the caller falls back to the JSONL-derived status.
+        """
+        try:
+            import subprocess as _sp
+            pid_str = _sp.check_output(
+                ["tmux", "list-panes", "-t", tmux_name,
+                 "-F", "#{pane_pid}"],
+                stderr=_sp.DEVNULL, text=True,
+            ).strip()
+            if not pid_str:
+                return False
+            # pgrep -P returns 0 when children exist, 1 when none.
+            _sp.check_call(
+                ["pgrep", "-P", pid_str],
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+            )
+            return True
+        except (OSError, _sp.CalledProcessError, ValueError):
+            return False
+
     def _launch(self, key: str, cmd: list[str], cwd: Path, label: str,
                 project: Project | None, placeholder_path: Path | None = None,
                 *, steal_focus: bool = True) -> bool:
@@ -551,12 +587,9 @@ class App:
 
     # --- modals ---
 
-    def _overlay_dims(self, base_width: int, base_height: int) -> tuple[int, int]:
-        """Return (width, height) for ``_show_overlay``, bumped when the right
-        pane is open and the ccmgr sidebar is only ~30% of the terminal."""
-        if self._right_pane_id is not None and tmux_ctl.pane_alive(self._right_pane_id):
-            return (int(base_width * 1.6), int(base_height * 1.35))
-        return (base_width, base_height)
+    def _right_pane_open(self) -> bool:
+        """True when the tmux right pane exists (ccmgr sidebar is ~30% width)."""
+        return self._right_pane_id is not None and tmux_ctl.pane_alive(self._right_pane_id)
 
     def _open_new_project_modal(self) -> None:
         modal = PathBrowserModal(
@@ -827,6 +860,13 @@ class App:
                        on_click_outside: Callable[[], None] | None = None) -> None:
         if self._loop is None:
             return
+        # When the right pane is open the ccmgr sidebar is only ~30% of the
+        # terminal.  Bump relative dimensions so overlays stay readable.
+        # Fixed-pixel overlays (context menus) are left alone.
+        if not fixed_width and self._right_pane_open():
+            width = int(width * 1.6)
+        if not fixed_height and self._right_pane_open():
+            height = int(height * 1.35)
         width_spec = width if fixed_width else ("relative", width)
         height_spec = height if fixed_height else ("relative", height)
         overlay_cls = _CloseOnClickOverlay if click_outside_to_close else urwid.Overlay
@@ -1034,11 +1074,31 @@ class App:
         for r in self._running.values():
             if r.is_placeholder or r.project is None:
                 continue
-            s = self._find_session_meta(r.key, r.project)
-            if s is not None and s.title:
-                r.label = f"{s.project.display_name}/{s.display_title}"
-            if s is not None:
-                r.status = s.status
+            jsonl_path = r.project.claude_dir / f"{r.key}.jsonl"
+            try:
+                current_mtime = jsonl_path.stat().st_mtime
+            except OSError:
+                continue
+            # Skip the JSONL scan when the file hasn't changed — avoids
+            # per-tick disk I/O for idle sessions.  The child-process check
+            # below is cheap (single pgrep) and still runs every tick for
+            # blocked sessions so we catch the child→no-child transition.
+            if current_mtime != r._jsonl_mtime:
+                r._jsonl_mtime = current_mtime
+                s = self._find_session_meta(r.key, r.project)
+                if s is not None:
+                    if s.title:
+                        r.label = f"{s.project.display_name}/{s.display_title}"
+                    r.status = s.status
+            # "blocked" means the JSONL ended on tool_use with no recent
+            # writes.  But Claude may be legitimately executing a slow
+            # tool (pip install, curl download, etc.) — check for live
+            # child processes under Claude's pane.  If children exist,
+            # Claude is actively running a tool → override to busy.
+            # If no children AND the JSONL is stale, Claude is likely
+            # waiting for approval → keep blocked.
+            if r.status == "blocked" and self._claude_has_child(r.tmux_name):
+                r.status = "busy"
         entries = [
             RunningEntry(tmux_name=r.tmux_name, label=r.label,
                          status=r.status)
@@ -1171,8 +1231,7 @@ class App:
                 on_confirm=lambda: self._do_delete_session(session),
                 on_cancel=self._close_modal,
             )
-            w, h = self._overlay_dims(54, 30)
-            self._show_overlay(modal, width=w, height=h)
+            self._show_overlay(modal, width=54, height=30)
 
         elif pos == 2:
             # Running pane — kill the detached tmux session.
@@ -1204,8 +1263,7 @@ class App:
                 on_confirm=lambda: self._do_kill_running(entry.tmux_name, session_id, project),
                 on_cancel=self._close_modal,
             )
-            w, h = self._overlay_dims(54, 30)
-            self._show_overlay(modal, width=w, height=h)
+            self._show_overlay(modal, width=54, height=30)
 
         else:
             self._status.set_message("Use d on a session row or running-entry row to delete.")
@@ -1505,8 +1563,7 @@ class App:
             on_confirm=lambda s=session: self._do_delete_session(s),
             on_cancel=self._close_modal,
         )
-        w, h = self._overlay_dims(54, 30)
-        self._show_overlay(modal, width=w, height=h)
+        self._show_overlay(modal, width=54, height=30)
 
     # --- resize divider ---
 
