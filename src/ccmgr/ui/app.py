@@ -767,9 +767,8 @@ class App:
             sess_id = state.get("right_session")
             if sess_id and self._selected_project is not None:
                 meta = self._session_cache.get(self._selected_project, sess_id)
-                if meta is not None:
+                if meta is not None and self._show_transcript(meta.jsonl_path):
                     self._in_history_mode = True
-                    self._show_transcript(meta.jsonl_path)
 
     def _discover_orphans(self) -> None:
         """Find detached ``cc-*`` tmux sessions and rebuild ``_running``.
