@@ -138,7 +138,9 @@ class StatusBar(urwid.WidgetWrap):
         columns. Uses urwid's column arithmetic so wide (CJK) glyphs — which
         occupy two columns — wrap correctly; ``textwrap`` counts characters and
         would let a wide line overflow and get clipped instead of wrapping.
-        Prefers to break on the last space within the width."""
+        Prefers to break on the last space within the width. Spaces at the wrap
+        boundary are dropped so the continuation line has no leading gap; spaces
+        elsewhere in the text are preserved verbatim."""
         if not text:
             return "", ""
         pos, _ = urwid.calc_text_pos(text, 0, len(text), maxcol)
@@ -149,8 +151,10 @@ class StatusBar(urwid.WidgetWrap):
         # glyph) hard-break at the column limit.
         brk = text.rfind(" ", 0, pos)
         if brk > pos // 2:
-            return text[:brk], text[brk + 1:]
-        return text[:pos], text[pos:]
+            head, tail = text[:brk], text[brk + 1:]
+        else:
+            head, tail = text[:pos], text[pos:]
+        return head, tail.lstrip(" ")
 
     def render(self, size, focus: bool = False):
         # Wrap to the actual available width so resizing stays correct.

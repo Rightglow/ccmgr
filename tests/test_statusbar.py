@@ -86,6 +86,52 @@ def test_warn_holds_past_info_ttl(app, clock):
     assert app._status_text == "Failed to do the thing"  # ...but warn still holds
 
 
+# ── minimum-hold: severity floor against clobbering ──────────────────────
+
+def test_error_not_clobbered_by_info_within_hold(app, clock):
+    app._set_status("ERROR: tmux gone")
+    clock["t"] += app._STATUS_MIN_HOLD["error"] - 0.1
+    app._set_status("Project: foo (3 sessions)")  # lower severity, too soon
+    assert app._status_text == "ERROR: tmux gone"
+    assert app._status_level == "error"
+
+
+def test_error_replaceable_by_info_after_hold(app, clock):
+    app._set_status("ERROR: tmux gone")
+    clock["t"] += app._STATUS_MIN_HOLD["error"] + 0.1
+    app._set_status("Project: foo (3 sessions)")
+    assert app._status_text == "Project: foo (3 sessions)"
+
+
+def test_warn_hold_is_shorter_than_error(app, clock):
+    # warn clears sooner than error would: info replaces it past the warn hold
+    # but (by construction) still within the error hold window.
+    assert app._STATUS_MIN_HOLD["warn"] < app._STATUS_MIN_HOLD["error"]
+    app._set_status("Failed to X")
+    clock["t"] += app._STATUS_MIN_HOLD["warn"] + 0.1
+    app._set_status("routine info")
+    assert app._status_text == "routine info"
+
+
+def test_higher_severity_overrides_immediately(app, clock):
+    app._set_status("routine info")
+    app._set_status("ERROR: boom")  # same tick, no time passes
+    assert app._status_text == "ERROR: boom"
+    assert app._status_level == "error"
+
+
+def test_first_tip_after_expiry_lasts_one_interval(app, clock):
+    """Regression: the post-message tip used to linger ~2× the interval because
+    the expiry path showed a tip without advancing the rotation clock."""
+    app._set_status("info msg")
+    clock["t"] += app._STATUS_TTL["info"] + 0.1  # expire → first idle tip
+    app._update_status()
+    first = app._status._text
+    clock["t"] += app._TIP_INTERVAL + 0.01      # exactly one interval later
+    app._update_status()
+    assert app._status._text != first           # advanced, not stuck at 2×
+
+
 # ── idle tip rotation ────────────────────────────────────────────────────
 
 def test_tips_rotate_on_interval(app, clock):
@@ -149,6 +195,20 @@ def test_long_message_breaks_on_word_boundary():
     # line 2 starts on one.
     assert not l1.endswith(" ") and not l2.startswith(" ")
     assert l1.split()[-1] in {"one", "two", "three", "four", "five"}
+
+
+def test_wrap_drops_boundary_space_but_keeps_inner_spaces():
+    bar = StatusBar()
+    # Wrap point falls on a space → continuation line has no leading gap.
+    bar.set_message("aaaa bbbb cccc dddd", "info")
+    bar._reflow(9)
+    _, l2 = _lines(bar)
+    assert not l2.startswith(" ")
+    # Spaces that aren't at the wrap boundary are preserved verbatim.
+    bar.set_message("a  b  c", "info")
+    bar._reflow(40)
+    l1, _ = _lines(bar)
+    assert l1 == "a  b  c"
 
 
 def test_wide_cjk_message_wraps_by_display_width():

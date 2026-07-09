@@ -158,6 +158,15 @@ class App:
     _DOUBLE_BACKTICK_INTERVAL = 0.5
     _last_backtick_ts: float = 0.0
 
+    # Status-bar state defaults at class scope so methods invoked on a bare
+    # ``App.__new__(App)`` (e.g. in unit tests) don't hit AttributeError before
+    # ``__init__`` runs. ``__init__`` reassigns these per instance.
+    _status_text: str | None = None
+    _status_level: str = "info"
+    _status_since: float = 0.0
+    _tip_index: int = 0
+    _tip_since: float = 0.0
+
     def __init__(self, claude_home: Path, config: Config,
                  auto_launched: bool = False,
                  scroll_coalescing: bool = True) -> None:
@@ -1912,6 +1921,13 @@ class App:
     _STATUS_TTL = {"error": None, "warn": 12.0, "info": 6.0}
     _TIP_INTERVAL = 20.0
 
+    # Minimum time a message is protected from being overwritten by a *lower*
+    # severity message, so a genuine error/warning isn't clobbered by a routine
+    # "Project: …" the very next tick. A message of equal-or-higher severity
+    # always wins immediately. Info has no floor (routine, freely replaceable).
+    _STATUS_MIN_HOLD = {"error": 4.0, "warn": 2.0}
+    _LEVEL_PRIORITY = {"tip": 0, "info": 1, "warn": 2, "error": 3}
+
     def _set_status(self, msg: str, level: str | None = None) -> None:
         """Show an explicit status message.
 
@@ -1926,6 +1942,15 @@ class App:
                 level = "warn"
             else:
                 level = "info"
+        # Don't let a still-fresh higher-severity message be overwritten by a
+        # lower-severity one within its minimum-hold window.
+        if self._status_text is not None:
+            hold = self._STATUS_MIN_HOLD.get(self._status_level)
+            if (hold is not None
+                    and time.monotonic() - self._status_since < hold
+                    and self._LEVEL_PRIORITY.get(level, 1)
+                    < self._LEVEL_PRIORITY.get(self._status_level, 1)):
+                return
         self._status_text = msg
         self._status_level = level
         self._status_since = time.monotonic()
@@ -1943,11 +1968,11 @@ class App:
             ttl = self._STATUS_TTL.get(self._status_level, 6.0)
             if ttl is None or now - self._status_since < ttl:
                 return
-            # Expired → drop to idle and start the tip clock from now.
+            # Expired → clear and fall through so the idle branch shows the next
+            # tip on this same tick (and advances the index uniformly, avoiding
+            # the first post-message tip lingering for two intervals).
             self._status_text = None
-            self._tip_since = now
-            self._status.set_message(TIPS[self._tip_index], "tip")
-            return
+            self._tip_since = 0.0
         # Idle: rotate tips on their own cadence.
         if not TIPS:
             return
