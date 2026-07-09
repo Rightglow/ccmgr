@@ -91,10 +91,17 @@ def test_safe_name_strips_leading_dashes():
 
 # ── state file ───────────────────────────────────────────────────────────
 
-def test_state_path_includes_uid(monkeypatch):
+def test_state_path_uses_xdg_runtime_dir(monkeypatch):
+    monkeypatch.setitem(os.environ, "XDG_RUNTIME_DIR", "/run/user/1000")
+    path = App._state_path()
+    assert path == Path("/run/user/1000/ccmgr-state.json")
+
+
+def test_state_path_falls_back_to_tmp(monkeypatch):
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
     monkeypatch.setattr(os, "getuid", lambda: 1000)
     path = App._state_path()
-    assert path == Path("/tmp/ccmgr-state-1000.json")
+    assert path == Path("/tmp/ccmgr-1000/ccmgr-state.json")
 
 
 def test_save_and_load_state_round_trip(tmp_path, monkeypatch):

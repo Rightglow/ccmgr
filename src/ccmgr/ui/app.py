@@ -204,13 +204,6 @@ class App:
         # Restore the view from a previous soft-quit, or auto-select the
         # most recent project as usual.
         state = self._load_state()
-        if state:
-            # Consume the state file now so a later normal quit does not
-            # restore stale state from a long-past soft quit.
-            try:
-                self._state_path().unlink(missing_ok=True)
-            except OSError:
-                pass
         restored = False
         if state:
             proj_name = state.get("project")
@@ -221,6 +214,13 @@ class App:
                     restored = True
         if not restored and projects:
             self._on_project_select(projects[0])
+        # Consume the state file AFTER successful init so a crash between
+        # load and restore doesn't lose the saved state.
+        if state:
+            try:
+                self._state_path().unlink(missing_ok=True)
+            except OSError:
+                pass
         # Populate the running pane immediately — don't wait for the first
         # _refresh tick, otherwise the pane shows "(no running sessions)"
         # for up to 1 s even when _discover_orphans found sessions.
@@ -711,7 +711,8 @@ class App:
     @staticmethod
     def _state_path() -> Path:
         import os as _os
-        return Path(f"/tmp/ccmgr-state-{_os.getuid()}.json")
+        run_dir = _os.environ.get("XDG_RUNTIME_DIR", f"/tmp/ccmgr-{_os.getuid()}")
+        return Path(run_dir) / "ccmgr-state.json"
 
     def _save_state(self) -> None:
         """Persist enough state to restore the current view after a restart."""

@@ -26,7 +26,7 @@ soft quit → restart:
    guard must execute *before* the `for r in self._running: kill_session` loop.
    Don't insert new cleanup code that destroys user state above that guard.
 
-3. **State file keys need backward-compatible defaults.**  `/tmp/ccmgr-state-{uid}.json`
+3. **State file keys need backward-compatible defaults.**  `$XDG_RUNTIME_DIR/ccmgr-state.json`
    is read by `_load_state` on startup.  Adding a required key to `_save_state`
    without a fallback in `_load_state` crashes the restore path (and deletes the
    state file before the crash, losing the saved project).
