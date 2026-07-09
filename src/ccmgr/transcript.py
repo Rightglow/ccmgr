@@ -92,37 +92,48 @@ def _render_assistant_blocks(record: dict):
                 yield f"  {DIM}{key}:{RESET} {val_str}\n"
 
 
-def format_transcript(jsonl_path: Path):
+def format_transcript(source: Path | object):
     """Read a session JSONL and yield ANSI-formatted strings.
+
+    *source* may be a ``Path`` or any file-like object (e.g. ``sys.stdin``).
 
     Callers should write each chunk to stdout, e.g.::
 
-        for chunk in format_transcript(path):
+        for chunk in format_transcript(path_or_file):
             sys.stdout.write(chunk)
     """
+    own = False
+    fh = None
     try:
-        with open(jsonl_path, "r", encoding="utf-8") as fh:
-            for raw in fh:
-                line = raw.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+        if isinstance(source, Path):
+            fh = open(source, "r", encoding="utf-8")
+            own = True
+        else:
+            fh = source
+        for raw in fh:
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
 
-                rtype = record.get("type", "")
-                if rtype in _SKIP_TYPES:
-                    continue
+            rtype = record.get("type", "")
+            if rtype in _SKIP_TYPES:
+                continue
 
-                if _is_real_user(record):
-                    rendered = _render_user(record)
-                    if rendered:
-                        yield rendered
-                elif rtype == "assistant":
-                    yield from _render_assistant_blocks(record)
+            if _is_real_user(record):
+                rendered = _render_user(record)
+                if rendered:
+                    yield rendered
+            elif rtype == "assistant":
+                yield from _render_assistant_blocks(record)
     except OSError:
-        yield f"{YELLOW}Could not read: {jsonl_path}{RESET}\n"
+        yield f"{YELLOW}Could not read: {source}{RESET}\n"
+    finally:
+        if own and fh is not None:
+            fh.close()
 
 
 # ── CLI entry point ──────────────────────────────────────────────────────
@@ -131,14 +142,19 @@ def main(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv
     if len(argv) < 2:
-        print("Usage: python3 -m ccmgr.transcript <jsonl_path>", file=sys.stderr)
+        print("Usage: python3 -m ccmgr.transcript <jsonl_path|- for stdin>", file=sys.stderr)
         sys.exit(1)
-    jsonl_path = Path(argv[1])
-    if not jsonl_path.exists():
-        print(f"File not found: {jsonl_path}", file=sys.stderr)
-        sys.exit(1)
-    for chunk in format_transcript(jsonl_path):
-        sys.stdout.write(chunk)
+    source = argv[1]
+    if source == "-":
+        for chunk in format_transcript(sys.stdin):
+            sys.stdout.write(chunk)
+    else:
+        jsonl_path = Path(source)
+        if not jsonl_path.exists():
+            print(f"File not found: {jsonl_path}", file=sys.stderr)
+            sys.exit(1)
+        for chunk in format_transcript(jsonl_path):
+            sys.stdout.write(chunk)
 
 
 if __name__ == "__main__":

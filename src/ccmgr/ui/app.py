@@ -439,7 +439,11 @@ class App:
         import shlex
         import sys as _sys
         mouse = self._less_mouse_flag
-        cmd = f"{_sys.executable} -m ccmgr.transcript {shlex.quote(str(jsonl_path))} | less -R +G {mouse}"
+        # Tail the last 2000 lines so large sessions appear instantly.
+        path = shlex.quote(str(jsonl_path))
+        cmd = (f"tail -n 2000 {path} | "
+               f"{_sys.executable} -m ccmgr.transcript - | "
+               f"less -R +G {mouse}")
         if self._right_pane_id and tmux_ctl.pane_alive(self._right_pane_id):
             if not tmux_ctl.respawn_pane(self._right_pane_id, cmd):
                 self._status.set_message("failed to respawn right pane for transcript")
