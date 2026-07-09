@@ -45,6 +45,8 @@ class SessionMeta:
     # its approval.  `status` resolves that ambiguity with a time heuristic;
     # callers that can inspect the live process refine it further.
     pending_tool: bool = False
+    # "claude" or "codex" — which CLI owns this session.
+    session_type: str = "claude"
 
     @property
     def display_title(self) -> str:

@@ -1,4 +1,4 @@
-"""Launch claude via subprocess, inheriting the parent's terminal."""
+"""Launch claude or codex via subprocess, inheriting the parent's terminal."""
 from __future__ import annotations
 
 import subprocess
@@ -6,13 +6,24 @@ from pathlib import Path
 
 
 def build_resume_command(claude_binary: str, session_id: str, cwd: Path) -> list[str]:
-    """Build the argv to resume an existing session."""
+    """Build the argv to resume an existing Claude session."""
     return [claude_binary, "--resume", session_id]
 
 
 def build_new_session_command(claude_binary: str, cwd: Path) -> list[str]:
-    """Build the argv to start a fresh session in `cwd`."""
+    """Build the argv to start a fresh Claude session in `cwd`."""
     return [claude_binary]
+
+
+def build_codex_resume_command(codex_binary: str, session_id: str,
+                               cwd: Path) -> list[str]:
+    """Build the argv to resume an existing Codex session."""
+    return [codex_binary, "resume", session_id, "-C", str(cwd)]
+
+
+def build_codex_new_command(codex_binary: str, cwd: Path) -> list[str]:
+    """Build the argv to start a fresh Codex session in `cwd`."""
+    return [codex_binary, "-C", str(cwd)]
 
 
 def launch(cmd: list[str], cwd: Path, create_cwd: bool = False) -> int:

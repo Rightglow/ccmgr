@@ -15,10 +15,16 @@ from pathlib import Path
 import urwid
 
 from ccmgr import tmux_ctl
+from ccmgr.codex_index import CodexIndex
 from ccmgr.config import Config
 from ccmgr.discovery import list_projects
 from ccmgr.favorites import Favorites
-from ccmgr.launcher import build_resume_command, build_new_session_command
+from ccmgr.launcher import (
+    build_codex_new_command,
+    build_codex_resume_command,
+    build_new_session_command,
+    build_resume_command,
+)
 from ccmgr.models import Project, SessionMeta
 from ccmgr.session_cache import SessionCache
 from ccmgr.scroll_manager import ScrollManager
@@ -148,6 +154,10 @@ class _RightPaneState:
 
 
 class App:
+    # Double-backtick toggle for Codex developer mode.
+    _DOUBLE_BACKTICK_INTERVAL = 0.5
+    _last_backtick_ts: float = 0.0
+
     def __init__(self, claude_home: Path, config: Config,
                  auto_launched: bool = False,
                  scroll_coalescing: bool = True) -> None:
@@ -195,6 +205,11 @@ class App:
         self._less_mouse_flag: str = self._detect_less_mouse()
         self._scroll_manager = ScrollManager(enabled=scroll_coalescing)
         self._soft_quit_flag: bool = False
+        # Codex mode (developer toggle, double-tap backtick).
+        self._codex_mode: bool = False
+        self._codex_index = CodexIndex(
+            Path(config.codex_home).expanduser())
+        self._codex_project_filter: set[Path] = set()  # cwds with Codex sessions
 
         projects = list_projects(claude_home)
         self._projects_pane = ProjectsPane(projects, on_select=self._on_project_select,
@@ -345,11 +360,17 @@ class App:
         """Single-click / initial auto-select: show sessions, keep focus here."""
         self._pending_project = None
         if project is None:
+            if self._codex_mode:
+                self._set_status("New project only in Claude mode (double-tap `)")
+                return
             self._open_new_project_modal()
             return
         self._selected_project = project
         self._projects_pane.set_selected(project.encoded_name)
-        sessions = self._session_cache.list_sessions(project)
+        if self._codex_mode:
+            sessions = self._codex_index.sessions_for_cwd(project.real_path)
+        else:
+            sessions = self._session_cache.list_sessions(project)
         self._sessions_pane.set_sessions(project, sessions, running_ids=set(self._running),
                 favorite_ids=self._favorites.get_ids())
         self._set_status(f"Project: {project.real_path}  ({len(sessions)} sessions)")
@@ -510,6 +531,15 @@ class App:
         """Stable tmux session name for a given claude session key."""
         return f"cc-{self._safe_name(key, 16)}"
 
+    def _session_name(self, key: str) -> str:
+        """Stable tmux session name, using the right prefix for the active mode.
+
+        Claude sessions: cc-<id>; Codex sessions: cx-<id>.
+        In Codex mode the key comes from a Codex session; otherwise from Claude.
+        """
+        prefix = "cx-" if self._codex_mode else "cc-"
+        return f"{prefix}{self._safe_name(key, 16)}"
+
     def _ensure_detached_claude(self, name: str, shell_cmd: str) -> bool:
         """Create the detached tmux session running claude, if it doesn't already exist."""
         if tmux_ctl.session_exists(name):
@@ -602,7 +632,9 @@ class App:
 
     def _launch(self, key: str, cmd: list[str], cwd: Path, label: str,
                 project: Project | None, placeholder_path: Path | None = None,
-                *, steal_focus: bool = True) -> bool:
+                *, steal_focus: bool = True,
+                env: dict[str, str] | None = None,
+                login_shell: bool = False) -> bool:
         """Create (or reuse) the detached claude tmux session for `key`,
         register it, and attach it in the right pane. Returns success.
 
@@ -610,8 +642,8 @@ class App:
         lives in exactly one place.
         """
         existing = self._running.get(key)
-        tmux_name = existing.tmux_name if existing else self._claude_session_name(key)
-        if not self._ensure_detached_claude(tmux_name, self._shellify(cmd, cwd=cwd)):
+        tmux_name = existing.tmux_name if existing else self._session_name(key)
+        if not self._ensure_detached_claude(tmux_name, self._shellify(cmd, cwd=cwd, env=env, login_shell=login_shell)):
             self._set_status("failed to create detached claude session")
             return False
         self._running[key] = _Running(
@@ -626,14 +658,25 @@ class App:
 
     def _launch_resume(self, session_meta: SessionMeta,
                         *, steal_focus: bool = True) -> None:
-        cmd = build_resume_command(
-            claude_binary=self._config.claude_binary,
-            session_id=session_meta.session_id,
-            cwd=session_meta.project.real_path,
-        )
+        cwd = session_meta.project.real_path
+        env: dict[str, str] | None = None
+        if session_meta.session_type == "codex":
+            cmd = build_codex_resume_command(
+                codex_binary=self._config.codex_binary,
+                session_id=session_meta.session_id,
+                cwd=cwd,
+            )
+            env = self._codex_env()
+        else:
+            cmd = build_resume_command(
+                claude_binary=self._config.claude_binary,
+                session_id=session_meta.session_id,
+                cwd=cwd,
+            )
         label = f"{session_meta.project.display_name}/{session_meta.display_title}"
-        if self._launch(session_meta.session_id, cmd, session_meta.project.real_path,
-                        label, session_meta.project, steal_focus=steal_focus):
+        if self._launch(session_meta.session_id, cmd, cwd,
+                        label, session_meta.project, steal_focus=steal_focus,
+                        env=env, login_shell=session_meta.session_type == "codex"):
             self._set_status(
                 f"→ {session_meta.display_title}  ({len(self._running)} session(s) running)")
 
@@ -644,9 +687,21 @@ class App:
         proj = self._selected_project
         self._new_session_counter += 1
         placeholder = f"__new__-{self._new_session_counter}"
-        cmd = build_new_session_command(claude_binary=self._config.claude_binary, cwd=proj.real_path)
+        env: dict[str, str] | None = None
+        if self._codex_mode:
+            cmd = build_codex_new_command(
+                codex_binary=self._config.codex_binary,
+                cwd=proj.real_path,
+            )
+            env = self._codex_env()
+        else:
+            cmd = build_new_session_command(
+                claude_binary=self._config.claude_binary,
+                cwd=proj.real_path,
+            )
         if self._launch(placeholder, cmd, proj.real_path, f"{proj.display_name}/(new)",
-                        proj, placeholder_path=proj.real_path):
+                        proj, placeholder_path=proj.real_path, env=env,
+                        login_shell=self._codex_mode):
             self._set_status(f"→ new session in {proj.display_name}")
 
     def _on_new_project_submit(self, path: Path) -> None:
@@ -664,10 +719,26 @@ class App:
             self._set_status(f"→ new project: {path}")
 
     @staticmethod
-    def _shellify(argv: list[str], cwd: Path) -> str:
+    def _shellify(argv: list[str], cwd: Path,
+                   env: dict[str, str] | None = None,
+                   login_shell: bool = False) -> str:
         import shlex
         quoted = " ".join(shlex.quote(a) for a in argv)
-        return f"cd {shlex.quote(str(cwd))} && exec {quoted}"
+        # Codex needs env vars (e.g. DEEPSEEK_API_KEY) that are typically
+        # set in ~/.bashrc.  ``bash -l`` alone doesn't source .bashrc
+        # (it's only read for *interactive* shells); ``-i`` forces that.
+        if login_shell:
+            exports = ""
+            if env:
+                for k, v in env.items():
+                    exports += f"export {shlex.quote(k)}={shlex.quote(v)} && "
+            return (f"cd {shlex.quote(str(cwd))} && "
+                    f"exec $SHELL -li -c {shlex.quote(exports + 'exec ' + quoted)}")
+        exports = ""
+        if env:
+            for k, v in env.items():
+                exports += f"export {shlex.quote(k)}={shlex.quote(v)} && "
+        return f"{exports}cd {shlex.quote(str(cwd))} && exec {quoted}"
 
     # --- modals ---
 
@@ -890,10 +961,10 @@ class App:
                     self._set_active_target(meta.session_id, None)
 
     def _discover_orphans(self) -> None:
-        """Find detached ``cc-*`` tmux sessions and rebuild ``_running``.
+        """Find detached ``cc-*`` and ``cx-*`` tmux sessions and rebuild ``_running``.
 
         Called at startup so a soft-quit → restart cycle picks up every
-        Claude session that was left alive.
+        session that was left alive.
 
         tmux session names are truncated (``_safe_name``, 16 chars), so
         we must resolve each truncated name back to the full session_id
@@ -918,9 +989,12 @@ class App:
             if len(parts) != 2:
                 continue
             name, cwd_str = parts
-            if not name.startswith("cc-"):
+            is_claude = name.startswith("cc-")
+            is_codex = name.startswith("cx-")
+            if not (is_claude or is_codex):
                 continue
-            truncated = name[3:]  # strip "cc-" prefix
+            prefix_len = 3  # "cc-" or "cx-"
+            truncated = name[prefix_len:]
             if truncated.startswith("__new__-"):
                 continue
             cwd = Path(cwd_str)
@@ -928,7 +1002,11 @@ class App:
             if project is None:
                 continue
             # Resolve the truncated key back to the full session_id.
-            full_id = self._resolve_truncated_id(truncated, project)
+            if is_codex:
+                # For Codex sessions, look up in the codex index.
+                full_id = self._resolve_truncated_codex_id(truncated, cwd)
+            else:
+                full_id = self._resolve_truncated_id(truncated, project)
             if full_id is None:
                 continue
             if full_id in self._running:
@@ -958,6 +1036,14 @@ class App:
                         return full_id
         except OSError:
             pass
+        return None
+
+    def _resolve_truncated_codex_id(self, truncated: str, cwd: Path) -> str | None:
+        """Find a Codex session_id whose ``_safe_name`` matches *truncated*,
+        restricted to sessions whose cwd matches."""
+        for meta in self._codex_index.sessions_for_cwd(cwd):
+            if self._safe_name(meta.session_id, 16) == truncated:
+                return meta.session_id
         return None
 
     def _show_overlay(self, modal: urwid.Widget, width: int, height: int,
@@ -997,6 +1083,9 @@ class App:
     # --- key handling ---
 
     def _on_input(self, key: str) -> None:
+        if key == "`":
+            self._on_backtick()
+            return
         if key == "esc":
             # Esc navigates "up" the pane hierarchy:
             #   Running → Sessions → Projects
@@ -1029,6 +1118,119 @@ class App:
         if action is not None:
             getattr(self, action)()
             return
+
+    def _on_backtick(self) -> None:
+        """Double-tap `` ` `` within the interval → toggle Codex developer mode."""
+        now = time.monotonic()
+        if (now - App._last_backtick_ts < App._DOUBLE_BACKTICK_INTERVAL
+                and App._last_backtick_ts > 0):
+            App._last_backtick_ts = 0.0
+            self._toggle_codex_mode()
+        else:
+            App._last_backtick_ts = now
+
+    def _toggle_codex_mode(self) -> None:
+        """Switch between Claude and Codex views."""
+        self._codex_mode = not self._codex_mode
+        if self._codex_mode:
+            self._codex_project_filter = self._codex_index.all_cwds()
+            self._projects_pane.set_projects(self._visible_projects())
+            if not self._codex_project_filter:
+                self._set_status("Codex mode — no Codex sessions found  (double-tap ` to exit)")
+                self._sessions_pane.set_sessions(None, [],
+                    running_ids=set(self._running),
+                    favorite_ids=self._favorites.get_ids())
+                return
+            self._set_status("Codex mode  (double-tap ` to exit)")
+            # Switch to a project that has Codex sessions, if available.
+            if self._selected_project is not None and self._selected_project.real_path in self._codex_project_filter:
+                self._on_project_select(self._selected_project)
+            else:
+                matched = self._first_codex_project()
+                if matched is not None:
+                    self._on_project_select(matched)
+                else:
+                    self._sessions_pane.set_sessions(None, [],
+                        running_ids=set(self._running),
+                        favorite_ids=self._favorites.get_ids())
+        else:
+            self._projects_pane.set_projects(self._visible_projects())
+            self._set_status("Claude mode  (double-tap ` for Codex)")
+            if self._selected_project is not None:
+                self._on_project_select(self._selected_project)
+
+    def _codex_env(self) -> dict[str, str]:
+        """Capture environment variables needed by Codex.
+
+        Codex uses ``env_key`` from its config to name the API key variable
+        (e.g. ``DEEPSEEK_API_KEY``).  First check the current process
+        environment; when that misses (e.g. ccmgr was launched without a
+        login shell), probe the user's shell profile via ``bash -lic``.
+        """
+        import os as _os
+        import subprocess as _sp
+        result: dict[str, str] = {}
+        env_key = self._read_codex_env_key()
+        if not env_key:
+            return result
+        val = _os.environ.get(env_key)
+        if not val:
+            # Not in the current process — probe the user's shell profile.
+            # ``-l`` sources ~/.bash_profile; ``-i`` sources ~/.bashrc;
+            # together they cover every common setup.
+            try:
+                out = _sp.run(
+                    ["bash", "-lic", f"echo ${{{env_key}}}"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                val = out.stdout.strip()
+            except (OSError, _sp.TimeoutExpired):
+                pass
+        if val:
+            result[env_key] = val
+        return result
+
+    @staticmethod
+    def _read_codex_env_key() -> str | None:
+        """Parse ``env_key`` from ``~/.codex/config.toml``, if present."""
+        import os as _os
+        try:
+            import tomllib
+        except ImportError:
+            return None
+        config_path = Path(_os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "config.toml"
+        try:
+            with config_path.open("rb") as f:
+                data = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError):
+            return None
+        # The env_key lives under [model_providers.<name>].
+        providers = data.get("model_providers", {})
+        for _name, cfg in providers.items():
+            if isinstance(cfg, dict):
+                key = cfg.get("env_key")
+                if key:
+                    return str(key)
+        return None
+
+    def _first_codex_project(self) -> Project | None:
+        """First Claude project whose cwd has Codex sessions."""
+        projects = list_projects(self._claude_home)
+        for p in projects:
+            if p.real_path in self._codex_project_filter:
+                return p
+        return None
+
+    def _visible_projects(self) -> list[Project]:
+        """Projects for the current mode.
+
+        Claude mode: all projects (unchanged). Codex mode: only projects
+        whose ``real_path`` has at least one Codex session.
+        """
+        projects = list_projects(self._claude_home)
+        if not self._codex_mode:
+            return projects
+        return [p for p in projects if p.real_path in self._codex_project_filter]
 
     def _rotate_focus(self, reverse: bool = False) -> None:
         """Tab / Shift-Tab cycle through the three ccmgr sidebar panes.
@@ -1118,17 +1320,21 @@ class App:
 
     def _refresh(self) -> None:
         self._scroll_manager.maintain()
-        projects = list_projects(self._claude_home)
+        # Refresh the Codex project filter so newly-created Codex sessions
+        # make their cwd appear as a project in Codex mode.
+        if self._codex_mode:
+            self._codex_project_filter = self._codex_index.all_cwds()
+        projects = self._visible_projects()
         self._projects_pane.set_projects(projects)
-        # Prune dead claude tmux sessions (e.g. claude exited via /quit).
+        # Prune dead tmux sessions (e.g. claude/codex exited via /quit).
+        prefix = "cx-" if self._codex_mode else "cc-"
         for key in list(self._running):
-            if not tmux_ctl.session_exists(self._running[key].tmux_name):
-                del self._running[key]
+            if self._running[key].tmux_name.startswith(prefix):
+                if not tmux_ctl.session_exists(self._running[key].tmux_name):
+                    del self._running[key]
 
-        # If the Claude session we were showing in the right pane has exited,
-        # kill the right pane so the TUI returns to full-screen.  Must happen
-        # before the pane_alive→restore check so we never try to restore a
-        # dead session into a zombie pane.
+        # If the session we were showing in the right pane has exited,
+        # kill the right pane so the TUI returns to full-screen.
         if self._right_pane_id and self._right_pane_claude:
             if not tmux_ctl.session_exists(self._right_pane_claude):
                 tmux_ctl.kill_pane(self._right_pane_id)
@@ -1137,9 +1343,7 @@ class App:
                 self._set_active_target(None, None)
 
         # Detect when the right pane was closed (user pressed q in less, the
-        # pane was cleaned up above, or it was killed externally).  In history
-        # mode, restore whatever was there before; otherwise just clear our
-        # tracking.
+        # pane was cleaned up above, or it was killed externally).
         if self._right_pane_id and not tmux_ctl.pane_alive(self._right_pane_id):
             self._right_pane_id = None
             self._right_pane_claude = None
@@ -1150,16 +1354,19 @@ class App:
             else:
                 self._set_active_target(None, None)
 
-        # Promote any `__new__-N` placeholders to their real session_id +
-        # display title once claude has written the jsonl on disk.
-        self._resolve_placeholders(projects)
+        # Promote any `__new__-N` placeholders — Claude mode only.
+        if not self._codex_mode:
+            self._resolve_placeholders(projects)
         running_ids = set(self._running)
         if self._selected_project is not None:
             matched = next((p for p in projects if p.encoded_name == self._selected_project.encoded_name), None)
             if matched is not None:
                 self._selected_project = matched
-                sessions = [self._refine_status(s)
-                            for s in self._session_cache.list_sessions(matched)]
+                if self._codex_mode:
+                    sessions = self._codex_index.sessions_for_cwd(matched.real_path)
+                else:
+                    sessions = [self._refine_status(s)
+                                for s in self._session_cache.list_sessions(matched)]
                 self._sessions_pane.set_sessions(matched, sessions, running_ids=running_ids,
                                                   favorite_ids=self._favorites.get_ids())
             else:
@@ -1170,7 +1377,6 @@ class App:
 
         self._update_running_pane()
         # Advance the status-bar state machine (TTL expiry + idle tip rotation)
-        # instead of unconditionally overwriting the message every tick.
         self._update_status()
 
     def _effective_status(self, meta: SessionMeta) -> str:
@@ -1201,6 +1407,9 @@ class App:
             if r.is_placeholder or r.project is None:
                 continue
             meta = self._session_cache.get(r.project, r.key)
+            if meta is None:
+                # Try Codex index for cx-* sessions.
+                meta = self._codex_index.get(r.key)
             if meta is not None:
                 if meta.title:
                     r.label = f"{meta.project.display_name}/{meta.display_title}"
@@ -1208,10 +1417,17 @@ class App:
         self._render_running_pane()
 
     def _render_running_pane(self) -> None:
-        """Render registry values without doing metadata or process I/O."""
+        """Render registry values without doing metadata or process I/O.
+
+        In Claude mode only ``cc-*`` sessions are shown; in Codex mode only
+        ``cx-*`` sessions are shown.  The other type's sessions still run,
+        but they don't belong in the current view.
+        """
+        prefix = "cx-" if self._codex_mode else "cc-"
         entries = [
             RunningEntry(tmux_name=r.tmux_name, label=r.label, status=r.status)
             for r in self._running.values()
+            if r.tmux_name.startswith(prefix)
         ]
         self._running_pane.set_running(entries)
 
@@ -1694,7 +1910,7 @@ class App:
     # tips. Errors are sticky (cleared only by the next message or action);
     # warnings linger; routine info is brief. Tips rotate on their own cadence.
     _STATUS_TTL = {"error": None, "warn": 12.0, "info": 6.0}
-    _TIP_INTERVAL = 9.0
+    _TIP_INTERVAL = 20.0
 
     def _set_status(self, msg: str, level: str | None = None) -> None:
         """Show an explicit status message.
