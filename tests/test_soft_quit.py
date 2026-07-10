@@ -9,7 +9,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 import urwid
 
-from ccmgr.models import Project
+from ccmgr.models import Project, SessionMeta
 from ccmgr.ui.app import App, _Running
 from ccmgr.ui.modals import QuitConfirmModal
 
@@ -371,3 +371,77 @@ def test_quit_modal_no_running():
     )
     text = _render_text(modal)
     assert "No running sessions" in text
+
+
+# ── Codex placeholder resolution ─────────────────────────────────────────
+
+def _codex_session(project: Project, session_id: str, mtime: float) -> SessionMeta:
+    return SessionMeta(
+        project=project,
+        session_id=session_id,
+        jsonl_path=Path("/tmp/rollout.jsonl"),
+        title="Real session",
+        message_count=1,
+        token_total=1,
+        last_mtime=mtime,
+        status="idle",
+    )
+
+
+def test_resolve_placeholders_codex_rekeys_to_real_uuid():
+    """In Codex mode a `__new__-N` placeholder resolves to its real UUID
+    via the Codex index (not the Claude session cache), so clicking the real
+    row doesn't spawn a duplicate session and force_projects can clear."""
+    proj = _project()
+    real_id = "12345678-1234-1234-1234-1234567890ab"
+    app = App.__new__(App)
+    app._codex_mode = True
+    app._right_pane_claude = None
+    app._running = {
+        "__new__-1": _Running(
+            key="__new__-1", tmux_name="cx-new----1",
+            label="test-proj/(new)", project=proj,
+            placeholder_path=proj.real_path, created_at=999.0,
+        )
+    }
+    app._codex_index = MagicMock()
+    app._codex_index.sessions_for_cwd.return_value = [
+        _codex_session(proj, real_id, mtime=1000.0)
+    ]
+    # Codex mode must NOT consult the Claude session cache.
+    app._session_cache = MagicMock()
+    app._session_cache.list_sessions.side_effect = AssertionError(
+        "Codex placeholder resolution queried the Claude cache")
+
+    app._resolve_placeholders([proj])
+
+    assert "__new__-1" not in app._running
+    assert real_id in app._running
+    entry = app._running[real_id]
+    assert entry.tmux_name == "cx-new----1"      # same tmux session, re-keyed
+    assert not entry.is_placeholder
+    app._codex_index.sessions_for_cwd.assert_called_once_with(
+        proj.real_path, refresh=False)
+
+
+def test_resolve_placeholders_codex_keeps_placeholder_until_jsonl_appears():
+    """Before the rollout file exists (no session yet), the placeholder must
+    stay a placeholder rather than mis-binding to nothing."""
+    proj = _project()
+    app = App.__new__(App)
+    app._codex_mode = True
+    app._right_pane_claude = None
+    app._running = {
+        "__new__-1": _Running(
+            key="__new__-1", tmux_name="cx-new----1",
+            label="test-proj/(new)", project=proj,
+            placeholder_path=proj.real_path, created_at=999.0,
+        )
+    }
+    app._codex_index = MagicMock()
+    app._codex_index.sessions_for_cwd.return_value = []  # nothing on disk yet
+
+    app._resolve_placeholders([proj])
+
+    assert "__new__-1" in app._running
+    assert app._running["__new__-1"].is_placeholder

@@ -1524,9 +1524,13 @@ class App:
             else:
                 self._set_active_target(None, None)
 
-        # Promote any `__new__-N` placeholders — Claude mode only.
-        if not self._codex_mode:
-            self._resolve_placeholders(projects)
+        # Promote any `__new__-N` placeholders to their real session id — in
+        # BOTH Claude and Codex mode. While a session stays a placeholder its
+        # real-UUID row (filled from the on-disk scan) looks "not running", so
+        # clicking it spawns a duplicate session; and `force_projects` above
+        # stays stuck True, defeating the 3s project-scan cache. Codex
+        # resolution must run too or neither ever clears.
+        self._resolve_placeholders(projects)
         running_ids = set(self._running)
         if self._selected_project is not None:
             matched = next((p for p in projects if p.encoded_name == self._selected_project.encoded_name), None)
@@ -1646,6 +1650,10 @@ class App:
         For each live placeholder, look at its project's sessions and pick the
         newest one created after the placeholder timestamp whose session_id is
         not already claimed by another running session.
+
+        Works in both modes: Claude placeholders resolve against the Claude
+        session cache, Codex placeholders against the Codex index (already
+        walked once this refresh, so served snapshot-only).
         """
         placeholders = [r for r in self._running.values() if r.is_placeholder]
         if not placeholders:
@@ -1659,7 +1667,14 @@ class App:
             project = by_path.get(r.placeholder_path)
             if project is None:
                 continue
-            sessions = self._session_cache.list_sessions(project)
+            if self._codex_mode:
+                # Codex index was already refreshed once this tick (see
+                # _refresh); serve from that snapshot rather than re-walking
+                # the tree, and don't use the Claude-only session cache.
+                sessions = self._codex_index.sessions_for_cwd(
+                    project.real_path, refresh=False)
+            else:
+                sessions = self._session_cache.list_sessions(project)
             # Newest session created since this placeholder was launched, not
             # already in use by another running session.
             candidate: SessionMeta | None = None
