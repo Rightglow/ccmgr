@@ -15,6 +15,7 @@ from pathlib import Path
 import urwid
 
 from ccmgr import tmux_ctl
+from ccmgr.atomic_file import atomic_write_text
 from ccmgr.codex_index import CodexIndex
 from ccmgr.config import Config
 from ccmgr.discovery import list_projects
@@ -158,6 +159,16 @@ class App:
     _DOUBLE_BACKTICK_INTERVAL = 0.5
     _last_backtick_ts: float = 0.0
 
+    # tmux may apply DoubleClick1Pane after the application's double callback.
+    # Wait past that multi-click window before selecting the right pane.
+    _DOUBLE_CLICK_FOCUS_DELAY = 0.35
+    _double_focus_alarm: object | None = None
+    _double_focus_visual_pending: bool = False
+    # Global project counts/order are less latency-sensitive than the selected
+    # session list and are expensive on NFS homes.
+    _PROJECT_SCAN_INTERVAL = 3.0
+    _project_snapshot: list[Project] | None = None
+    _project_snapshot_at: float = 0.0
     # Status-bar state defaults at class scope so methods invoked on a bare
     # ``App.__new__(App)`` (e.g. in unit tests) don't hit AttributeError before
     # ``__init__`` runs. ``__init__`` reassigns these per instance.
@@ -197,6 +208,8 @@ class App:
         self._pending_project: Project | None = None
         self._pending_scroll_session: str | None = None
         self._scroll_alarm_pending: bool = False
+        self._double_focus_alarm: object | None = None
+        self._double_focus_visual_pending: bool = False
         self._last_screen_size: tuple[int, int] | None = None
         self._help_right_was_open: bool = False
         self._help_saved_width: str = ""
@@ -221,16 +234,20 @@ class App:
         self._codex_project_filter: set[Path] = set()  # cwds with Codex sessions
 
         projects = list_projects(claude_home)
+        self._project_snapshot = projects
+        self._project_snapshot_at = time.monotonic()
         self._projects_pane = ProjectsPane(projects, on_select=self._on_project_select,
                                            on_double_click=self._on_project_double_click)
         self._sessions_pane = SessionsPane(
             on_select=self._on_session_select,
             on_preview=self._on_session_preview,
             on_context=self._open_session_context_menu,
+            on_double_detected=self._schedule_right_pane_focus_after_double,
         )
         self._running_pane = RunningSessionsPane(
             on_select=self._on_running_select,
             on_context=self._on_running_context_menu,
+            on_double_detected=self._schedule_right_pane_focus_after_double,
         )
         # Warn early if dependencies are missing so the user doesn't
         # discover it by getting a cryptic error in the right pane.
@@ -311,12 +328,57 @@ class App:
         self._frame.set_window_active(active)
         self._set_divider_active(not active, force=force_border)
 
+    def _schedule_right_pane_focus_after_double(self) -> None:
+        """Show the right-focus state now, then move tmux focus once settled."""
+        self._cancel_pending_double_focus(restore_visual=False)
+        self._double_focus_visual_pending = True
+        self._set_ccmgr_focus(False)
+        self._redraw_focus_state_now()
+        if self._loop is None:
+            self._apply_right_pane_focus_after_double(None, None)
+            return
+        self._double_focus_alarm = self._loop.set_alarm_in(
+            self._DOUBLE_CLICK_FOCUS_DELAY,
+            self._apply_right_pane_focus_after_double,
+        )
+
+    def _apply_right_pane_focus_after_double(self, _loop, _user_data) -> None:
+        self._double_focus_alarm = None
+        pane_id = self._right_pane_id
+        if pane_id is None or not tmux_ctl.select_pane(pane_id):
+            self._double_focus_visual_pending = False
+            self._set_ccmgr_focus(True)
+            self._redraw_focus_state_now()
+            return
+        self._double_focus_visual_pending = False
+        self._set_ccmgr_focus(False)
+        self._redraw_focus_state_now()
+
+    def _cancel_pending_double_focus(self, *, restore_visual: bool = True) -> None:
+        alarm = self._double_focus_alarm
+        if alarm is not None and self._loop is not None:
+            self._loop.remove_alarm(alarm)
+        self._double_focus_alarm = None
+        visual_pending = self._double_focus_visual_pending
+        self._double_focus_visual_pending = False
+        if visual_pending and restore_visual:
+            self._set_ccmgr_focus(True)
+            self._redraw_focus_state_now()
+
+    def _redraw_focus_state_now(self) -> None:
+        """Flush a focus-only transition instead of waiting for the next tick."""
+        if self._loop is not None:
+            self._loop.draw_screen()
+
     def _filter_input(self, keys: list, _raw: list[int]) -> list:
         """Consume terminal focus reports before normal key dispatch."""
         filtered = []
         for key in keys:
             if key == "focus in":
-                self._set_ccmgr_focus(True)
+                # Ignore the late left-pane report while a double-click transfer
+                # is pending; cancellation restores it for newer sidebar input.
+                if not self._double_focus_visual_pending:
+                    self._set_ccmgr_focus(True)
             elif key == "focus out":
                 self._set_ccmgr_focus(False)
             else:
@@ -367,6 +429,7 @@ class App:
 
     def _on_project_select(self, project: Project | None) -> None:
         """Single-click / initial auto-select: show sessions, keep focus here."""
+        self._cancel_pending_double_focus()
         self._pending_project = None
         if project is None:
             if self._codex_mode:
@@ -394,7 +457,10 @@ class App:
             self._sidebar.focus_position = 1
 
     def _on_session_select(self, session: SessionMeta | None,
-                            steal_focus: bool = True) -> None:
+                            steal_focus: bool = True,
+                            from_double: bool = False) -> None:
+        if not from_double:
+            self._cancel_pending_double_focus()
         # Opening a real session (or creating a new one) — clear any
         # history-preview state so the launch takes over the right pane.
         self._in_history_mode = False
@@ -405,7 +471,10 @@ class App:
         self._launch_resume(session, steal_focus=steal_focus)
 
     def _on_running_select(self, entry: RunningEntry,
-                            steal_focus: bool = True) -> None:
+                            steal_focus: bool = True,
+                            from_double: bool = False) -> None:
+        if not from_double:
+            self._cancel_pending_double_focus()
         # Re-attach the right pane to this already-running claude session AND
         # sync the Projects/Sessions panes to that session's project, so the
         # sidebar reflects what's actually showing on the right.
@@ -437,9 +506,11 @@ class App:
     def _on_session_preview(self, session: SessionMeta) -> None:
         """Show session history in the right pane without launching Claude.
 
-        Called by ``ClickableRow`` after the double-click window has
-        passed, so this only fires on a genuine single-click.
+        Stopped-session clicks preview immediately. On a double-click the first
+        press may briefly preview before the second press opens the session;
+        both operations reuse the same right pane.
         """
+        self._cancel_pending_double_focus()
         if not self._has_less:
             self._set_status("'less' not installed — cannot preview history")
             return
@@ -607,7 +678,7 @@ class App:
             self._right_pane_claude = claude_tmux_name
             self._set_active_tmux_target(claude_tmux_name)
             self._set_ccmgr_focus(
-                not steal_focus,
+                not steal_focus and not self._double_focus_visual_pending,
                 force_border=True,
             )
             self._schedule_scroll_acceleration(claude_tmux_name)
@@ -941,7 +1012,8 @@ class App:
         import json
         path = self._state_path()
         try:
-            path.write_text(json.dumps(data), encoding="utf-8")
+            atomic_write_text(
+                path, json.dumps(data), encoding="utf-8")
         except OSError:
             pass
 
@@ -1224,22 +1296,80 @@ class App:
 
     def _first_codex_project(self) -> Project | None:
         """First Claude project whose cwd has Codex sessions."""
-        projects = list_projects(self._claude_home)
-        for p in projects:
-            if p.real_path in self._codex_project_filter:
-                return p
-        return None
+        projects = self._visible_projects(force=True)
+        return projects[0] if projects else None
 
-    def _visible_projects(self) -> list[Project]:
+    def _visible_projects(self, *, force: bool = False) -> list[Project]:
         """Projects for the current mode.
 
         Claude mode: all projects (unchanged). Codex mode: only projects
         whose ``real_path`` has at least one Codex session.
         """
-        projects = list_projects(self._claude_home)
+        now = time.monotonic()
+        projects = self._project_snapshot
+        if (force or projects is None
+                or now - self._project_snapshot_at >= self._PROJECT_SCAN_INTERVAL):
+            projects = list_projects(self._claude_home)
+            self._project_snapshot = projects
+            self._project_snapshot_at = now
         if not self._codex_mode:
             return projects
-        return [p for p in projects if p.real_path in self._codex_project_filter]
+        # Build a resolve-safe lookup: real_path → project.
+        by_resolved: dict[Path, Project] = {}
+        for p in projects:
+            try:
+                by_resolved[p.real_path.resolve()] = p
+            except OSError:
+                by_resolved[p.real_path] = p
+        visible: list[Project] = []
+        seen_encoded: set[str] = set()
+        for cwd in self._codex_project_filter:
+            try:
+                key = cwd.resolve()
+            except OSError:
+                key = cwd
+            existing = by_resolved.get(key)
+            if existing is not None:
+                if existing.encoded_name not in seen_encoded:
+                    seen_encoded.add(existing.encoded_name)
+                    visible.append(existing)
+            else:
+                # Codex-only directory — synthesise a project entry so the
+                # user can browse and launch sessions here.
+                synth = self._synthesise_codex_project(cwd)
+                if synth.encoded_name not in seen_encoded:
+                    seen_encoded.add(synth.encoded_name)
+                    visible.append(synth)
+        # Sort by recency: Claude projects by last_activity_ts, synthetic
+        # ones by their most recent Codex session.
+        def _sort_key(p: Project) -> float:
+            ts = p.last_activity_ts
+            if ts == 0.0:
+                sessions = self._codex_index.sessions_for_cwd(p.real_path)
+                if sessions:
+                    ts = sessions[0].last_mtime
+            return -ts
+        visible.sort(key=lambda p: _sort_key(p))
+        return visible
+
+    def _invalidate_project_snapshot(self) -> None:
+        self._project_snapshot_at = 0.0
+
+    @staticmethod
+    def _synthesise_codex_project(cwd: Path) -> Project:
+        """Create a synthetic Project for a Codex-only directory."""
+        from ccmgr.codex_index import _safe_encoded_name
+        try:
+            resolved = cwd.resolve()
+        except OSError:
+            resolved = cwd
+        return Project(
+            real_path=resolved,
+            encoded_name=_safe_encoded_name(resolved),
+            claude_dir=Path(),  # no Claude sessions directory
+            session_count=0,
+            last_activity_ts=0.0,
+        )
 
     def _rotate_focus(self, reverse: bool = False) -> None:
         """Tab / Shift-Tab cycle through the three ccmgr sidebar panes.
@@ -1329,23 +1459,47 @@ class App:
 
     def _refresh(self) -> None:
         self._scroll_manager.maintain()
+        prefix = "cx-" if self._codex_mode else "cc-"
+        needs_liveness = self._right_pane_id is not None or any(
+            r.tmux_name.startswith(prefix) for r in self._running.values())
+        server = tmux_ctl.server_snapshot() if needs_liveness else None
+        child_probes: dict[str, bool | None] = {}
+
+        def session_is_alive(name: str) -> bool:
+            if server is not None:
+                return name in server.sessions
+            return tmux_ctl.session_exists(name)
+
+        def pane_is_alive(pane_id: str) -> bool:
+            if server is not None:
+                return pane_id in server.panes
+            return tmux_ctl.pane_alive(pane_id)
+
+        # A refresh may need several Codex views. Walk its session tree once,
+        # then serve each view from the same mtime-keyed index snapshot.
+        refresh_codex = self._codex_mode or any(
+            r.tmux_name.startswith("cx-") for r in self._running.values())
+        if refresh_codex:
+            self._codex_index.refresh()
+
         # Refresh the Codex project filter so newly-created Codex sessions
         # make their cwd appear as a project in Codex mode.
         if self._codex_mode:
-            self._codex_project_filter = self._codex_index.all_cwds()
-        projects = self._visible_projects()
+            self._codex_project_filter = self._codex_index.all_cwds(refresh=False)
+        # Placeholder resolution must discover its JSONL without extra delay.
+        force_projects = any(r.is_placeholder for r in self._running.values())
+        projects = self._visible_projects(force=force_projects)
         self._projects_pane.set_projects(projects)
         # Prune dead tmux sessions (e.g. claude/codex exited via /quit).
-        prefix = "cx-" if self._codex_mode else "cc-"
         for key in list(self._running):
             if self._running[key].tmux_name.startswith(prefix):
-                if not tmux_ctl.session_exists(self._running[key].tmux_name):
+                if not session_is_alive(self._running[key].tmux_name):
                     del self._running[key]
 
         # If the session we were showing in the right pane has exited,
         # kill the right pane so the TUI returns to full-screen.
         if self._right_pane_id and self._right_pane_claude:
-            if not tmux_ctl.session_exists(self._right_pane_claude):
+            if not session_is_alive(self._right_pane_claude):
                 tmux_ctl.kill_pane(self._right_pane_id)
                 self._right_pane_id = None
                 self._right_pane_claude = None
@@ -1353,7 +1507,7 @@ class App:
 
         # Detect when the right pane was closed (user pressed q in less, the
         # pane was cleaned up above, or it was killed externally).
-        if self._right_pane_id and not tmux_ctl.pane_alive(self._right_pane_id):
+        if self._right_pane_id and not pane_is_alive(self._right_pane_id):
             self._right_pane_id = None
             self._right_pane_claude = None
             if self._in_history_mode:
@@ -1372,9 +1526,12 @@ class App:
             if matched is not None:
                 self._selected_project = matched
                 if self._codex_mode:
-                    sessions = self._codex_index.sessions_for_cwd(matched.real_path)
+                    sessions = self._codex_index.sessions_for_cwd(
+                        matched.real_path,
+                        refresh=False,
+                    )
                 else:
-                    sessions = [self._refine_status(s)
+                    sessions = [self._refine_status(s, child_probes, server)
                                 for s in self._session_cache.list_sessions(matched)]
                 self._sessions_pane.set_sessions(matched, sessions, running_ids=running_ids,
                                                   favorite_ids=self._favorites.get_ids())
@@ -1384,11 +1541,16 @@ class App:
                 self._sessions_pane.set_sessions(None, [], running_ids=running_ids,
                                                   favorite_ids=self._favorites.get_ids())
 
-        self._update_running_pane()
+        self._update_running_pane(child_probes, server)
         # Advance the status-bar state machine (TTL expiry + idle tip rotation)
         self._update_status()
 
-    def _effective_status(self, meta: SessionMeta) -> str:
+    def _effective_status(
+        self,
+        meta: SessionMeta,
+        child_probes: dict[str, bool | None] | None = None,
+        server: tmux_ctl.ServerSnapshot | None = None,
+    ) -> str:
         """Displayed status, refined by the live process when we own the session.
 
         For a session ccmgr has opened, a pending ``tool_use`` with a live
@@ -1400,29 +1562,49 @@ class App:
         if meta.pending_tool:
             r = self._running.get(meta.session_id)
             if r is not None and not r.is_placeholder:
-                has_child = tmux_ctl.session_has_child(r.tmux_name)
+                if child_probes is not None and r.tmux_name in child_probes:
+                    has_child = child_probes[r.tmux_name]
+                else:
+                    pane_pid = (
+                        server.pane_pid_for(r.tmux_name)
+                        if server is not None else None)
+                    if pane_pid is not None:
+                        has_child = tmux_ctl.process_has_child(pane_pid)
+                    else:
+                        has_child = tmux_ctl.session_has_child(r.tmux_name)
+                    if child_probes is not None:
+                        child_probes[r.tmux_name] = has_child
                 if has_child is not None:
                     return "busy" if has_child else "blocked"
         return meta.status
 
-    def _refine_status(self, meta: SessionMeta) -> SessionMeta:
+    def _refine_status(
+        self,
+        meta: SessionMeta,
+        child_probes: dict[str, bool | None] | None = None,
+        server: tmux_ctl.ServerSnapshot | None = None,
+    ) -> SessionMeta:
         """Return `meta` with its status refined, copying only when it changes."""
-        status = self._effective_status(meta)
+        status = self._effective_status(meta, child_probes, server)
         return meta if status == meta.status else replace(meta, status=status)
 
-    def _update_running_pane(self) -> None:
+    def _update_running_pane(
+        self,
+        child_probes: dict[str, bool | None] | None = None,
+        server: tmux_ctl.ServerSnapshot | None = None,
+    ) -> None:
         """Sync labels/status and repopulate the Running pane."""
         for r in self._running.values():
             if r.is_placeholder or r.project is None:
                 continue
-            meta = self._session_cache.get(r.project, r.key)
-            if meta is None:
-                # Try Codex index for cx-* sessions.
-                meta = self._codex_index.get(r.key)
+            if r.tmux_name.startswith("cx-"):
+                meta = self._codex_index.get(r.key, refresh=False)
+            else:
+                meta = self._session_cache.get(r.project, r.key)
             if meta is not None:
                 if meta.title:
                     r.label = f"{meta.project.display_name}/{meta.display_title}"
-                r.status = self._effective_status(meta)
+                r.status = self._effective_status(meta, child_probes, server)
         self._render_running_pane()
 
     def _render_running_pane(self) -> None:
@@ -1666,12 +1848,15 @@ class App:
         # 6. Invalidate caches and refresh so the UI reflects the deletion
         #    immediately — no stale rows that point to deleted sessions.
         self._session_cache.invalidate()
+        self._invalidate_project_snapshot()
         self._refresh()
 
         self._set_status(f"Deleted: {label}")
 
     @staticmethod
-    def _remove_from_history(session_id: str) -> None:
+    def _remove_from_history(
+        session_id: str, _attempts: int = 3,
+    ) -> None:
         """Strip every line referencing *session_id* from ~/.claude/history.jsonl.
 
         Claude Code uses this file as a session index — when a JSONL is deleted
@@ -1682,6 +1867,7 @@ class App:
         if not history_path.is_file():
             return
         try:
+            source_stat = history_path.stat()
             lines = history_path.read_text().splitlines()
         except OSError:
             return
@@ -1703,7 +1889,17 @@ class App:
             kept.append(line)
         if changed:
             try:
-                history_path.write_text("\n".join(kept) + ("\n" if kept else ""))
+                current_stat = history_path.stat()
+                source_signature = (
+                    source_stat.st_ino, source_stat.st_mtime_ns, source_stat.st_size)
+                current_signature = (
+                    current_stat.st_ino, current_stat.st_mtime_ns, current_stat.st_size)
+                if current_signature != source_signature:
+                    if _attempts > 1:
+                        App._remove_from_history(session_id, _attempts - 1)
+                    return
+                atomic_write_text(
+                    history_path, "\n".join(kept) + ("\n" if kept else ""))
             except OSError:
                 pass
 
@@ -1736,6 +1932,7 @@ class App:
         # Invalidate the cache and refresh so both Sessions and Running
         # panes pick up the new title immediately.
         self._session_cache.invalidate()
+        self._invalidate_project_snapshot()
         self._refresh()
         self._set_status(f"Renamed to: {new_title}")
 

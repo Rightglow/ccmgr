@@ -84,6 +84,8 @@ class ProjectsPane(urwid.WidgetWrap):
         return rows
 
     def set_projects(self, projects: list[Project]) -> None:
+        if self._all_projects == projects:
+            return
         self._all_projects = projects
         self._refresh_rows()
 
@@ -94,6 +96,8 @@ class ProjectsPane(urwid.WidgetWrap):
         self._refresh_rows()
 
     def set_filter(self, needle: str) -> None:
+        if self._filter == needle:
+            return
         self._filter = needle
         self._refresh_rows()
 

@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ccmgr.atomic_file import atomic_write_text
+
 
 def _favorites_path() -> Path:
     return Path.home() / ".config" / "ccmgr" / "favorites.json"
@@ -33,9 +35,9 @@ class Favorites:
             self._ids = set()
 
     def _save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            self._path.write_text(json.dumps(sorted(self._ids), indent=2))
+            atomic_write_text(
+                self._path, json.dumps(sorted(self._ids), indent=2))
         except OSError:
             pass
 

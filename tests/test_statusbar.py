@@ -233,6 +233,15 @@ def test_overlong_message_truncated_with_ellipsis():
     assert _cols(l2) <= 12
 
 
+def test_overlong_message_at_one_column_stays_within_width():
+    bar = StatusBar()
+    bar.set_message("abcdef", "info")
+    bar._reflow(1)
+    _, l2 = _lines(bar)
+    assert l2 == "…"
+    assert _cols(l2) == 1
+
+
 def test_level_sets_palette_attr():
     bar = StatusBar()
     bar.set_message("boom", "error")

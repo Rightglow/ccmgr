@@ -156,6 +156,16 @@ def test_set_selected_noop_same_project():
     assert len(rows) == 1
 
 
+def test_set_projects_unchanged_preserves_rows():
+    project = _project("a")
+    pane = ProjectsPane([project], on_select=lambda p: None)
+    row = next(w for w in pane._walker if isinstance(w, _ProjectRow))
+
+    pane.set_projects([project])
+
+    assert pane._walker[0] is row
+
+
 # ── set_filter ──────────────────────────────────────────────────────────
 
 def test_set_filter_filters_by_path():

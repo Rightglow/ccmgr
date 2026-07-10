@@ -2,12 +2,15 @@ import os
 import time
 from pathlib import Path
 
+import pytest
+
 from ccmgr.discovery import list_projects
 from ccmgr.session_cache import SessionCache
 
 
-def _make_project(claude_home, tmp_path, write_session_fixture, sessions):
-    real = tmp_path / "proj"
+def _make_project(claude_home, tmp_path, write_session_fixture, sessions,
+                  name="proj"):
+    real = tmp_path / name
     real.mkdir()
     encoded = str(real).replace("/", "-")
     for sid, records in sessions:
@@ -86,3 +89,65 @@ def test_cache_drops_entries_for_deleted_sessions(claude_home, write_session_fix
 
     second = cache.list_sessions(project)
     assert len(second) == 1
+
+
+def test_cache_keeps_other_projects_warm(
+    claude_home, write_session_fixture, tmp_path, monkeypatch,
+):
+    first_project = _make_project(
+        claude_home, tmp_path, write_session_fixture,
+        [(
+            "11111111-1111-1111-1111-111111111111",
+            [{"type": "user", "message": {"role": "user", "content": "one"}}],
+        )],
+        name="one",
+    )
+    second_project = _make_project(
+        claude_home, tmp_path, write_session_fixture,
+        [(
+            "22222222-2222-2222-2222-222222222222",
+            [{"type": "user", "message": {"role": "user", "content": "two"}}],
+        )],
+        name="two",
+    )
+    cache = SessionCache()
+    cache.list_sessions(first_project)
+    cache.list_sessions(second_project)
+
+    monkeypatch.setattr(
+        "ccmgr.session_cache._scan_session",
+        lambda *_args: pytest.fail("other project cache was evicted"),
+    )
+
+    assert len(cache.list_sessions(first_project)) == 1
+    assert len(cache.list_sessions(second_project)) == 1
+
+
+def test_append_during_scan_forces_next_poll_rescan(
+    claude_home, write_session_fixture, tmp_path, monkeypatch,
+):
+    project = _make_project(
+        claude_home, tmp_path, write_session_fixture,
+        [(
+            "33333333-3333-3333-3333-333333333333",
+            [{"type": "user", "message": {"role": "user", "content": "initial"}}],
+        )],
+    )
+    import ccmgr.session_cache as cache_module
+    real_scan = cache_module._scan_session
+    calls = []
+
+    def scan_then_append(project, path):
+        meta = real_scan(project, path)
+        calls.append(path)
+        if len(calls) == 1:
+            with path.open("a") as stream:
+                stream.write('{"type":"ai-title","aiTitle":"Late title"}\n')
+        return meta
+
+    monkeypatch.setattr(cache_module, "_scan_session", scan_then_append)
+    cache = SessionCache()
+
+    assert cache.list_sessions(project)[0].title != "Late title"
+    assert cache.list_sessions(project)[0].title == "Late title"
+    assert len(calls) == 2

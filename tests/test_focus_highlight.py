@@ -85,6 +85,102 @@ def test_focus_reports_are_consumed_and_update_divider(monkeypatch):
     assert set_border.call_args.args == ("fg=colour240",)
 
 
+def test_double_click_prepaints_focus_before_tmux_settles(monkeypatch):
+    app = App.__new__(App)
+    app._frame = _FocusAwareFrame(urwid.SolidFill(" "))
+    app._ccmgr_has_focus = True
+    app._divider_active = None
+    app._right_pane_id = "%2"
+    app._double_focus_alarm = None
+    app._double_focus_visual_pending = False
+    loop = MagicMock()
+    alarm = object()
+    loop.set_alarm_in.return_value = alarm
+    app._loop = loop
+    set_border = MagicMock(return_value=True)
+    select_pane = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "ccmgr.ui.app.tmux_ctl.set_window_border_style", set_border)
+    monkeypatch.setattr("ccmgr.ui.app.tmux_ctl.select_pane", select_pane)
+
+    app._schedule_right_pane_focus_after_double()
+
+    delay, callback = loop.set_alarm_in.call_args.args
+    assert delay == App._DOUBLE_CLICK_FOCUS_DELAY
+    assert app._double_focus_alarm is alarm
+    assert app._double_focus_visual_pending is True
+    assert app._ccmgr_has_focus is False
+    assert app._frame._window_active is False
+    set_border.assert_called_once_with("fg=cyan")
+    loop.draw_screen.assert_called_once_with()
+    select_pane.assert_not_called()
+
+    callback(loop, None)
+
+    select_pane.assert_called_once_with("%2")
+    assert app._double_focus_alarm is None
+    assert app._double_focus_visual_pending is False
+    assert app._ccmgr_has_focus is False
+    assert loop.draw_screen.call_count == 2
+
+
+def test_failed_delayed_focus_restores_sidebar(monkeypatch):
+    app = App.__new__(App)
+    app._frame = _FocusAwareFrame(urwid.SolidFill(" "))
+    app._ccmgr_has_focus = True
+    app._divider_active = None
+    app._right_pane_id = "%2"
+    app._double_focus_alarm = None
+    app._double_focus_visual_pending = False
+    app._loop = MagicMock()
+    app._loop.set_alarm_in.return_value = object()
+    set_border = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "ccmgr.ui.app.tmux_ctl.set_window_border_style", set_border)
+    monkeypatch.setattr(
+        "ccmgr.ui.app.tmux_ctl.select_pane", MagicMock(return_value=False))
+
+    app._schedule_right_pane_focus_after_double()
+    callback = app._loop.set_alarm_in.call_args.args[1]
+    callback(app._loop, None)
+
+    assert app._double_focus_visual_pending is False
+    assert app._ccmgr_has_focus is True
+    assert app._frame._window_active is True
+    assert set_border.call_args_list[-1].args == ("fg=colour240",)
+
+
+def test_new_session_intent_cancels_pending_double_focus(monkeypatch):
+    app = App.__new__(App)
+    app._frame = _FocusAwareFrame(urwid.SolidFill(" "))
+    app._frame.set_window_active(False)
+    app._ccmgr_has_focus = False
+    app._divider_active = True
+    app._loop = MagicMock()
+    alarm = object()
+    app._double_focus_alarm = alarm
+    app._double_focus_visual_pending = True
+    app._in_history_mode = True
+    app._restore_state = object()
+    app._launch_resume = MagicMock()
+    session = MagicMock()
+    set_border = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "ccmgr.ui.app.tmux_ctl.set_window_border_style", set_border)
+
+    app._on_session_select(session, steal_focus=False)
+
+    app._loop.remove_alarm.assert_called_once_with(alarm)
+    assert app._double_focus_alarm is None
+    assert app._double_focus_visual_pending is False
+    assert app._ccmgr_has_focus is True
+    assert app._frame._window_active is True
+    set_border.assert_called_once_with("fg=colour240")
+    app._loop.draw_screen.assert_called_once_with()
+    app._launch_resume.assert_called_once_with(session, steal_focus=False)
+
+
+
 def test_pending_restore_consumes_state_after_success(tmp_path, monkeypatch):
     state_path = tmp_path / "state.json"
     state_path.write_text("{}")

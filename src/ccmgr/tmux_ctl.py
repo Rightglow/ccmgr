@@ -11,7 +11,24 @@ import shutil
 import subprocess
 import tempfile
 import time
+from dataclasses import dataclass
 from functools import lru_cache
+
+
+@dataclass(frozen=True)
+class ServerSnapshot:
+    """Session and pane identities captured by one tmux server query."""
+
+    sessions: frozenset[str]
+    panes: frozenset[str]
+    session_pids: tuple[tuple[str, int], ...] = ()
+
+    def pane_pid_for(self, session_name: str) -> int | None:
+        """Return the first pane PID captured for *session_name*."""
+        for name, pid in self.session_pids:
+            if name == session_name:
+                return pid
+        return None
 
 
 def has_tmux() -> bool:
@@ -69,6 +86,66 @@ def in_tmux() -> bool:
     return os.environ.get("TMUX") is not None
 
 
+def server_snapshot() -> ServerSnapshot | None:
+    """Return all session names and pane IDs using one tmux process.
+
+    None means the snapshot was unavailable or malformed. Callers can then
+    fall back to targeted probes instead of treating a transient tmux failure
+    as an empty server and pruning live state.
+    """
+    if not in_tmux():
+        return None
+    try:
+        out = subprocess.check_output(
+            [
+                "tmux", "list-panes", "-a", "-F",
+                "#{session_name}\t#{pane_id}\t#{pane_pid}",
+            ],
+            stderr=subprocess.DEVNULL,
+        ).decode()
+    except (OSError, subprocess.CalledProcessError, UnicodeError):
+        return None
+
+    sessions: set[str] = set()
+    panes: set[str] = set()
+    session_pids: dict[str, int] = {}
+    for line in out.splitlines():
+        fields = line.split("\t", 2)
+        if len(fields) != 3 or not all(fields):
+            return None
+        session_name, pane_id, raw_pid = fields
+        try:
+            pane_pid = int(raw_pid)
+        except ValueError:
+            return None
+        sessions.add(session_name)
+        panes.add(pane_id)
+        session_pids.setdefault(session_name, pane_pid)
+    return ServerSnapshot(
+        frozenset(sessions),
+        frozenset(panes),
+        tuple(sorted(session_pids.items())),
+    )
+
+
+def process_has_child(pid: int) -> bool | None:
+    """Whether *pid* currently has at least one direct child process."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-P", str(pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    return None
+
+
 def session_has_child(session_name: str) -> bool | None:
     """Whether the Claude process has live child processes.
 
@@ -90,17 +167,7 @@ def session_has_child(session_name: str) -> bool | None:
         ).decode().strip()
         if not pid:
             return None
-        # pgrep -P exits 0 when children exist, 1 when none.
-        result = subprocess.run(
-            ["pgrep", "-P", pid],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        if result.returncode == 0:
-            return True
-        if result.returncode == 1:
-            return False
-        return None
+        return process_has_child(int(pid))
     except (OSError, subprocess.CalledProcessError, ValueError):
         return None
 

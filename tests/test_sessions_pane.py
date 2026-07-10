@@ -62,9 +62,11 @@ def test_non_running_sessions_get_preview_and_open():
     """Non-running sessions: on_click=preview, on_double_click=open (when on_preview set)."""
     preview_calls = []
     open_calls = []
+    completed = []
     pane = SessionsPane(
-        on_select=lambda s: open_calls.append(s.session_id),
+        on_select=lambda s, **kw: open_calls.append((s.session_id, kw["steal_focus"])),
         on_preview=lambda s: preview_calls.append(s.session_id),
+        on_double_detected=lambda: completed.append(True),
     )
     proj = _project()
     s = _session(proj)
@@ -80,15 +82,18 @@ def test_non_running_sessions_get_preview_and_open():
     r._on_click()
     assert preview_calls == [s.session_id]
     r._on_double_click()
-    assert open_calls == [s.session_id]
+    assert open_calls == [(s.session_id, False)]
+    assert completed == [True]
 
 
 def test_running_sessions_get_click_and_double_click():
-    """Running sessions: on_click=attach (no focus steal), on_double_click=attach + steal."""
+    """Running-session double-click defers focus until tmux settles."""
     open_calls = []
+    completed = []
     pane = SessionsPane(
         on_select=lambda s, **kw: open_calls.append((s.session_id, kw.get("steal_focus", True))),
         on_preview=lambda s: None,
+        on_double_detected=lambda: completed.append(True),
     )
     proj = _project()
     s = _session(proj)
@@ -104,8 +109,9 @@ def test_running_sessions_get_click_and_double_click():
     r._on_double_click()
     assert open_calls == [
         (s.session_id, False),  # click → no focus steal
-        (s.session_id, True),   # double-click → steals focus
+        (s.session_id, False),  # double-click → App focuses after tmux settles
     ]
+    assert completed == [True]
 
 
 def test_non_running_no_preview_callback():
@@ -168,6 +174,37 @@ def test_set_sessions_no_project():
     # Should show placeholder text
     assert len(pane._walker) == 1
     assert isinstance(pane._walker[0], urwid.Text)
+
+
+def test_set_sessions_unchanged_preserves_rows(monkeypatch):
+    monkeypatch.setattr("ccmgr.ui.sessions_pane.time.time", lambda: 2050.0)
+    pane = SessionsPane(on_select=lambda s: None)
+    project = _project()
+    session = _session(project)
+    pane.set_sessions(
+        project, [session], running_ids=set(), favorite_ids=set())
+    row = next(w for w in pane._walker if isinstance(w, _SessionRow))
+
+    pane.set_sessions(
+        project, [session], running_ids=set(), favorite_ids=set())
+
+    assert pane._walker[0] is row
+
+
+def test_set_sessions_refreshes_when_relative_time_changes(monkeypatch):
+    monkeypatch.setattr("ccmgr.ui.sessions_pane.time.time", lambda: 2050.0)
+    pane = SessionsPane(on_select=lambda s: None)
+    project = _project()
+    session = _session(project)
+    pane.set_sessions(
+        project, [session], running_ids=set(), favorite_ids=set())
+    row = next(w for w in pane._walker if isinstance(w, _SessionRow))
+
+    monkeypatch.setattr("ccmgr.ui.sessions_pane.time.time", lambda: 2061.0)
+    pane.set_sessions(
+        project, [session], running_ids=set(), favorite_ids=set())
+
+    assert pane._walker[0] is not row
 
 
 def test_set_filter_filters_by_title():

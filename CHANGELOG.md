@@ -30,6 +30,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metadata loading, right-pane restoration, and scroll-acceleration setup are
   deferred until after the first sidebar frame so startup and pane switching
   remain responsive.
+- Unchanged project, session, and running-session snapshots no longer rebuild
+  their rows every poll, reducing terminal redraws on SSH while still updating
+  relative-time labels when their displayed value changes. Live child-process
+  probes are shared between both session views during each refresh.
+- Running-session and pane liveness now share one on-demand tmux server
+  snapshot, with targeted probes retained as a failure fallback. Codex session
+  metadata is scanned once per poll and reused across the project, session, and
+  running views.
+- Project counts and global recency ordering now use a three-second snapshot,
+  while selected-session and running status keep their original poll cadence.
+  Placeholder resolution, deletion, and rename still force immediate discovery.
+- Live child-process checks reuse pane PIDs from the tmux server snapshot
+  instead of launching another tmux query per pending session.
 - Raised the minimum supported Urwid version to 2.6.16 for focus reporting.
 
 ### Fixed
@@ -37,6 +50,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unknown child-process probe results now fall back to JSONL-derived status.
 - Removed stale project selection when its project disappears during refresh.
 - Preserve soft-quit state until deferred right-pane restoration completes.
+- Defer right-pane focus until tmux's late DoubleClick1Pane binding completes,
+  preventing focus from bouncing back to the sidebar.
+- Pre-paint the right-pane focus state as soon as a double-click is detected,
+  so the sidebar highlight and center divider switch together while the real
+  tmux focus transfer remains safely delayed.
+- Keep status-bar truncation within a one-column viewport and clarify that F3
+  targets the Claude pane.
+- Keep session metadata caches scoped by project and key them by nanosecond
+  mtime plus size, ensuring appends during a Claude or Codex scan are picked up
+  on the next poll.
+- Persist soft-quit state, favorites, and the project path cache with atomic
+  replacement, including creation of a missing fallback runtime directory.
+- Retry history cleanup when Claude appends concurrently and never replace a
+  history file whose signature changed during the read.
 
 ## [0.1.5] - 2026-05-22
 

@@ -21,31 +21,42 @@ from ccmgr.models import Project, SessionMeta
 _TOOL_BLOCK_AGE_S = 10
 
 
+FileSignature = tuple[int, int]  # (mtime_ns, size)
+
+
 class CodexIndex:
     """mtime-keyed cache of all Codex sessions under ``codex_home/sessions/``."""
 
     def __init__(self, codex_home: Path) -> None:
         self._codex_home = codex_home
         self._sessions_dir = codex_home / "sessions"
-        # path -> (mtime, SessionMeta)
-        self._entries: dict[Path, tuple[float, SessionMeta]] = {}
+        # path -> (file signature captured before parsing, metadata)
+        self._entries: dict[Path, tuple[FileSignature, SessionMeta]] = {}
 
     # -- public API -------------------------------------------------------
 
-    def all_cwds(self) -> set[Path]:
+    def refresh(self) -> None:
+        """Refresh cached metadata once for a group of related queries."""
+        self._refresh()
+
+    def all_cwds(self, *, refresh: bool = True) -> set[Path]:
         """Set of cwds that have at least one Codex session.
 
         Used to filter the Projects pane in Codex mode — only projects whose
         ``real_path`` is in this set are shown.
         """
-        self._refresh()
+        if refresh:
+            self._refresh()
         return {meta.project.real_path
                 for _, meta in self._entries.values()
                 if meta.project is not None}
 
-    def sessions_for_cwd(self, cwd: Path) -> list[SessionMeta]:
+    def sessions_for_cwd(
+        self, cwd: Path, *, refresh: bool = True,
+    ) -> list[SessionMeta]:
         """All Codex sessions whose ``cwd`` matches *cwd*, sorted by mtime desc."""
-        self._refresh()
+        if refresh:
+            self._refresh()
         try:
             target = cwd.resolve()
         except OSError:
@@ -68,9 +79,10 @@ class CodexIndex:
         results.sort(key=lambda s: s.last_mtime, reverse=True)
         return results
 
-    def get(self, session_id: str) -> SessionMeta | None:
+    def get(self, session_id: str, *, refresh: bool = True) -> SessionMeta | None:
         """Look up a single Codex session by its UUID."""
-        self._refresh()
+        if refresh:
+            self._refresh()
         for _, meta in self._entries.values():
             if meta.session_id == session_id:
                 return meta
@@ -98,18 +110,20 @@ class CodexIndex:
                     path = Path(root) / name
                     current_paths.add(path)
                     try:
-                        mtime = path.stat().st_mtime
+                        stat = path.stat()
                     except OSError:
                         continue
+                    signature = (stat.st_mtime_ns, stat.st_size)
                     cached = self._entries.get(path)
-                    if cached is not None and cached[0] == mtime:
+                    if cached is not None and cached[0] == signature:
                         meta = cached[1]
                         # "busy" is time-dependent — re-scan if stale.
-                        if meta.status != "busy" or now - mtime <= _TOOL_BLOCK_AGE_S:
+                        if (meta.status != "busy"
+                                or now - meta.last_mtime <= _TOOL_BLOCK_AGE_S):
                             continue
                     meta = _scan_codex_session(path)
                     if meta is not None:
-                        self._entries[path] = (meta.last_mtime, meta)
+                        self._entries[path] = (signature, meta)
         except OSError:
             pass
 

@@ -93,6 +93,8 @@ class _SessionRow(ClickableRow):
             row_attr = "live"
         else:
             row_attr = None
+        # Immediate preview keeps single-click latency low; a following double
+        # click reuses the preview pane when it opens the session.
         super().__init__(urwid.AttrMap(body, row_attr, focus_map=_FOCUS_REMAP),
                          on_click, on_double_click, on_right_click,
                          click_key=session.session_id,
@@ -108,10 +110,12 @@ class _NewSessionRow(ClickableRow):
 class SessionsPane(urwid.WidgetWrap):
     def __init__(self, on_select: Callable[[SessionMeta | None], None],
                  on_preview: "Callable[[SessionMeta], None] | None" = None,
-                 on_context: "Callable[[SessionMeta], None] | None" = None) -> None:
+                 on_context: "Callable[[SessionMeta], None] | None" = None,
+                 on_double_detected: "Callable[[], None] | None" = None) -> None:
         self._on_select = on_select
         self._on_preview = on_preview
         self._on_context = on_context
+        self._on_double_detected = on_double_detected
         self._sessions: list[SessionMeta] = []
         self._project: Project | None = None
         self._filter = ""
@@ -119,6 +123,7 @@ class SessionsPane(urwid.WidgetWrap):
         self._favorite_ids: set[str] = set()
         self._active_session_id: str | None = None
         self._selected_session_id: str | None = None
+        self._rendered_data: tuple | None = None
 
         self._new_row = _NewSessionRow(on_click=lambda: self._on_select(None))
         self._divider = urwid.Divider("─")
@@ -136,6 +141,18 @@ class SessionsPane(urwid.WidgetWrap):
     def set_sessions(self, project: Project | None, sessions: list[SessionMeta],
                      running_ids: set[str] | None = None,
                      favorite_ids: set[str] | None = None) -> None:
+        next_running_ids = self._running_ids if running_ids is None else running_ids
+        next_favorite_ids = self._favorite_ids if favorite_ids is None else favorite_ids
+        rendered_data = (
+            project,
+            tuple(sessions),
+            frozenset(next_running_ids),
+            frozenset(next_favorite_ids),
+            tuple(_format_when(session.last_mtime) for session in sessions),
+        )
+        if self._rendered_data == rendered_data:
+            return
+
         prior_focus = self._remember_focus()
         self._project = project
         self._sessions = sessions
@@ -145,6 +162,7 @@ class SessionsPane(urwid.WidgetWrap):
             self._favorite_ids = favorite_ids
         if running_ids is not None:
             self._running_ids = running_ids
+        self._rendered_data = rendered_data
 
         if project is None:
             self._walker[:] = [urwid.Text("(no project selected)", align="center")]
@@ -189,6 +207,8 @@ class SessionsPane(urwid.WidgetWrap):
         self._restore_focus(prior_focus)
 
     def set_filter(self, needle: str) -> None:
+        if self._filter == needle:
+            return
         self._filter = needle
         if self._project is not None:
             self._render(self._visible_sessions())
@@ -206,6 +226,12 @@ class SessionsPane(urwid.WidgetWrap):
         sessions.sort(key=lambda s: (0 if s.session_id in f_ids else 1, -s.last_mtime))
         return sessions
 
+    def _on_double_select(self, session: SessionMeta) -> None:
+        # Paint right focus before attach; the real select-pane stays delayed.
+        if self._on_double_detected is not None:
+            self._on_double_detected()
+        self._on_select(session, steal_focus=False, from_double=True)
+
     def _render(self, sessions: list[SessionMeta]) -> None:
         rows: list = []
         for s in sessions:
@@ -213,12 +239,11 @@ class SessionsPane(urwid.WidgetWrap):
             is_fav = s.session_id in self._favorite_ids
             selected_id = self._selected_session_id or self._active_session_id
             is_sel = s.session_id == selected_id
+            on_dbl = lambda s=s: self._on_double_select(s)
             if is_running:
                 on_click = lambda s=s: self._on_select(s, steal_focus=False)
-                on_dbl = lambda s=s: self._on_select(s)
             else:
                 on_click = (lambda s=s: self._on_preview(s)) if self._on_preview else None
-                on_dbl = lambda s=s: self._on_select(s)  # double-click opens
             rows.append(_SessionRow(
                 s,
                 is_running=is_running, is_favorite=is_fav,

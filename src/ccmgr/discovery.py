@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 
+from ccmgr.atomic_file import atomic_write_text
 from ccmgr.models import Project
 from ccmgr.path_codec import decode
 from ccmgr.session_index import _looks_like_uuid
@@ -34,8 +35,7 @@ def _load_path_cache() -> dict[str, str]:
 def _save_path_cache(cache: dict[str, str]) -> None:
     path = _path_cache_file()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(cache, indent=0))
+        atomic_write_text(path, json.dumps(cache, indent=0))
     except OSError:
         pass
 

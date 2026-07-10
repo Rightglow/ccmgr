@@ -10,6 +10,7 @@ from ccmgr.tmux_ctl import (
     enable_clipboard_passthrough,
     install_scroll_bindings,
     prepare_scroll_bindings,
+    process_has_child,
     restore_scroll_bindings,
     set_window_border_style,
     set_window_user_option,
@@ -18,6 +19,7 @@ from ccmgr.tmux_ctl import (
     session_pane_id,
     scroll_lines_per_event,
     scroll_bindings_owned_by,
+    server_snapshot,
     wait_window_user_option,
 )
 
@@ -62,6 +64,57 @@ def test_clipboard_handles_check_output_error():
          _mock_check_call() as call:
         enable_clipboard_passthrough()
         call.assert_called_once()
+
+
+def test_server_snapshot_collects_sessions_and_panes():
+    output = "cc-one\t%1\t101\ncc-one\t%2\t102\ncc-two\t%3\t201\n"
+    with patch("ccmgr.tmux_ctl.in_tmux", return_value=True), \
+         _mock_check_output(output) as call:
+        snapshot = server_snapshot()
+
+    assert snapshot is not None
+    assert snapshot.sessions == frozenset({"cc-one", "cc-two"})
+    assert snapshot.panes == frozenset({"%1", "%2", "%3"})
+    assert snapshot.session_pids == (("cc-one", 101), ("cc-two", 201))
+    assert snapshot.pane_pid_for("cc-one") == 101
+    assert snapshot.pane_pid_for("missing") is None
+    assert call.call_args.args[0] == [
+        "tmux", "list-panes", "-a", "-F",
+        "#{session_name}\t#{pane_id}\t#{pane_pid}",
+    ]
+
+
+def test_server_snapshot_rejects_malformed_output():
+    with patch("ccmgr.tmux_ctl.in_tmux", return_value=True), \
+         _mock_check_output("cc-one %1\n"):
+        assert server_snapshot() is None
+
+
+def test_server_snapshot_returns_none_when_tmux_probe_fails():
+    with patch("ccmgr.tmux_ctl.in_tmux", return_value=True), \
+         patch(
+             "subprocess.check_output",
+             side_effect=subprocess.CalledProcessError(1, "tmux"),
+         ):
+        assert server_snapshot() is None
+
+
+def test_server_snapshot_skips_probe_outside_tmux():
+    with patch("ccmgr.tmux_ctl.in_tmux", return_value=False), \
+         patch("subprocess.check_output") as output:
+        assert server_snapshot() is None
+
+    output.assert_not_called()
+
+
+def test_process_has_child_rejects_probe_errors():
+    with patch("subprocess.run") as run:
+        run.return_value.returncode = 2
+        assert process_has_child(1234) is None
+        assert run.call_args.args[0] == ["pgrep", "-P", "1234"]
+
+    with patch("subprocess.run", side_effect=FileNotFoundError):
+        assert process_has_child(1234) is None
 
 
 def test_session_pane_id_returns_first_pane():

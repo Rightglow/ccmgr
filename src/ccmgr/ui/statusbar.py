@@ -20,7 +20,7 @@ HELP_HINT = keymap.hint_text()
 TIPS: tuple[str, ...] = (
     "Quit with q, then s to soft-quit — leaves every Claude session running",
     "Click a stopped session to preview its history without launching Claude",
-    "F3 toggles fullscreen for the focused pane",
+    "F3 toggles fullscreen for the Claude pane",
     "t opens a shell in the focused project's directory",
 )
 
@@ -128,8 +128,11 @@ class StatusBar(urwid.WidgetWrap):
         if overflow:
             # More than two lines' worth: truncate line 2 with an ellipsis so
             # it's clear the message was cut off. Reserve one column for "…".
-            line2, _ = self._split_at_width(rest, max(1, maxcol - 1))
-            line2 = line2.rstrip() + "…"
+            if maxcol == 1:
+                line2 = "…"
+            else:
+                line2, _ = self._split_at_width(rest, maxcol - 1)
+                line2 = line2.rstrip() + "…"
         self._line2.set_text(line2)
 
     @staticmethod

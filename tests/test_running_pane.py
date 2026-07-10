@@ -29,18 +29,21 @@ def test_running_row_click_no_steal():
     assert calls == [("cc-a", False)]
 
 
-def test_running_row_double_click_steals():
-    """Double-click on a running row calls on_select with steal_focus=True (default)."""
+def test_running_row_double_click_defers_focus():
+    """Double-click attaches without focus, then notifies App to focus later."""
     calls = []
+    completed = []
     pane = RunningSessionsPane(
-        on_select=lambda e, **kw: calls.append((e.tmux_name, kw.get("steal_focus", True)))
+        on_select=lambda e, **kw: calls.append((e.tmux_name, kw.get("steal_focus", True))),
+        on_double_detected=lambda: completed.append(True),
     )
     pane.set_running([_entry("cc-x")])
 
     row = [w for w in pane._walker if isinstance(w, _RunningRow)][0]
     assert row._on_double_click is not None
     row._on_double_click()
-    assert calls == [("cc-x", True)]
+    assert calls == [("cc-x", False)]
+    assert completed == [True]
 
 
 def test_running_row_both_callbacks_set():
@@ -57,7 +60,7 @@ def test_running_row_both_callbacks_set():
 # ── Enter key ────────────────────────────────────────────────────────────
 
 def test_enter_on_running_row_steals_focus():
-    """Enter on a running row steals focus (default behavior, like double-click)."""
+    """Enter on a running row still steals focus immediately."""
     calls = []
     pane = RunningSessionsPane(
         on_select=lambda e, **kw: calls.append(kw.get("steal_focus", True))
@@ -89,6 +92,18 @@ def test_set_running_restores_focus():
     focus_w, _ = pane._walker.get_focus()
     assert isinstance(focus_w, _RunningRow)
     assert focus_w.entry.tmux_name == "cc-2"
+
+
+def test_set_running_unchanged_preserves_rows():
+    pane = RunningSessionsPane(on_select=lambda e: None)
+    entries = [_entry("cc-1"), _entry("cc-2")]
+    pane.set_running(entries)
+    rows = list(pane._walker)
+
+    pane.set_running(entries)
+
+    assert list(pane._walker) == rows
+    assert all(current is prior for current, prior in zip(pane._walker, rows))
 
 
 # ── status dots ─────────────────────────────────────────────────────────

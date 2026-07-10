@@ -225,6 +225,33 @@ def test_codex_index_all_cwds(tmp_path: Path):
     assert len(cwds) == 2
 
 
+def test_codex_index_cached_queries_do_not_rescan(
+    tmp_path: Path, monkeypatch,
+):
+    sessions_dir = tmp_path / "sessions" / "2026" / "07" / "09"
+    sid = "a1111111-1111-7111-a36b-9e1044cb7a88"
+    _write_codex_session(
+        sessions_dir / "rollout-a.jsonl",
+        sid,
+        "/project-a",
+        messages=[
+            {"role": "user", "text": "a"},
+            {"role": "assistant", "text": "ok"},
+        ],
+    )
+    idx = CodexIndex(tmp_path)
+    idx.refresh()
+    monkeypatch.setattr(
+        idx,
+        "_refresh",
+        lambda: pytest.fail("cached query unexpectedly rescanned"),
+    )
+
+    assert idx.all_cwds(refresh=False) == {Path("/project-a")}
+    assert len(idx.sessions_for_cwd(Path("/project-a"), refresh=False)) == 1
+    assert idx.get(sid, refresh=False) is not None
+
+
 def test_codex_index_get(tmp_path: Path):
     sessions_dir = tmp_path / "sessions" / "2026" / "07" / "09"
     sid = "a1111111-1111-7111-a36b-9e1044cb7a88"
@@ -258,6 +285,50 @@ def test_codex_index_cache_mtime(tmp_path: Path):
     second = idx.sessions_for_cwd(Path("/project-a"))
     # Should pick up the new content since mtime changed
     assert len(second) > 0
+
+
+def test_codex_append_during_scan_forces_next_refresh(
+    tmp_path: Path, monkeypatch,
+):
+    import ccmgr.codex_index as index_module
+
+    sessions_dir = tmp_path / "sessions" / "2026" / "07" / "09"
+    path = sessions_dir / "rollout-a.jsonl"
+    sid = "a1111111-1111-7111-a36b-9e1044cb7a88"
+    _write_codex_session(
+        path,
+        sid,
+        "/project-a",
+        messages=[
+            {"role": "user", "text": "one"},
+            {"role": "assistant", "text": "ok"},
+        ],
+    )
+    real_scan = index_module._scan_codex_session
+    calls = []
+
+    def scan_then_append(path):
+        meta = real_scan(path)
+        calls.append(path)
+        if len(calls) == 1:
+            record = {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "two"}],
+                },
+            }
+            with path.open("a") as stream:
+                stream.write(json.dumps(record) + "\n")
+        return meta
+
+    monkeypatch.setattr(index_module, "_scan_codex_session", scan_then_append)
+    idx = CodexIndex(tmp_path)
+
+    assert idx.get(sid).message_count == 2
+    assert idx.get(sid).message_count == 3
+    assert len(calls) == 2
 
 
 def test_codex_index_invalidate(tmp_path: Path):

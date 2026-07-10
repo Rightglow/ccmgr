@@ -134,6 +134,47 @@ def test_effective_status_probe_failure_falls_back_to_jsonl(app, monkeypatch):
     assert a._effective_status(recent) == "busy"
 
 
+def test_effective_status_reuses_probe_within_refresh(app, monkeypatch):
+    a, _Running = app
+    a._running[_UID] = _Running(key=_UID, tmux_name="cc-x", label="l")
+    calls = []
+    monkeypatch.setattr(
+        tmux_ctl,
+        "session_has_child",
+        lambda name: calls.append(name) or True,
+    )
+    probes = {}
+
+    assert a._effective_status(_meta(pending=True), probes) == "busy"
+    assert a._effective_status(_meta(pending=True), probes) == "busy"
+    assert calls == ["cc-x"]
+
+
+def test_effective_status_uses_snapshot_pane_pid(app, monkeypatch):
+    a, _Running = app
+    a._running[_UID] = _Running(key=_UID, tmux_name="cc-x", label="l")
+    calls = []
+    monkeypatch.setattr(
+        tmux_ctl,
+        "process_has_child",
+        lambda pid: calls.append(pid) or True,
+    )
+    monkeypatch.setattr(
+        tmux_ctl,
+        "session_has_child",
+        lambda _name: pytest.fail("unexpected per-session tmux probe"),
+    )
+    server = tmux_ctl.ServerSnapshot(
+        sessions=frozenset({"cc-x"}),
+        panes=frozenset({"%9"}),
+        session_pids=(("cc-x", 4321),),
+    )
+
+    assert a._effective_status(
+        _meta(pending=True), {}, server) == "busy"
+    assert calls == [4321]
+
+
 def test_effective_status_not_opened_falls_back_to_time(app, monkeypatch):
     a, _Running = app
     # Not in _running → no live process → use meta.status, never call pgrep.
@@ -175,3 +216,203 @@ def test_refresh_clears_visual_selection_for_missing_project(app):
 
     assert a._selected_project is None
     assert a._projects_pane._selected_encoded_name is None
+
+
+def test_refresh_skips_server_snapshot_without_liveness_targets(
+    app, monkeypatch,
+):
+    a, _Running = app
+    monkeypatch.setattr(
+        tmux_ctl,
+        "server_snapshot",
+        lambda: pytest.fail("idle refresh queried tmux server"),
+    )
+
+    a._refresh()
+
+
+def test_refresh_uses_server_snapshot_instead_of_targeted_probes(
+    app, monkeypatch,
+):
+    a, _Running = app
+    a._running[_UID] = _Running(key=_UID, tmux_name="cc-x", label="l")
+    a._right_pane_id = "%9"
+    a._right_pane_claude = "cc-x"
+    monkeypatch.setattr(
+        tmux_ctl,
+        "server_snapshot",
+        lambda: tmux_ctl.ServerSnapshot(
+            sessions=frozenset({"cc-x"}),
+            panes=frozenset({"%9"}),
+        ),
+    )
+    monkeypatch.setattr(
+        tmux_ctl,
+        "session_exists",
+        lambda _name: pytest.fail("unexpected targeted session probe"),
+    )
+    monkeypatch.setattr(
+        tmux_ctl,
+        "pane_alive",
+        lambda _pane: pytest.fail("unexpected targeted pane probe"),
+    )
+
+    a._refresh()
+
+    assert _UID in a._running
+    assert a._right_pane_id == "%9"
+
+
+def test_refresh_snapshot_prunes_dead_targets(app, monkeypatch):
+    a, _Running = app
+    a._running[_UID] = _Running(key=_UID, tmux_name="cc-x", label="l")
+    a._right_pane_id = "%9"
+    a._right_pane_claude = "cc-x"
+    killed = []
+    monkeypatch.setattr(
+        tmux_ctl,
+        "server_snapshot",
+        lambda: tmux_ctl.ServerSnapshot(frozenset(), frozenset()),
+    )
+    monkeypatch.setattr(
+        tmux_ctl, "kill_pane", lambda pane: killed.append(pane) or True)
+
+    a._refresh()
+
+    assert _UID not in a._running
+    assert a._right_pane_id is None
+    assert a._right_pane_claude is None
+    assert killed == ["%9"]
+
+
+def test_refresh_falls_back_when_snapshot_is_unavailable(app, monkeypatch):
+    a, _Running = app
+    a._running[_UID] = _Running(key=_UID, tmux_name="cc-x", label="l")
+    a._right_pane_id = "%9"
+    a._right_pane_claude = "cc-x"
+    session_calls = []
+    pane_calls = []
+    monkeypatch.setattr(tmux_ctl, "server_snapshot", lambda: None)
+    monkeypatch.setattr(
+        tmux_ctl,
+        "session_exists",
+        lambda name: session_calls.append(name) or True,
+    )
+    monkeypatch.setattr(
+        tmux_ctl,
+        "pane_alive",
+        lambda pane: pane_calls.append(pane) or True,
+    )
+
+    a._refresh()
+
+    assert session_calls == ["cc-x", "cc-x"]
+    assert pane_calls == ["%9"]
+
+
+def test_refresh_scans_codex_once_and_uses_cached_queries(app, monkeypatch):
+    a, _Running = app
+    project = Project(
+        real_path=Path("/tmp/codex-project"),
+        encoded_name="-tmp-codex-project",
+        claude_dir=Path(),
+        session_count=0,
+        last_activity_ts=0.0,
+    )
+    a._codex_mode = True
+    a._running[_UID] = _Running(
+        key=_UID,
+        tmux_name="cx-x",
+        label="codex",
+        project=project,
+    )
+
+    class CodexProbe:
+        def __init__(self):
+            self.refresh_calls = 0
+            self.all_cwds_calls = []
+            self.get_calls = []
+
+        def refresh(self):
+            self.refresh_calls += 1
+
+        def all_cwds(self, *, refresh=True):
+            self.all_cwds_calls.append(refresh)
+            return set()
+
+        def get(self, session_id, *, refresh=True):
+            self.get_calls.append((session_id, refresh))
+            return None
+
+    probe = CodexProbe()
+    a._codex_index = probe
+    monkeypatch.setattr(
+        tmux_ctl,
+        "server_snapshot",
+        lambda: tmux_ctl.ServerSnapshot(
+            sessions=frozenset({"cx-x"}),
+            panes=frozenset(),
+        ),
+    )
+    monkeypatch.setattr(
+        a._session_cache,
+        "get",
+        lambda *_args: pytest.fail("Codex entry queried Claude cache"),
+    )
+
+    a._refresh()
+
+    assert probe.refresh_calls == 1
+    assert probe.all_cwds_calls == [False]
+    assert probe.get_calls == [(_UID, False)]
+
+
+def test_visible_projects_reuses_short_lived_snapshot(app, monkeypatch):
+    a, _Running = app
+    cached = Project(
+        real_path=Path("/tmp/cached"),
+        encoded_name="-tmp-cached",
+        claude_dir=Path("/tmp/meta-cached"),
+        session_count=1,
+        last_activity_ts=1.0,
+    )
+    refreshed = Project(
+        real_path=Path("/tmp/refreshed"),
+        encoded_name="-tmp-refreshed",
+        claude_dir=Path("/tmp/meta-refreshed"),
+        session_count=2,
+        last_activity_ts=2.0,
+    )
+    now = [101.0]
+    calls = []
+    a._project_snapshot = [cached]
+    a._project_snapshot_at = 100.0
+    monkeypatch.setattr(
+        "ccmgr.ui.app.time.monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        "ccmgr.ui.app.list_projects",
+        lambda _home: calls.append(True) or [refreshed],
+    )
+
+    assert a._visible_projects() == [cached]
+    assert calls == []
+
+    now[0] = 104.0
+    assert a._visible_projects() == [refreshed]
+    assert calls == [True]
+
+
+def test_visible_projects_force_bypasses_snapshot(app, monkeypatch):
+    a, _Running = app
+    a._project_snapshot = []
+    a._project_snapshot_at = 100.0
+    monkeypatch.setattr(
+        "ccmgr.ui.app.time.monotonic", lambda: 101.0)
+    calls = []
+    monkeypatch.setattr(
+        "ccmgr.ui.app.list_projects",
+        lambda _home: calls.append(True) or [],
+    )
+
+    assert a._visible_projects(force=True) == []
+    assert calls == [True]
