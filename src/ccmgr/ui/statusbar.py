@@ -8,11 +8,6 @@ import urwid
 from ccmgr.ui import keymap
 
 
-# Generated from the single keymap source of truth so the hint bar can't drift
-# from the actual dispatch.
-HELP_HINT = keymap.hint_text()
-
-
 # Idle tips cycled through the status bar when there's no active message. These
 # intentionally avoid the keys already listed in the always-visible HelpBar
 # (n/r/s/d, /, i, ?, q, Ctrl-B ←/→) — they surface behaviour that isn't obvious
@@ -72,7 +67,7 @@ class HelpBar(urwid.WidgetWrap):
                  on_detach: Callable[[], None]) -> None:
         self._context: str | None = None
         main, trail = keymap.hint_text_for(self._context).split("\n", 1)
-        self._main = urwid.Text(main, align="left")
+        self._main = urwid.Text(main, align="left", wrap="clip")
         # Build clickable buttons from the trailing items (these never change).
         buttons: list = []
         for item in trail.split(" · "):

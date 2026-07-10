@@ -43,7 +43,7 @@ If you're not already inside a tmux session, ccmgr will launch one automatically
 | `k` | Kill the running Claude process (keeps session file) |
 | `d` | Delete the focused session (prompts for confirmation) |
 | `t` | Open a terminal in the active project directory |
-| `F3` | Fullscreen the Claude pane (toggle) for clean text selection |
+| `F9` | Fullscreen the agent pane (toggle) for clean text selection |
 | `?` | Full help popup with all keybindings |
 | `q` or `Ctrl-C` | Quit with confirmation |
 
@@ -101,11 +101,8 @@ and over SSH your clipboard lives on the *local* machine.
   drag-select in the Claude pane — copies to local clipboard automatically,
   even over SSH. No Shift needed. (iTerm2: enable *Settings → General →
   Selection → "Applications in terminal may access clipboard"*.)
-- **Without OSC 52** (Terminal.app, etc.): **F3** to fullscreen Claude →
-  **Shift-drag** to select → `Cmd/C` to copy → **F3** to return.
-
-On a default Mac, F3 is Mission Control — enable *System Settings → Keyboard →
-"Use F1, F2, etc. keys as standard function keys"*, or press **Fn+F3**.
+- **Without OSC 52** (Terminal.app, etc.): **F9** to fullscreen the agent →
+  **Shift-drag** to select → `Cmd/C` to copy → **F9** to return.
 `Ctrl-B z` also toggles fullscreen (built into tmux) but zooms whichever pane
 has focus, so it may fullscreen the sidebar instead.
 

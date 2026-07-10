@@ -330,6 +330,8 @@ class App:
         self._ccmgr_has_focus = active
         self._frame.set_window_active(active)
         self._set_divider_active(not active, force=force_border)
+        if hasattr(self, "_help_bar"):
+            self._help_bar.set_context(self._help_context())
 
     def _schedule_right_pane_focus_after_double(self) -> None:
         """Show the right-focus state now, then move tmux focus once settled."""
@@ -1179,9 +1181,11 @@ class App:
             #   Running → Sessions → Projects
             if self._sidebar.focus_position == 2:
                 self._sidebar.focus_position = 1
+                self._help_bar.set_context(self._help_context())
                 return
             if self._sidebar.focus_position == 1:
                 self._sidebar.focus_position = 0
+                self._help_bar.set_context(self._help_context())
                 return
             return
         if key == "ctrl c":
@@ -1389,6 +1393,7 @@ class App:
             return
         cur = self._sidebar.focus_position
         self._sidebar.focus_position = (cur - 1) % n if reverse else (cur + 1) % n
+        self._help_bar.set_context(self._help_context())
 
     def _teardown_tmux(self) -> None:
         """Clean up on quit.
@@ -1561,7 +1566,13 @@ class App:
     _HELP_CONTEXTS = (keymap.CTX_PROJECTS, keymap.CTX_SESSIONS, keymap.CTX_RUNNING)
 
     def _help_context(self) -> str:
-        """Map the focused sidebar pane (0/1/2) to a keymap context name."""
+        """Map the focused sidebar pane (0/1/2) to a keymap context name.
+
+        When the right-hand agent pane has focus (via Ctrl-B →), return the
+        agent context so the help bar shows only the two keys that matter:
+        Ctrl-B ← (back to sidebar) and F9 (fullscreen)."""
+        if not self._ccmgr_has_focus:
+            return keymap.CTX_AGENT
         pos = self._sidebar.focus_position
         if 0 <= pos < len(self._HELP_CONTEXTS):
             return self._HELP_CONTEXTS[pos]

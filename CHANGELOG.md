@@ -65,8 +65,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pre-paint the right-pane focus state as soon as a double-click is detected,
   so the sidebar highlight and center divider switch together while the real
   tmux focus transfer remains safely delayed.
-- Keep status-bar truncation within a one-column viewport and clarify that F3
-  targets the Claude pane.
+- Keep status-bar truncation within a one-column viewport and clarify that F9
+  targets the agent pane.
 - Keep session metadata caches scoped by project and key them by nanosecond
   mtime plus size, ensuring appends during a Claude or Codex scan are picked up
   on the next poll.

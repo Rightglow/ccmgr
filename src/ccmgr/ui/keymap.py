@@ -1,7 +1,7 @@
 """Single source of truth for ccmgr's action keybindings.
 
 Drives both the key dispatch in ``App._on_input`` and the always-visible hint
-bar (``statusbar.HELP_HINT``) so the two cannot drift — previously a key's
+bar (``HelpBar`` / ``hint_text_for``) so the two cannot drift — previously a key's
 behaviour and the bar describing it were maintained separately.
 
 Navigation / pane keys and keys that need a pane guard or an argument
@@ -18,6 +18,7 @@ from dataclasses import dataclass
 CTX_PROJECTS = "projects"
 CTX_SESSIONS = "sessions"
 CTX_RUNNING = "running"
+CTX_AGENT = "agent"  # right-hand agent pane has focus
 _ALL_CTX = (CTX_PROJECTS, CTX_SESSIONS, CTX_RUNNING)
 
 
@@ -32,10 +33,13 @@ class Binding:
 
 
 BINDINGS: list[Binding] = [
-    # Always shown (navigation / pane switching).
-    Binding(("up", "down"), "↑↓", "move"),
-    Binding(("tab", "shift tab"), "Tab", "pane"),
-    Binding(("enter",), "↵", "open"),
+    # Sidebar navigation — not shown when the agent pane has focus.
+    Binding(("up", "down"), "↑↓", "move",
+            contexts=_ALL_CTX),
+    Binding(("tab", "shift tab"), "Tab", "pane",
+            contexts=_ALL_CTX),
+    Binding(("enter",), "↵", "open",
+            contexts=_ALL_CTX),
     # Projects & Sessions — creating a new session needs a project.
     Binding(("n", "N"), "n", "new", "_launch_new_session",
             contexts=(CTX_PROJECTS, CTX_SESSIONS)),
@@ -56,18 +60,24 @@ BINDINGS: list[Binding] = [
             contexts=(CTX_SESSIONS, CTX_RUNNING)),
     # Sessions only — delete removes the session JSONL.
     Binding(("d", "D"), "d", "del", "_on_delete_session",
-            contexts=(CTX_SESSIONS,)),
+            contexts=(CTX_SESSIONS, CTX_RUNNING)),
     # All three — opens a shell in the active project's directory.
     Binding(("t", "T"), "t", "term", "_open_terminal_for_active_project",
             contexts=_ALL_CTX),
     # Display-only: handled by a tmux root binding, not ccmgr.
     Binding((), "F9", "fullscreen"),
+    # Agent pane — shown only when the right-hand agent has focus.
+    Binding((), "C-b ←", "back",
+            contexts=(CTX_AGENT,)),
 ]
 
 _TRAILING: list[Binding] = [
-    Binding(("?",), "?", "help", "_open_help_modal"),
-    Binding(("q", "Q"), "q", "quit", "_open_quit_confirm"),
-    Binding((), "C-b d", "detach"),
+    Binding(("?",), "?", "help", "_open_help_modal",
+            contexts=_ALL_CTX),
+    Binding(("q", "Q"), "q", "quit", "_open_quit_confirm",
+            contexts=_ALL_CTX),
+    Binding((), "C-b d", "detach",
+            contexts=_ALL_CTX),
 ]
 
 _ALL = BINDINGS + _TRAILING
@@ -94,7 +104,11 @@ def hint_text_for(context: str | None = None) -> str:
         for b in BINDINGS
         if _visible_in(b, context)
     )
-    trail = " · ".join(f"{b.hint} {b.desc}" for b in _TRAILING)
+    trail = " · ".join(
+        f"{b.hint} {b.desc}"
+        for b in _TRAILING
+        if _visible_in(b, context)
+    )
     return f"{main}\n{trail}"
 
 
