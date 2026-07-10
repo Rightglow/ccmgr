@@ -272,6 +272,9 @@ class App:
             on_quit=self._open_quit_confirm,
             on_detach=self._on_detach,
         )
+        # Start on the focused pane's key set (sidebar defaults to Projects) so
+        # the bar is correct before the first refresh tick.
+        self._help_bar.set_context(self._help_context())
         footer = urwid.Pile([
             ("pack", self._help_bar),
             ("pack", self._status),
@@ -659,6 +662,10 @@ class App:
                 tmux_ctl.select_pane(self._right_pane_id)
                 self._set_ccmgr_focus(False)
             self._set_active_tmux_target(claude_tmux_name)
+            # Re-assert the F9 fullscreen binding: it's server-global and may
+            # have been overwritten by another pane's attach since we last set
+            # it, even though this pane's id is unchanged.
+            self._install_fullscreen_binding()
             return True
 
         attach_cmd = f"TMUX= exec tmux attach-session -t {shlex.quote(claude_tmux_name)}"
@@ -686,20 +693,20 @@ class App:
         return ok
 
     def _install_fullscreen_binding(self) -> None:
-        """(Re)bind F3 to fullscreen-toggle the *claude* (right) pane.
+        """(Re)bind F9 to fullscreen-toggle the *agent* (right) pane.
 
         Unlike tmux's built-in ``Ctrl-B z`` — which zooms whichever pane is
         active and can therefore fullscreen the ccmgr sidebar by mistake — this
-        targets the right pane's current id explicitly, so F3 always zooms
-        Claude regardless of focus. Rebound whenever the right pane is
-        (re)created because its id changes. Copy workflow: F3 → Shift-drag to
-        select → Cmd/Ctrl+C → F3 to exit.
+        targets the right pane's current id explicitly, so F9 always zooms the
+        agent pane regardless of focus. Rebound whenever the right pane is
+        (re)created because its id changes. Copy workflow: F9 → Shift-drag to
+        select → Cmd/Ctrl+C → F9 to exit.
         """
         if not self._right_pane_id:
             return
         import subprocess as _sp
         _sp.run(
-            ["tmux", "bind-key", "-n", "F3", "resize-pane", "-Z", "-t", self._right_pane_id],
+            ["tmux", "bind-key", "-n", "F9", "resize-pane", "-Z", "-t", self._right_pane_id],
             stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
         )
 
@@ -724,7 +731,7 @@ class App:
         existing = self._running.get(key)
         tmux_name = existing.tmux_name if existing else self._session_name(key)
         if not self._ensure_detached_claude(tmux_name, self._shellify(cmd, cwd=cwd, env=env, login_shell=login_shell)):
-            self._set_status("failed to create detached claude session")
+            self._set_status("failed to create detached agent session")
             return False
         self._running[key] = _Running(
             key=key, tmux_name=tmux_name, label=label, project=project,
@@ -732,7 +739,7 @@ class App:
             created_at=time.time() if placeholder_path is not None else 0.0,
         )
         if not self._attach_in_right_pane(tmux_name, steal_focus=steal_focus):
-            self._set_status("failed to attach to claude session")
+            self._set_status("failed to attach to agent session")
             return False
         return True
 
@@ -1391,10 +1398,10 @@ class App:
         detached Claude sessions and outer tmux session are left alive.
         """
         self._teardown_scroll_acceleration()
-        # Remove the F3 fullscreen binding we installed (it's server-global).
+        # Remove the F9 fullscreen binding we installed (it's server-global).
         try:
             import subprocess as _sp
-            _sp.run(["tmux", "unbind-key", "-n", "F3"],
+            _sp.run(["tmux", "unbind-key", "-n", "F9"],
                     stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
         except Exception:
             pass
@@ -1544,6 +1551,17 @@ class App:
         self._update_running_pane(child_probes, server)
         # Advance the status-bar state machine (TTL expiry + idle tip rotation)
         self._update_status()
+        # Keep the hint bar showing only the keys valid for the focused pane.
+        self._help_bar.set_context(self._help_context())
+
+    _HELP_CONTEXTS = (keymap.CTX_PROJECTS, keymap.CTX_SESSIONS, keymap.CTX_RUNNING)
+
+    def _help_context(self) -> str:
+        """Map the focused sidebar pane (0/1/2) to a keymap context name."""
+        pos = self._sidebar.focus_position
+        if 0 <= pos < len(self._HELP_CONTEXTS):
+            return self._HELP_CONTEXTS[pos]
+        return keymap.CTX_PROJECTS
 
     def _effective_status(
         self,
@@ -2105,7 +2123,7 @@ class App:
     def _resize_divider(self, expand_ccmgr: bool) -> None:
         """Move the vertical divider: [ shrinks ccmgr, ] expands it."""
         if not self._right_pane_id or not tmux_ctl.pane_alive(self._right_pane_id):
-            self._set_status("No claude pane to resize against.")
+            self._set_status("No agent pane to resize against.")
             return
         direction = "-R" if expand_ccmgr else "-L"
         tmux_ctl.resize_pane(self._right_pane_id, direction, 5)

@@ -7,6 +7,7 @@ from datetime import datetime
 
 import urwid
 
+from ccmgr.fuzzy import fuzzy_match
 from ccmgr.models import Project, SessionMeta
 from ccmgr.ui._widgets import ClickableRow, remember_focus, restore_focus
 
@@ -219,7 +220,7 @@ class SessionsPane(urwid.WidgetWrap):
         order identically."""
         needle = self._filter.lower()
         if needle:
-            sessions = [s for s in self._sessions if needle in s.display_title.lower()]
+            sessions = [s for s in self._sessions if fuzzy_match(needle, s.display_title)]
         else:
             sessions = list(self._sessions)
         f_ids = self._favorite_ids

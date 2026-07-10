@@ -18,9 +18,9 @@ HELP_HINT = keymap.hint_text()
 # (n/r/s/d, /, i, ?, q, Ctrl-B ←/→) — they surface behaviour that isn't obvious
 # from the hint bar, like soft-quit and history preview.
 TIPS: tuple[str, ...] = (
-    "Quit with q, then s to soft-quit — leaves every Claude session running",
-    "Click a stopped session to preview its history without launching Claude",
-    "F3 toggles fullscreen for the Claude pane",
+    "Quit with q, then s to soft-quit — leaves every agent session running",
+    "Click a stopped session to preview its history without launching the agent",
+    "F9 toggles fullscreen for the agent pane",
     "t opens a shell in the focused project's directory",
 )
 
@@ -61,14 +61,19 @@ class _HelpButton(urwid.WidgetWrap):
 class HelpBar(urwid.WidgetWrap):
     """Persistent key reference — two lines: actions, then utility/exit.
 
-    The second line items are clickable buttons with a subtle background.
+    The first line is context-sensitive: it lists only the action keys valid
+    for the focused sidebar pane (Projects / Sessions / Running), pulled from
+    ``keymap.hint_text_for`` so it can't drift from dispatch. The second line
+    (help / quit / detach) is constant and its items are clickable buttons.
     """
 
     def __init__(self, on_help: Callable[[], None],
                  on_quit: Callable[[], None],
                  on_detach: Callable[[], None]) -> None:
-        main, trail = HELP_HINT.split("\n", 1)
-        # Build clickable buttons from the trailing items.
+        self._context: str | None = None
+        main, trail = keymap.hint_text_for(self._context).split("\n", 1)
+        self._main = urwid.Text(main, align="left")
+        # Build clickable buttons from the trailing items (these never change).
         buttons: list = []
         for item in trail.split(" · "):
             label = " " + item + " "
@@ -82,10 +87,19 @@ class HelpBar(urwid.WidgetWrap):
                 btn = urwid.Text(label)
             buttons.append(("pack", btn))
         body = urwid.Pile([
-            urwid.Text(main, align="left"),
+            self._main,
             urwid.Columns(buttons, dividechars=1),
         ])
         super().__init__(urwid.AttrMap(body, "dim"))
+
+    def set_context(self, context: str | None) -> None:
+        """Update the first line to the key set for *context* (a ``keymap.CTX_*``
+        value, or None for all keys). No-op when unchanged."""
+        if context == self._context:
+            return
+        self._context = context
+        main = keymap.hint_text_for(context).split("\n", 1)[0]
+        self._main.set_text(main)
 
 
 class StatusBar(urwid.WidgetWrap):
@@ -127,8 +141,10 @@ class StatusBar(urwid.WidgetWrap):
         line2, overflow = self._split_at_width(rest, maxcol)
         if overflow:
             # More than two lines' worth: truncate line 2 with an ellipsis so
-            # it's clear the message was cut off. Reserve one column for "…".
-            if maxcol == 1:
+            # it's clear the message was cut off. Reserve one column for "…";
+            # when the viewport is a single column there's no room for content,
+            # so line 2 is just the ellipsis.
+            if maxcol <= 1:
                 line2 = "…"
             else:
                 line2, _ = self._split_at_width(rest, maxcol - 1)

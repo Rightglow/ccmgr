@@ -58,7 +58,7 @@ class QuitConfirmModal(urwid.WidgetWrap):
 
         if running_count > 0:
             session_word = "session" if running_count == 1 else "sessions"
-            summary = f"{running_count} Claude {session_word} still running."
+            summary = f"{running_count} agent {session_word} still running."
         else:
             summary = "No running sessions."
 
@@ -114,16 +114,16 @@ class HelpModal(urwid.WidgetWrap):
         ]),
         ("Actions", [
             ("Enter", "Open or resume the selected session"),
-            ("n", "Start a new Claude session in the current project"),
+            ("n", "Start a new agent session in the current project"),
             ("/", "Filter the focused pane"),
             ("i", "Details of the focused project / session"),
             ("[ / ]", "Resize divider: shrink / expand ccmgr sidebar"),
             ("r", "Rename the focused session"),
             ("s", "Toggle star (pin to top of session list)"),
-            ("k", "Kill the running Claude process (keeps session file)"),
+            ("k", "Kill the running agent process (keeps session file)"),
             ("d", "Delete the focused session (prompts for confirmation)"),
             ("t", "Open a terminal in the active project"),
-            ("F3", "Fullscreen the Claude pane (toggle) for clean text copy"),
+            ("F9", "Fullscreen the agent pane (toggle) for clean text copy"),
             ("q or Ctrl-C", "Quit ccmgr (prompts for confirmation)"),
         ]),
         ("Mouse", [
@@ -131,19 +131,19 @@ class HelpModal(urwid.WidgetWrap):
             ("Double-click", "Open session and move focus to it"),
             ("Right-click", "Context menu for the session"),
         ]),
-        ("Copy text from Claude", [
+        ("Copy text from the agent", [
             ("Drag-select",
              "OSC 52 terminals copy to local clipboard automatically"),
-            ("F3",
-             "Fullscreen Claude → Shift-drag select → Cmd/Ctrl+C → F3"),
+            ("F9",
+             "Fullscreen agent → Shift-drag select → Cmd/Ctrl+C → F9"),
         ]),
         ("tmux", [
-            ("Ctrl-B → / ←", "Move focus between ccmgr and Claude panes"),
+            ("Ctrl-B → / ←", "Move focus between ccmgr and agent panes"),
             ("Ctrl-B d", "Detach from ccmgr (keep sessions alive)"),
         ]),
         ("", [
             ("Each session runs in its own detached tmux session.",
-             "Switching keeps every Claude alive — no responses"),
+             "Switching keeps every agent alive — no responses"),
             ("or tool calls are interrupted.",
              "Ctrl-B d detaches from ccmgr, everything keeps running."),
         ]),
@@ -250,7 +250,7 @@ class RunningInfoModal(urwid.WidgetWrap):
 
         if is_placeholder:
             body_lines.append(urwid.Divider())
-            body_lines.append(urwid.Text(("live", "(initializing — waiting for Claude to start)")))
+            body_lines.append(urwid.Text(("live", "(initializing — waiting for the agent to start)")))
         elif session is not None:
             body_lines.append(urwid.Divider())
             body_lines.append(urwid.Text(f"session id:    {session.session_id}"))

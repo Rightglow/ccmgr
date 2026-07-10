@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Status bar now cycles short idle tips when there's no active message, and
   soft-wraps long messages across both lines (ellipsis only past two lines)
   instead of clipping at line one. _(2026-07-10 02:12 +0800)_
+- Hint bar is now context-sensitive: it lists only the action keys valid for
+  the focused sidebar pane (Projects / Sessions / Running), sourced from the
+  keymap so it can't drift from dispatch. Project/session filtering also matches
+  fuzzily instead of requiring a contiguous substring. _(2026-07-10 17:59 +0800)_
 
 ### Changed
 
@@ -20,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a level-dependent time (errors are sticky) instead of being overwritten by
   the next poll tick — fixing messages that previously flashed by unreadably.
   _(2026-07-10 02:12 +0800)_
+- User-facing text now says "agent" instead of "Claude" where either agent may
+  run (session counts, the right pane, error messages, tips, help) now that
+  Codex sessions are supported; "Claude mode" / "Codex mode" toggle labels are
+  kept as-is. Fullscreen toggle is F9 across the hint bar, help, and the tmux
+  binding (previously the binding and the displayed key had drifted apart).
+  _(2026-07-10 17:59 +0800)_
 - Pane focus now follows the actual tmux input target: the sidebar drops focus
   styling while another pane is active, while the selected conversation and
   status colours remain visible. Shared tmux dividers now switch as one solid

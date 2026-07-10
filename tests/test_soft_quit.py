@@ -359,7 +359,7 @@ def test_quit_modal_shows_running_count():
         running_count=5,
     )
     text = _render_text(modal)
-    assert "5 Claude sessions" in text
+    assert "5 agent sessions" in text
 
 
 def test_quit_modal_no_running():

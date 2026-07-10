@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from ccmgr.fuzzy import fuzzy_match
+
 import urwid
 
 from ccmgr.models import Project
@@ -77,7 +79,7 @@ class ProjectsPane(urwid.WidgetWrap):
                         on_double_click=(lambda p=p: self._on_double_click(p))
                                         if self._on_double_click else None)
             for p in projects
-            if needle in str(p.real_path).lower()
+            if fuzzy_match(needle, str(p.real_path))
         ]
         if not rows:
             rows = [urwid.Text("  (no matches)" if self._filter else "  (no projects)", align="left")]
