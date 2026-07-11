@@ -117,10 +117,14 @@ def hint_text() -> str:
     return hint_text_for()
 
 
-def action_for(key: str) -> str | None:
+def action_for(key: str, context: str | None = None) -> str | None:
     """App method name for a dispatched action key, or None if not dispatched
-    here (navigation / inline-handled / unknown)."""
+    here (navigation / inline-handled / unknown).
+
+    When *context* is passed the binding's ``contexts`` field is checked so
+    rename/star are never dispatched from the Running pane (where they would
+    act on a stale Sessions-pane row)."""
     for b in _ALL:
-        if b.action and key in b.keys:
+        if b.action and key in b.keys and _visible_in(b, context):
             return b.action
     return None

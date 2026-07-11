@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from ccmgr.discovery import _is_background_session, list_projects
+from ccmgr.discovery import list_projects
 
 
 def test_list_projects_empty_when_no_claude_dir(tmp_path):
@@ -106,54 +106,8 @@ def test_path_cache_prunes_vanished_projects(claude_home, write_session_fixture,
     assert encoded not in discovery._load_path_cache()
 
 
-# ── _is_background_session ──────────────────────────────────────────────
-
 def _write_jsonl(path: Path, records: list[dict]) -> None:
     path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
-
-
-def test_is_bg_session_first_record(tmp_path):
-    p = tmp_path / "bg.jsonl"
-    _write_jsonl(p, [
-        {"type": "user", "message": {"role": "user", "content": "x"}, "sessionKind": "bg"},
-    ])
-    assert _is_background_session(str(p)) is True
-
-
-def test_is_bg_session_later_record(tmp_path):
-    """sessionKind can appear after the first record — scan must cover it."""
-    p = tmp_path / "bg_later.jsonl"
-    _write_jsonl(p, [
-        {"type": "system", "cwd": "/tmp"},
-        {"type": "ai-title", "aiTitle": "Some title"},
-        {"type": "user", "message": {"role": "user", "content": "x"}, "sessionKind": "bg"},
-    ])
-    assert _is_background_session(str(p)) is True
-
-
-def test_is_not_bg_session_no_sessionkind(tmp_path):
-    p = tmp_path / "normal.jsonl"
-    _write_jsonl(p, [
-        {"type": "user", "message": {"role": "user", "content": "hello"}},
-        {"type": "assistant", "message": {"role": "assistant", "content": "hi"}},
-    ])
-    assert _is_background_session(str(p)) is False
-
-
-def test_is_bg_session_empty_file(tmp_path):
-    p = tmp_path / "empty.jsonl"
-    p.write_text("")
-    assert _is_background_session(str(p)) is False
-
-
-def test_is_bg_session_malformed_json(tmp_path):
-    p = tmp_path / "bad.jsonl"
-    p.write_text("not json\n")
-    assert _is_background_session(str(p)) is False
-
-
-def test_is_bg_session_missing_file(tmp_path):
-    assert _is_background_session(str(tmp_path / "nope.jsonl")) is False
 
 
 def test_list_projects_excludes_bg_sessions(claude_home, write_session_fixture, tmp_path):

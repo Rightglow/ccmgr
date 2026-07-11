@@ -460,6 +460,7 @@ class App:
         self._on_project_select(project)
         if self._loop is not None:
             self._sidebar.focus_position = 1
+            self._hint_bar.set_context(self._help_context())
 
     def _on_session_select(self, session: SessionMeta | None,
                             steal_focus: bool = True,
@@ -908,13 +909,23 @@ class App:
 
     def _close_help_modal(self) -> None:
         self._close_modal()
-        # Un-zoom — restore the previous tmux layout (any splits come back).
+        # Un-zoom — restore the previous tmux layout, but only if the ccmgr
+        # pane is still zoomed.  F9 shares the same resize-pane -Z toggle
+        # (targeting the right pane), so if the user pressed F9 while help
+        # was open the left pane was already unzoomed and calling -Z again
+        # would RE-zoom it, trapping the user in fullscreen.
         if self._ccmgr_pane_id:
             import subprocess as _sp
-            _sp.run(
-                ["tmux", "resize-pane", "-Z", "-t", self._ccmgr_pane_id],
-                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+            result = _sp.run(
+                ["tmux", "display-message", "-p", "-t", self._ccmgr_pane_id,
+                 "-F", "#{window_zoomed_flag}"],
+                stdout=_sp.PIPE, stderr=_sp.DEVNULL, text=True,
             )
+            if result.stdout.strip() == "1":
+                _sp.run(
+                    ["tmux", "resize-pane", "-Z", "-t", self._ccmgr_pane_id],
+                    stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                )
 
     def _open_quit_confirm(self) -> None:
         self._save_state()
@@ -1197,7 +1208,7 @@ class App:
             return
         # Simple action keys are dispatched from the shared keymap (single
         # source of truth shared with the hint bar) so the two can't drift.
-        action = keymap.action_for(key)
+        action = keymap.action_for(key, self._help_context())
         if action is not None:
             getattr(self, action)()
             return

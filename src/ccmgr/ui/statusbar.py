@@ -44,6 +44,11 @@ def split_at_width(text: str, maxcol: int) -> tuple[str, str]:
     pos, _ = urwid.calc_text_pos(text, 0, len(text), maxcol)
     if pos >= len(text):
         return text, ""
+    # When even one glyph won't fit (e.g. CJK character in a 1-column
+    # terminal, pos == 0), force one character so callers that loop on
+    # "remaining" (reflow_pages) always make progress.
+    if pos == 0:
+        return text[:1], text[1:]
     # Prefer a word boundary, but only if it doesn't waste most of the
     # line — otherwise (e.g. CJK text whose only early space trails a lone
     # glyph) hard-break at the column limit.

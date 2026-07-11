@@ -8,7 +8,7 @@ from pathlib import Path
 from ccmgr.atomic_file import atomic_write_text
 from ccmgr.models import Project
 from ccmgr.path_codec import decode
-from ccmgr.session_index import _looks_like_uuid
+from ccmgr.session_index import _looks_like_uuid, _scan_session
 
 
 # Module-level cache: (claude_home, projects_dir_mtime) -> list[Project]
@@ -105,7 +105,7 @@ def list_projects(claude_home: Path) -> list[Project]:
                 continue
 
             claude_dir = Path(entry.path)
-            session_count, last_ts = _count_and_latest_mtime(claude_dir)
+            session_count, last_ts = _count_and_latest_mtime(claude_dir, real_path)
             if session_count == 0:
                 try:
                     last_ts = entry.stat().st_mtime
@@ -132,39 +132,21 @@ def list_projects(claude_home: Path) -> list[Project]:
     return results
 
 
-def _is_background_session(path: str) -> bool:
-    """Return True if *path* is a background-job session.
+def _count_and_latest_mtime(claude_dir: Path, real_path: Path) -> tuple[int, float]:
+    """Count sessions that pass every ``_scan_session`` filter and return the max
+    JSONL mtime.  Uses ``_scan_session`` so the count exactly matches the
+    sidebar: background jobs, metadata stubs, and orphans are all excluded.
 
-    Scans the first *MAX_SCAN_RECORDS* JSON records looking for
-    ``sessionKind: "bg"`` — matching ``_scan_session``'s filtering in
-    session_index.py so the project count matches the visible session list.
+    Only called on the **full-scan** path (a session file was added or removed
+    and the parent directory mtime changed).  On the common refresh path we
+    reuse the last count and only re-stat mtimes, avoiding an open storm.
     """
-    MAX_SCAN_RECORDS = 20
-    try:
-        with open(path, "r") as f:
-            scanned = 0
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if rec.get("sessionKind") == "bg":
-                    return True
-                scanned += 1
-                if scanned >= MAX_SCAN_RECORDS:
-                    break
-    except OSError:
-        pass
-    return False
-
-
-def _count_and_latest_mtime(claude_dir: Path) -> tuple[int, float]:
-    """Count UUID-named *.jsonl session files and the max mtime in one scandir pass.
-    Background-job sessions (``sessionKind: bg``) are excluded so the count shown
-    next to each project matches the sessions actually listed in the sidebar."""
+    # Minimal project object — only .real_path is used by _scan_session (and
+    # only for the SessionMeta return value, which we discard).
+    temp_project = Project(
+        real_path=real_path, encoded_name="", claude_dir=claude_dir,
+        session_count=0, last_activity_ts=0.0,
+    )
     count = 0
     latest = 0.0
     try:
@@ -177,7 +159,7 @@ def _count_and_latest_mtime(claude_dir: Path) -> tuple[int, float]:
                 continue
             if not _looks_like_uuid(Path(entry.name).stem):
                 continue
-            if _is_background_session(entry.path):
+            if _scan_session(temp_project, Path(entry.path)) is None:
                 continue
             count += 1
             try:
@@ -189,18 +171,42 @@ def _count_and_latest_mtime(claude_dir: Path) -> tuple[int, float]:
     return count, latest
 
 
-def _refresh_activity(projects: list[Project]) -> list[Project]:
-    """Cheap re-stat: update last_activity_ts using the project dir mtime only.
+def _stat_jsonls_mtime(claude_dir: Path) -> float:
+    """Fast path: max mtime among UUID-named JSONL files without opening any
+    of them.  Used on every poll tick so the parent-dir-mtime cache keeps its
+    promise of zero file reads when nothing was added or removed."""
+    latest = 0.0
+    try:
+        scan = os.scandir(claude_dir)
+    except OSError:
+        return 0.0
+    with scan:
+        for entry in scan:
+            if not entry.name.endswith(".jsonl"):
+                continue
+            if not _looks_like_uuid(Path(entry.name).stem):
+                continue
+            try:
+                m = entry.stat().st_mtime
+            except OSError:
+                continue
+            if m > latest:
+                latest = m
+    return latest
 
-    The project dir mtime updates whenever a JSONL is added/removed/renamed. It
-    does NOT update on plain content writes, so we ALSO read the project's
-    JSONL set quickly via scandir and pick the max mtime. This is still much
-    cheaper than the full path_codec decode + iterdir done on a cache miss.
+
+def _refresh_activity(projects: list[Project]) -> list[Project]:
+    """Cheap re-stat: update ``last_activity_ts`` from the max JSONL mtime.
+
+    The parent directory mtime hasn't changed (otherwise we'd be on the
+    full-scan path), so no files were added or removed — the count is
+    stable.  We only re-stat JSONL files (no reads) to catch content-only
+    writes, which keep the fast path truly cheap.
     """
     out: list[Project] = []
     for p in projects:
-        sessions_count, latest = _count_and_latest_mtime(p.claude_dir)
-        if sessions_count == 0:
+        latest = _stat_jsonls_mtime(p.claude_dir)
+        if latest == 0.0:
             try:
                 latest = p.claude_dir.stat().st_mtime
             except OSError:
@@ -209,7 +215,7 @@ def _refresh_activity(projects: list[Project]) -> list[Project]:
             real_path=p.real_path,
             encoded_name=p.encoded_name,
             claude_dir=p.claude_dir,
-            session_count=sessions_count,
+            session_count=p.session_count,  # stable — no files added/removed
             last_activity_ts=latest,
         ))
     out.sort(key=lambda x: x.last_activity_ts, reverse=True)
