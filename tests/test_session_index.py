@@ -95,3 +95,15 @@ def test_malformed_lines_are_skipped(claude_home, write_session_fixture, tmp_pat
     sessions = list_sessions(project)
     assert len(sessions) == 1
     assert sessions[0].message_count == 2  # 1 user + 1 assistant
+
+
+def test_background_session_is_filtered(claude_home, write_session_fixture, tmp_path):
+    """Background-job sessions (sessionKind: bg) must not appear in the sidebar."""
+    project = _make_one_project(claude_home, tmp_path, write_session_fixture, [
+        ("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", [
+            {"type": "user", "message": {"role": "user", "content": "normal session"}, "sessionKind": "bg"},
+            {"type": "assistant", "message": {"role": "assistant", "content": "ok", "stop_reason": "end_turn", "usage": {"input_tokens": 1, "output_tokens": 1}}},
+        ]),
+    ])
+    sessions = list_sessions(project)
+    assert len(sessions) == 0, "bg session should be filtered out"

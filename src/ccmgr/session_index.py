@@ -81,6 +81,10 @@ def _scan_session(project: Project, jsonl_path: Path) -> SessionMeta | None:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                # Background-job sessions are not interactive — they can't be
+                # resumed in a terminal and shouldn't appear in the sidebar.
+                if rec.get("sessionKind") == "bg":
+                    return None
                 rtype = rec.get("type")
                 if rtype == "ai-title":
                     title = rec.get("aiTitle") or title
