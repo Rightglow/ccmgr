@@ -1,6 +1,7 @@
+import json
 from pathlib import Path
 
-from ccmgr.discovery import list_projects
+from ccmgr.discovery import _is_background_session, list_projects
 
 
 def test_list_projects_empty_when_no_claude_dir(tmp_path):
@@ -103,3 +104,76 @@ def test_path_cache_prunes_vanished_projects(claude_home, write_session_fixture,
     discovery._cache.clear()
     assert discovery.list_projects(claude_home) == []
     assert encoded not in discovery._load_path_cache()
+
+
+# ── _is_background_session ──────────────────────────────────────────────
+
+def _write_jsonl(path: Path, records: list[dict]) -> None:
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+
+def test_is_bg_session_first_record(tmp_path):
+    p = tmp_path / "bg.jsonl"
+    _write_jsonl(p, [
+        {"type": "user", "message": {"role": "user", "content": "x"}, "sessionKind": "bg"},
+    ])
+    assert _is_background_session(str(p)) is True
+
+
+def test_is_bg_session_later_record(tmp_path):
+    """sessionKind can appear after the first record — scan must cover it."""
+    p = tmp_path / "bg_later.jsonl"
+    _write_jsonl(p, [
+        {"type": "system", "cwd": "/tmp"},
+        {"type": "ai-title", "aiTitle": "Some title"},
+        {"type": "user", "message": {"role": "user", "content": "x"}, "sessionKind": "bg"},
+    ])
+    assert _is_background_session(str(p)) is True
+
+
+def test_is_not_bg_session_no_sessionkind(tmp_path):
+    p = tmp_path / "normal.jsonl"
+    _write_jsonl(p, [
+        {"type": "user", "message": {"role": "user", "content": "hello"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": "hi"}},
+    ])
+    assert _is_background_session(str(p)) is False
+
+
+def test_is_bg_session_empty_file(tmp_path):
+    p = tmp_path / "empty.jsonl"
+    p.write_text("")
+    assert _is_background_session(str(p)) is False
+
+
+def test_is_bg_session_malformed_json(tmp_path):
+    p = tmp_path / "bad.jsonl"
+    p.write_text("not json\n")
+    assert _is_background_session(str(p)) is False
+
+
+def test_is_bg_session_missing_file(tmp_path):
+    assert _is_background_session(str(tmp_path / "nope.jsonl")) is False
+
+
+def test_list_projects_excludes_bg_sessions(claude_home, write_session_fixture, tmp_path):
+    """session_count must not include bg sessions."""
+    real = tmp_path / "mixed_project"
+    real.mkdir()
+    encoded = str(real).replace("/", "-")
+    # Two normal sessions and one bg session.
+    write_session_fixture(encoded, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", [
+        {"type": "user", "message": {"role": "user", "content": "normal A"}},
+    ])
+    write_session_fixture(encoded, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", [
+        {"type": "user", "message": {"role": "user", "content": "normal B"}},
+    ])
+    bg_dir = claude_home / "projects" / encoded
+    bg_path = bg_dir / "cccccccc-cccc-cccc-cccc-cccccccccccc.jsonl"
+    _write_jsonl(bg_path, [
+        {"type": "user", "message": {"role": "user", "content": "bg job"}, "sessionKind": "bg"},
+    ])
+
+    projects = list_projects(claude_home)
+    assert len(projects) == 1
+    assert projects[0].session_count == 2  # only the two normal sessions

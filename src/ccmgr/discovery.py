@@ -132,10 +132,39 @@ def list_projects(claude_home: Path) -> list[Project]:
     return results
 
 
+def _is_background_session(path: str) -> bool:
+    """Return True if *path* is a background-job session.
+
+    Scans the first *MAX_SCAN_RECORDS* JSON records looking for
+    ``sessionKind: "bg"`` — matching ``_scan_session``'s filtering in
+    session_index.py so the project count matches the visible session list.
+    """
+    MAX_SCAN_RECORDS = 20
+    try:
+        with open(path, "r") as f:
+            scanned = 0
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("sessionKind") == "bg":
+                    return True
+                scanned += 1
+                if scanned >= MAX_SCAN_RECORDS:
+                    break
+    except OSError:
+        pass
+    return False
+
+
 def _count_and_latest_mtime(claude_dir: Path) -> tuple[int, float]:
     """Count UUID-named *.jsonl session files and the max mtime in one scandir pass.
-    The count is a rough upper bound — bg sessions are filtered later when the
-    session list is actually read (``_refresh`` corrects the displayed count)."""
+    Background-job sessions (``sessionKind: bg``) are excluded so the count shown
+    next to each project matches the sessions actually listed in the sidebar."""
     count = 0
     latest = 0.0
     try:
@@ -147,6 +176,8 @@ def _count_and_latest_mtime(claude_dir: Path) -> tuple[int, float]:
             if not entry.name.endswith(".jsonl"):
                 continue
             if not _looks_like_uuid(Path(entry.name).stem):
+                continue
+            if _is_background_session(entry.path):
                 continue
             count += 1
             try:
