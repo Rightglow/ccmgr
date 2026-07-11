@@ -209,8 +209,6 @@ class App:
         self._double_focus_alarm: object | None = None
         self._double_focus_visual_pending: bool = False
         self._last_screen_size: tuple[int, int] | None = None
-        self._help_right_was_open: bool = False
-        self._help_saved_width: str = ""
         # History-preview mode: when the right pane shows a session transcript
         # (less) instead of a Claude session.  We remember what was there before
         # so we can restore it when the user exits less.
@@ -890,61 +888,33 @@ class App:
                            click_outside_to_close=True)
 
     def _open_help_modal(self) -> None:
-        # Make the two panes equal width so the help modal has enough room
-        # without annihilating the agent pane (which caused garbled reflow
-        # when restored from width 1).
-        self._help_right_was_open = (
-            self._right_pane_id is not None
-            and tmux_ctl.pane_alive(self._right_pane_id)
-        )
-        if self._help_right_was_open:
+        # Zoom the left (ccmgr) pane fullscreen so the help modal has the
+        # entire terminal.  Tmux resize-pane -Z toggles — the second call in
+        # _close_help_modal restores the original split layout.  This is
+        # much cleaner than shrinking the right pane: it doesn't force a
+        # reflow in the agent pane, so no history corruption.
+        if self._ccmgr_pane_id:
             import subprocess as _sp
-            # Save current right-pane width so we can restore it exactly.
-            saved = _sp.check_output(
-                ["tmux", "display-message", "-p", "-t", self._right_pane_id,
-                 "-F", "#{pane_width}"],
-                stderr=_sp.DEVNULL,
-            )
-            self._help_saved_width = saved.decode().strip()
-            # Resize to match the left pane → ~1:1 split.
-            left_w = _sp.check_output(
-                ["tmux", "display-message", "-p", "-F", "#{pane_width}"],
-                stderr=_sp.DEVNULL,
-            )
             _sp.run(
-                ["tmux", "resize-pane", "-t", self._right_pane_id, "-x",
-                 left_w.decode().strip()],
+                ["tmux", "resize-pane", "-Z", "-t", self._ccmgr_pane_id],
                 stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
             )
-            # Read back the actual left-pane width after resize so the modal
-            # fits the available space exactly.
-            actual_w = _sp.check_output(
-                ["tmux", "display-message", "-p", "-F", "#{pane_width}"],
-                stderr=_sp.DEVNULL,
-            )
-            modal_w = max(50, int(actual_w.decode().strip()) - 4)
-        else:
-            modal_w = 60
 
         modal = HelpModal(on_close=self._close_help_modal)
-        # Fixed pixel dimensions based on the real left-pane width after the
-        # 1:1 split — avoids _show_overlay's relative-dimension boost.
-        self._show_overlay(modal, width=modal_w, height=80,
+        self._show_overlay(modal, width=60, height=80,
                            click_outside_to_close=True,
                            on_click_outside=self._close_help_modal,
                            fixed_width=True, fixed_height=True)
 
     def _close_help_modal(self) -> None:
         self._close_modal()
-        if self._help_right_was_open and self._right_pane_id:
+        # Un-zoom — restore the previous tmux layout (any splits come back).
+        if self._ccmgr_pane_id:
             import subprocess as _sp
             _sp.run(
-                ["tmux", "resize-pane", "-t", self._right_pane_id, "-x",
-                 self._help_saved_width],
+                ["tmux", "resize-pane", "-Z", "-t", self._ccmgr_pane_id],
                 stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
             )
-        self._help_right_was_open = False
-        self._help_saved_width = ""
 
     def _open_quit_confirm(self) -> None:
         self._save_state()
