@@ -1,10 +1,11 @@
-"""Status-bar state machine (level classification, TTL expiry, idle tips) and
-StatusBar two-line reflow/truncation."""
+"""Status-bar state machine (level classification, TTL expiry, idle tips) plus
+the HintBar/ButtonBar footer widgets. The status text itself is rendered into
+the outer tmux bar (see test_tmux_status.py), not an in-pane widget."""
 import pytest
 
 from ccmgr.config import Config
 from ccmgr.ui import app as app_mod
-from ccmgr.ui.statusbar import TIPS, ButtonBar, HintBar, StatusBar, _LEVEL_ATTR
+from ccmgr.ui.statusbar import TIPS, ButtonBar, HintBar
 
 
 @pytest.fixture
@@ -20,6 +21,18 @@ def clock(monkeypatch):
     now = {"t": 1000.0}
     monkeypatch.setattr(app_mod.time, "monotonic", lambda: now["t"])
     return now
+
+
+@pytest.fixture
+def shown(app, monkeypatch):
+    """Record the text handed to the tmux status renderer — ccmgr's only status
+    surface now that the in-pane StatusBar widget is gone. ``shown[-1]`` is what
+    the bar currently displays."""
+    seen: list[str] = []
+    monkeypatch.setattr(
+        app, "_render_status_to_tmux",
+        lambda text, level="info": seen.append(text))
+    return seen
 
 
 # ── level auto-classification ────────────────────────────────────────────
@@ -50,7 +63,7 @@ def test_set_status_explicit_level_overrides_prefix(app, clock):
 
 # ── TTL expiry → idle tips ───────────────────────────────────────────────
 
-def test_info_message_holds_then_falls_back_to_tip(app, clock):
+def test_info_message_holds_then_falls_back_to_tip(app, clock, shown):
     app._set_status("→ opened session X")
     # Within TTL: message is held, not clobbered.
     clock["t"] += app._STATUS_TTL["info"] - 0.1
@@ -60,7 +73,7 @@ def test_info_message_holds_then_falls_back_to_tip(app, clock):
     clock["t"] += 1.0
     app._update_status()
     assert app._status_text is None
-    assert app._status._text in TIPS
+    assert shown[-1] in TIPS
 
 
 def test_error_is_sticky(app, clock):
@@ -120,148 +133,41 @@ def test_higher_severity_overrides_immediately(app, clock):
     assert app._status_level == "error"
 
 
-def test_first_tip_after_expiry_lasts_one_interval(app, clock):
+def test_first_tip_after_expiry_lasts_one_interval(app, clock, shown):
     """Regression: the post-message tip used to linger ~2× the interval because
     the expiry path showed a tip without advancing the rotation clock."""
     app._set_status("info msg")
     clock["t"] += app._STATUS_TTL["info"] + 0.1  # expire → first idle tip
     app._update_status()
-    first = app._status._text
+    first = shown[-1]
     clock["t"] += app._TIP_INTERVAL + 0.01      # exactly one interval later
     app._update_status()
-    assert app._status._text != first           # advanced, not stuck at 2×
+    assert shown[-1] != first                    # advanced, not stuck at 2×
 
 
 # ── idle tip rotation ────────────────────────────────────────────────────
 
-def test_tips_rotate_on_interval(app, clock):
+def test_tips_rotate_on_interval(app, clock, shown):
     # First idle update shows a tip immediately.
     app._update_status()
-    first = app._status._text
+    first = shown[-1]
     assert first in TIPS
     # Before the interval elapses, the tip does not change.
     clock["t"] += app._TIP_INTERVAL - 0.1
     app._update_status()
-    assert app._status._text == first
+    assert shown[-1] == first
     # After the interval, it advances to the next tip.
     clock["t"] += 0.2
     app._update_status()
-    assert app._status._text != first
-    assert app._status._text in TIPS
+    assert shown[-1] != first
+    assert shown[-1] in TIPS
 
 
-def test_explicit_message_interrupts_tips(app, clock):
+def test_explicit_message_interrupts_tips(app, clock, shown):
     app._update_status()  # show a tip
     app._set_status("→ opened X")
-    assert app._status._text == "→ opened X"
+    assert shown[-1] == "→ opened X"
     assert app._status_text == "→ opened X"
-
-
-# ── StatusBar reflow / two-line truncation ───────────────────────────────
-
-def _lines(bar: StatusBar) -> tuple[str, str]:
-    return bar._line1.get_text()[0], bar._line2.get_text()[0]
-
-
-def _cols(s: str) -> int:
-    import urwid
-    return urwid.calc_width(s, 0, len(s))
-
-
-def test_short_message_stays_on_one_line():
-    bar = StatusBar()
-    bar.set_message("hello", "info")
-    bar._reflow(40)
-    l1, l2 = _lines(bar)
-    assert l1 == "hello"
-    assert l2 == ""
-
-
-def test_long_message_spills_to_second_line():
-    bar = StatusBar()
-    bar.set_message("one two three four five six seven eight", "info")
-    bar._reflow(20)
-    l1, l2 = _lines(bar)
-    assert l1 and l2  # both lines used
-    assert _cols(l1) <= 20 and _cols(l2) <= 20
-
-
-def test_long_message_breaks_on_word_boundary():
-    bar = StatusBar()
-    bar.set_message("one two three four five six seven eight", "info")
-    bar._reflow(20)
-    l1, l2 = _lines(bar)
-    # Words aren't split across the break: line 1 ends on a whole word and
-    # line 2 starts on one.
-    assert not l1.endswith(" ") and not l2.startswith(" ")
-    assert l1.split()[-1] in {"one", "two", "three", "four", "five"}
-
-
-def test_wrap_drops_boundary_space_but_keeps_inner_spaces():
-    bar = StatusBar()
-    # Wrap point falls on a space → continuation line has no leading gap.
-    bar.set_message("aaaa bbbb cccc dddd", "info")
-    bar._reflow(9)
-    _, l2 = _lines(bar)
-    assert not l2.startswith(" ")
-    # Spaces that aren't at the wrap boundary are preserved verbatim.
-    bar.set_message("a  b  c", "info")
-    bar._reflow(40)
-    l1, _ = _lines(bar)
-    assert l1 == "a  b  c"
-
-
-def test_wide_cjk_message_wraps_by_display_width():
-    # Regression: textwrap counts characters, so a CJK line that fits by
-    # char-count but overflows by display width used to clip on line 1 instead
-    # of wrapping. Each Chinese glyph is two columns.
-    bar = StatusBar()
-    bar.set_message("→ 会话标题很长很长很长的中文名字测试换行 (1 session)", "info")
-    bar._reflow(30)
-    l1, l2 = _lines(bar)
-    assert _cols(l1) <= 30      # line 1 fits the width...
-    assert _cols(l1) >= 20      # ...and isn't wasted on a lone glyph
-    assert l2                   # the rest wrapped to line 2
-
-
-def test_overlong_message_truncated_with_ellipsis():
-    bar = StatusBar()
-    bar.set_message(" ".join(["word"] * 40), "info")
-    bar._reflow(12)
-    _, l2 = _lines(bar)
-    assert l2.endswith("…")
-    assert _cols(l2) <= 12
-
-
-def test_overlong_message_at_one_column_stays_within_width():
-    bar = StatusBar()
-    bar.set_message("abcdef", "info")
-    bar._reflow(1)
-    _, l2 = _lines(bar)
-    assert l2 == "…"
-    assert _cols(l2) == 1
-
-
-def test_level_sets_palette_attr():
-    bar = StatusBar()
-    bar.set_message("boom", "error")
-    assert bar._attr.attr_map[None] == _LEVEL_ATTR["error"]
-    bar.set_message("note", "info")
-    assert bar._attr.attr_map[None] == _LEVEL_ATTR["info"]
-
-
-def test_tip_shares_info_style():
-    # Tips must render with the same attribute as info (same font/colour), not
-    # a distinct dim style.
-    bar = StatusBar()
-    bar.set_message("a tip", "tip")
-    assert bar._attr.attr_map[None] == _LEVEL_ATTR["info"]
-
-
-def test_unknown_level_falls_back_to_info():
-    bar = StatusBar()
-    bar.set_message("x", "bogus")
-    assert bar._level == "info"
 
 
 # ── HintBar: context-sensitive, two-line wrap, overflow paging ──────────
@@ -272,6 +178,11 @@ from ccmgr.ui import keymap  # noqa: E402
 def _hint_rows(bar: HintBar, width: int) -> list[str]:
     canvas = bar.render((width,), False)
     return [t.decode() for t in canvas.text]
+
+
+def _cols(s: str) -> int:
+    import urwid
+    return urwid.calc_width(s, 0, len(s))
 
 
 def test_hintbar_wide_shows_all_keys_no_ellipsis():

@@ -271,6 +271,38 @@ def test_teardown_hard_quit_kills_sessions():
     tmux.kill_session.assert_any_call("cc-abc123")
 
 
+def test_teardown_reverts_every_bar_option(monkeypatch):
+    """Every appearance option ccmgr paints onto the outer bar — plus the
+    dynamically set status-right — is reverted with ``set-option -u`` on
+    teardown, so the user's tmux config is left clean. The revert runs BEFORE
+    the soft-quit early return (the outer session survives soft quit, so a
+    leftover would linger)."""
+    app = _minimal_app()
+    app._soft_quit_flag = True
+    app._right_pane_id = None
+    app._auto_launched = False
+    app._scroll_manager = MagicMock()
+    app._tmux_status_enabled = True
+    app._tmux_status_session = "ccmgr"
+
+    run = MagicMock()
+    monkeypatch.setattr("subprocess.run", run)
+    with patch("ccmgr.ui.app.tmux_ctl"):
+        app._teardown_tmux()
+
+    reverted = {
+        argv[5]
+        for c in run.call_args_list
+        if (argv := c.args[0])[:4] == ["tmux", "set-option", "-u", "-t"]
+    }
+    expected = {opt for opt, _ in App._TMUX_BAR_OPTIONS} | {"status-right"}
+    assert reverted == expected
+    # Regression guard: the noisy window list and the unified bar style are
+    # among what we set — and therefore must be among what we revert.
+    assert {"window-status-format", "window-status-current-format",
+            "status-style", "status-left"} <= reverted
+
+
 # ── QuitConfirmModal ─────────────────────────────────────────────────────
 
 def _render_text(modal) -> str:

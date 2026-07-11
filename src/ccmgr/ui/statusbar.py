@@ -1,4 +1,7 @@
-"""Bottom-of-screen status + help-hint widgets."""
+"""Footer hint/button widgets, idle-tip strings, and text-reflow helpers.
+
+Status/tips themselves are rendered into the outer tmux status bar by
+``App._render_status_to_tmux``; this module no longer owns a status widget."""
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -18,16 +21,6 @@ TIPS: tuple[str, ...] = (
     "F9 toggles fullscreen for the agent pane",
     "t opens a shell in the focused project's directory",
 )
-
-# Message severity → palette attribute. Idle tips share the neutral info style
-# (same font/colour) so they don't read as a different kind of message; warn and
-# error escalate so failures stand out.
-_LEVEL_ATTR = {
-    "error": "status_error",
-    "warn": "status_warn",
-    "info": "status_info",
-    "tip": "status_info",
-}
 
 
 def split_at_width(text: str, maxcol: int) -> tuple[str, str]:
@@ -58,29 +51,6 @@ def split_at_width(text: str, maxcol: int) -> tuple[str, str]:
     else:
         head, tail = text[:pos], text[pos:]
     return head, tail.lstrip(" ")
-
-
-def reflow_two_lines(text: str, maxcol: int) -> tuple[str, str]:
-    """Soft-wrap *text* across (line1, line2) to *maxcol* display columns.
-
-    Fits on line 1 when it can, spills into line 2 when longer, and truncates
-    line 2 with an ellipsis when the text needs more than two lines. Shared by
-    the status bar and the hint bar so both wrap identically."""
-    maxcol = max(1, maxcol)
-    line1, rest = split_at_width(text, maxcol)
-    if not rest:
-        return line1, ""
-    line2, overflow = split_at_width(rest, maxcol)
-    if overflow:
-        # More than two lines' worth: truncate line 2 with an ellipsis so it's
-        # clear the text was cut off. Reserve one column for "…"; when the
-        # viewport is a single column there's no room for content.
-        if maxcol <= 1:
-            line2 = "…"
-        else:
-            line2, _ = split_at_width(rest, maxcol - 1)
-            line2 = line2.rstrip() + "…"
-    return line1, line2
 
 
 def reflow_pages(text: str, maxcol: int, lines: int = 2) -> list[tuple[str, ...]]:
@@ -274,43 +244,3 @@ class HintBar(urwid.WidgetWrap):
             self._reflow(size[0])
         return super().render(size, focus)
 
-
-class StatusBar(urwid.WidgetWrap):
-    """Two-line status bar — height is fixed so the sidebar never jitters.
-
-    A ``Pile`` of two ``Text`` widgets. The message is soft-wrapped to the
-    render width across both lines: it stays on line 1 when it fits, spills
-    into line 2 when longer, and is truncated with an ellipsis only when it
-    exceeds two lines. The second line is otherwise empty, guaranteeing a
-    fixed 2-line height. The colour tracks the message level (info / warn /
-    error / idle tip).
-    """
-
-    def __init__(self) -> None:
-        self._line1 = urwid.Text("", align="left", wrap="clip")
-        self._line2 = urwid.Text("", align="left", wrap="clip")
-        self._text = ""
-        self._level = "tip"
-        body = urwid.Pile([self._line1, self._line2])
-        self._attr = urwid.AttrMap(body, _LEVEL_ATTR["tip"])
-        super().__init__(self._attr)
-
-    def set_message(self, msg: str, level: str = "info") -> None:
-        """Set the message text and severity; re-wrapped on next render."""
-        self._text = msg or ""
-        self._level = level if level in _LEVEL_ATTR else "info"
-        self._attr.set_attr_map({None: _LEVEL_ATTR[self._level]})
-        # Re-flow immediately for a best-effort width; render() re-wraps to the
-        # real column count so this is only a fallback for width-less callers.
-        self._reflow(80)
-
-    def _reflow(self, maxcol: int) -> None:
-        line1, line2 = reflow_two_lines(self._text, maxcol)
-        self._line1.set_text(line1)
-        self._line2.set_text(line2)
-
-    def render(self, size, focus: bool = False):
-        # Wrap to the actual available width so resizing stays correct.
-        if size:
-            self._reflow(size[0])
-        return super().render(size, focus)

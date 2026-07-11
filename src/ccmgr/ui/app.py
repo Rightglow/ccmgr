@@ -44,7 +44,7 @@ from ccmgr.ui.modals import (
 from ccmgr.ui.projects_pane import ProjectsPane
 from ccmgr.ui.running_pane import RunningEntry, RunningSessionsPane
 from ccmgr.ui.sessions_pane import SessionsPane
-from ccmgr.ui.statusbar import ButtonBar, HintBar, StatusBar, TIPS
+from ccmgr.ui.statusbar import ButtonBar, HintBar, TIPS
 
 
 PALETTE = [
@@ -183,6 +183,43 @@ class App:
     _status_since: float = 0.0
     _tip_index: int = 0
     _tip_since: float = 0.0
+    # ccmgr's status line is rendered into the OUTER tmux status bar (full
+    # terminal width) — there is no in-pane status widget. Off until run() wires
+    # it up; session-scoped so it never touches the user's global tmux config.
+    _tmux_status_enabled: bool = False
+    _tmux_status_session: str | None = None
+    _TMUX_STATUS_RIGHT_LENGTH = 200
+    # Per-level tmux inline styles for the status text. The outer tmux status bar
+    # has its own background (commonly bg=green), so each level sets its OWN dark
+    # background "pill" — decoupling readability from whatever the bar's bg is —
+    # then a level-coloured fg (info green / warn amber / error red / tip gray).
+    # Appended AFTER content escaping so their '#[' survives; closed with
+    # #[default] to restore the bar's own style for the rest of the line.
+    _TMUX_LEVEL_STYLE = {
+        "info": "#[bg=colour236,fg=colour114]",
+        "warn": "#[bg=colour236,fg=colour214,bold]",
+        "error": "#[bg=colour52,fg=colour231,bold]",
+        "tip": "#[bg=colour236,fg=colour245]",
+    }
+    # Static appearance ccmgr paints onto the OUTER tmux status bar while it owns
+    # the session. Applied in run(), reverted with `set-option -u` on teardown, so
+    # the user's global tmux config is untouched. Rationale:
+    #   - status-style: one dark background for the WHOLE bar so the info/warn/tip
+    #     pills (bg=colour236 in _TMUX_LEVEL_STYLE) sit seamlessly and only the red
+    #     error pill stands out — no green/dark clash with the user's theme.
+    #   - status-left: a minimal ` ccmgr ` brand replacing the default `[session]`.
+    #   - window-status-*: blanked. ccmgr's outer session has a single fixed window,
+    #     so its `0:tmux*` list entry is pure noise.
+    #   - status: forced on (the bar is now the only status surface).
+    #   - status-right-length: raised from the ~40 default so messages aren't cut.
+    _TMUX_BAR_OPTIONS = (
+        ("status", "on"),
+        ("status-style", "bg=colour236,fg=colour250"),
+        ("status-left", "#[fg=colour250,bold] ccmgr #[default]"),
+        ("window-status-format", ""),
+        ("window-status-current-format", ""),
+        ("status-right-length", str(_TMUX_STATUS_RIGHT_LENGTH)),
+    )
 
     def __init__(self, claude_home: Path, config: Config,
                  auto_launched: bool = False,
@@ -190,16 +227,20 @@ class App:
         self._claude_home = claude_home
         self._config = config
         self._auto_launched = auto_launched
-        self._status = StatusBar()
         # Status-bar state machine. An explicit message (info/warn/error) holds
         # the bar for a level-dependent TTL, then it falls back to cycling idle
         # tips. This is what stops one-shot messages ("→ opened X") from being
-        # clobbered by the poll tick before the user can read them.
+        # clobbered by the poll tick before the user can read them. The text is
+        # rendered only in the outer tmux status bar (see _render_status_to_tmux);
+        # the old in-pane StatusBar widget was removed to reclaim sidebar rows.
         self._status_text: str | None = None
         self._status_level: str = "info"
         self._status_since: float = 0.0
         self._tip_index: int = 0
         self._tip_since: float = 0.0
+        # Outer tmux status-bar rendering; run() enables it once tmux is up.
+        self._tmux_status_enabled: bool = False
+        self._tmux_status_session: str | None = None
         self._selected_project: Project | None = None
         self._session_cache = SessionCache()
         self._favorites = Favorites()
@@ -276,7 +317,7 @@ class App:
         self._sidebar = urwid.Pile([
             ("weight", 2, urwid.AttrMap(self._projects_pane, "pane", focus_map="pane_focus")),
             ("weight", 3, urwid.AttrMap(self._sessions_pane, "pane", focus_map="pane_focus")),
-            ("weight", 1, urwid.AttrMap(self._running_pane, "pane", focus_map="pane_focus")),
+            ("weight", 2, urwid.AttrMap(self._running_pane, "pane", focus_map="pane_focus")),
         ])
         self._sidebar_body = urwid.Padding(self._sidebar, right=1)
         self._hint_bar = HintBar()
@@ -289,12 +330,12 @@ class App:
             on_detach=self._on_detach,
             on_codex_toggle=self._toggle_codex_mode,
         )
-        # Footer: context key hints, then the constant button row, then the
-        # status/tips line. The status line is index 2 — filter mode swaps it.
+        # Footer: context key hints, then the constant button row. Status/tips
+        # are shown in the outer tmux status bar, not here — filter mode borrows
+        # the button row (index 1) for its input.
         footer = urwid.Pile([
             ("pack", self._hint_bar),
             ("pack", self._button_bar),
-            ("pack", self._status),
         ])
         self._frame = _FocusAwareFrame(body=self._sidebar_body, footer=footer)
         # Recover sessions left alive from a previous soft-quit.
@@ -452,7 +493,8 @@ class App:
                 and not self._paste_target_is_text_input()):
             self._set_status(
                 "Paste ignored in sidebar — switch to the agent pane "
-                "(Ctrl-B →) to paste."
+                "(Ctrl-B →) to paste.",
+                "warn",
             )
             return []
 
@@ -483,7 +525,8 @@ class App:
                 if not self._paste_passthrough:
                     self._set_status(
                         "Paste ignored in sidebar — switch to the agent pane "
-                        "(Ctrl-B →) to paste."
+                        "(Ctrl-B →) to paste.",
+                        "warn",
                     )
             elif key == "end paste":
                 # Stray close with no matching open — nothing to do.
@@ -638,6 +681,7 @@ class App:
         if self._show_transcript(session.jsonl_path):
             self._in_history_mode = True
             self._set_active_target(session.session_id, None)
+            self._set_status(f"≡ Previewing {session.display_title} (history)")
 
     def _save_restore_state(self) -> None:
         """Remember what's in the right pane before taking it over for history."""
@@ -880,8 +924,7 @@ class App:
         if self._launch(session_meta.session_id, cmd, cwd,
                         label, session_meta.project, steal_focus=steal_focus,
                         env=env, login_shell=session_meta.session_type == "codex"):
-            self._set_status(
-                f"→ {session_meta.display_title}  ({len(self._running)} session(s) running)")
+            self._set_status(f"→ {session_meta.display_title}")
 
     def _launch_new_session(self) -> None:
         if self._selected_project is None:
@@ -1513,6 +1556,24 @@ class App:
         detached Claude sessions and outer tmux session are left alive.
         """
         self._teardown_scroll_acceleration()
+        # Drop our status-bar overrides BEFORE the soft-quit early return below —
+        # on soft quit the outer tmux session survives, so our appearance (bar
+        # style, brand, forced `status on`) and status text would otherwise linger
+        # in it. ``-u`` reverts each session option to its inherited/default value.
+        if self._tmux_status_enabled and self._tmux_status_session:
+            try:
+                import subprocess as _sp
+                revert = [opt for opt, _ in self._TMUX_BAR_OPTIONS]
+                revert.append("status-right")  # set dynamically, not in the tuple
+                for opt in revert:
+                    _sp.run(
+                        ["tmux", "set-option", "-u", "-t",
+                         self._tmux_status_session, opt],
+                        stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                    )
+            except Exception:
+                pass
+            self._tmux_status_enabled = False
         # Remove the F9 fullscreen binding we installed (it's server-global).
         try:
             import subprocess as _sp
@@ -1543,13 +1604,12 @@ class App:
                     pass
 
     def _enter_filter_mode(self) -> None:
-        # Swap the status row (footer index 2) for a filter Edit, keeping the
-        # 2-line height so the sidebar doesn't jump.
+        # Borrow the button row (footer index 1) for a filter Edit — both are a
+        # single line, so the sidebar height doesn't jump. Restored on enter/esc.
         edit = urwid.Edit(caption="filter: ")
-        filter_body = urwid.Pile([edit, urwid.Text("")])
         footer_pile = self._frame.contents["footer"][0]
-        footer_pile.contents[2] = (filter_body, footer_pile.options("pack"))
-        footer_pile.focus_position = 2
+        footer_pile.contents[1] = (edit, footer_pile.options("pack"))
+        footer_pile.focus_position = 1
         self._frame.focus_position = "footer"
 
         def on_change(widget, new_text):
@@ -1564,7 +1624,7 @@ class App:
 
         def restore(key):
             if key in ("enter", "esc"):
-                footer_pile.contents[2] = (self._status, footer_pile.options("pack"))
+                footer_pile.contents[1] = (self._button_bar, footer_pile.options("pack"))
                 self._frame.focus_position = "body"
                 return None
             return key
@@ -2295,6 +2355,46 @@ class App:
     _STATUS_MIN_HOLD = {"error": 4.0, "warn": 2.0}
     _LEVEL_PRIORITY = {"tip": 0, "info": 1, "warn": 2, "error": 3}
 
+    def _render_status_to_tmux(self, text: str, level: str = "info") -> None:
+        """Render the current status line into the outer tmux status bar.
+
+        This is ccmgr's only status surface — there is no in-pane status widget.
+        The tmux bar is full terminal width, so far more fits on one line than
+        the old ~30%-wide sidebar bar could show. Best-effort — a tmux hiccup
+        must never raise into the UI.
+
+        tmux runs status strings through BOTH its own ``#{...}``/``#[...]``/
+        ``#(...)`` format expansion AND strftime, so a literal ``#`` must be
+        doubled to ``##`` and a literal ``%`` to ``%%`` or paths/percentages get
+        mangled (verified: ``#{x}`` expands to empty, ``%%`` collapses to ``%``).
+        The per-level style prefix is added AFTER escaping so its ``#[`` is kept
+        as a real style directive rather than doubled into literal text.
+
+        ``refresh-client -S`` forces an immediate status-line redraw: tmux only
+        auto-repaints the bar every ``status-interval`` seconds (default 15), so
+        without it a short-lived status message (info TTL 6s) would usually be
+        overwritten by the next idle tip before it ever became visible — only
+        long-lived tips would show.
+        """
+        if not self._tmux_status_enabled or not self._tmux_status_session:
+            return
+        safe = text.replace("#", "##").replace("%", "%%")
+        style = self._TMUX_LEVEL_STYLE.get(level, "")
+        payload = f"{style}{safe}#[default]" if style else safe
+        try:
+            import subprocess as _sp
+            _sp.run(
+                ["tmux", "set-option", "-t", self._tmux_status_session,
+                 "status-right", payload],
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+            )
+            _sp.run(
+                ["tmux", "refresh-client", "-S"],
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+            )
+        except Exception:
+            pass
+
     def _set_status(self, msg: str, level: str | None = None) -> None:
         """Show an explicit status message.
 
@@ -2321,7 +2421,7 @@ class App:
         self._status_text = msg
         self._status_level = level
         self._status_since = time.monotonic()
-        self._status.set_message(msg, level)
+        self._render_status_to_tmux(msg, level)
 
     def _update_status(self) -> None:
         """Advance the status-bar state machine once per tick.
@@ -2344,7 +2444,7 @@ class App:
         if not TIPS:
             return
         if self._tip_since == 0.0 or now - self._tip_since >= self._TIP_INTERVAL:
-            self._status.set_message(TIPS[self._tip_index], "tip")
+            self._render_status_to_tmux(TIPS[self._tip_index], "tip")
             self._tip_index = (self._tip_index + 1) % len(TIPS)
             self._tip_since = now
 
@@ -2406,6 +2506,19 @@ class App:
                 ["tmux", "unbind-key", "-T", "root", "MouseDown3Pane"],
                 stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
             )
+            # The outer tmux status bar is now ccmgr's only status surface (the
+            # in-pane StatusBar was removed), so paint ccmgr's own appearance onto
+            # the whole bar (see _TMUX_BAR_OPTIONS): one dark background, a ` ccmgr `
+            # brand instead of the meaningless `0:tmux*` window list, the bar forced
+            # visible, and a raised length cap. Session-scoped + reverted on
+            # teardown, so the user's global tmux config is untouched.
+            for opt, val in self._TMUX_BAR_OPTIONS:
+                _sp.run(
+                    ["tmux", "set-option", "-t", sess, opt, val],
+                    stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                )
+            self._tmux_status_session = sess
+            self._tmux_status_enabled = True
 
         self._ccmgr_pane_id = tmux_ctl.current_pane_id()
         self._set_ccmgr_focus(True, force_border=True)

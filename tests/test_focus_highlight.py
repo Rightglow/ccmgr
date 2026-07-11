@@ -123,6 +123,8 @@ def test_bracketed_paste_burst_is_dropped_whole():
     assert out == []
     assert app._in_paste is False
     app._set_status.assert_called_once()
+    # A blocked paste is a rejected action → warn level, not plain info.
+    assert app._set_status.call_args.args[1] == "warn"
 
 
 def test_paste_span_across_reads_is_dropped_and_trailing_key_survives():
@@ -378,3 +380,76 @@ def test_pending_project_load_is_deferred_and_stale_safe():
     app._load_pending_project(None, None)
     app._on_project_select.assert_called_once_with(project)
     assert app._pending_project is None
+
+
+# ── status message wording (points 2 & 3 of the tmux-bar cleanup) ─────────
+
+def test_resume_status_omits_running_count(monkeypatch):
+    """Opening a running session shows just the title — the old
+    ``(N session(s) running)`` suffix was redundant with the sidebar and is
+    gone."""
+    app = App.__new__(App)
+    app._config = MagicMock()
+    app._launch = MagicMock(return_value=True)
+    app._set_status = MagicMock()
+    monkeypatch.setattr(
+        "ccmgr.ui.app.build_resume_command", lambda **kw: ["claude"])
+
+    session = MagicMock()
+    session.session_type = "claude"
+    session.display_title = "sess-x"
+    session.session_id = "id1"
+    session.project.real_path = Path("/tmp/p")
+    session.project.display_name = "p"
+
+    app._launch_resume(session)
+
+    msg = app._set_status.call_args.args[0]
+    assert msg == "→ sess-x"
+    assert "running" not in msg
+
+
+def test_preview_reports_info_status():
+    """Previewing a stopped session's history surfaces an info message in the
+    (tmux) status bar — the action used to be silent on success."""
+    app = App.__new__(App)
+    app._has_less = True
+    app._in_history_mode = False
+    app._cancel_pending_double_focus = MagicMock()
+    app._save_restore_state = MagicMock()
+    app._show_transcript = MagicMock(return_value=True)
+    app._set_active_target = MagicMock()
+    app._set_status = MagicMock()
+
+    session = MagicMock()
+    session.display_title = "old chat"
+    session.session_id = "id2"
+    session.jsonl_path = Path("/tmp/id2.jsonl")
+
+    app._on_session_preview(session)
+
+    assert app._in_history_mode is True
+    msg = app._set_status.call_args.args[0]
+    assert "Previewing" in msg and "old chat" in msg
+
+
+def test_preview_failure_sets_no_success_status():
+    """When the transcript pane can't be created, no 'Previewing' info is
+    shown (the failure path inside _show_transcript reports its own error)."""
+    app = App.__new__(App)
+    app._has_less = True
+    app._in_history_mode = False
+    app._cancel_pending_double_focus = MagicMock()
+    app._save_restore_state = MagicMock()
+    app._show_transcript = MagicMock(return_value=False)
+    app._set_active_target = MagicMock()
+    app._set_status = MagicMock()
+
+    session = MagicMock()
+    session.jsonl_path = Path("/tmp/id3.jsonl")
+
+    app._on_session_preview(session)
+
+    assert app._in_history_mode is False
+    app._set_status.assert_not_called()
+    app._set_active_target.assert_not_called()
