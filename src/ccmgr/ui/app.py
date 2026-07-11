@@ -1542,6 +1542,22 @@ class App:
                                 for s in self._session_cache.list_sessions(matched)]
                 self._sessions_pane.set_sessions(matched, sessions, running_ids=running_ids,
                                                   favorite_ids=self._favorites.get_ids())
+                # Correct the project's session_count to match what we actually
+                # listed (filters bg sessions; in Codex mode uses the Codex index).
+                # The file-based count from discovery is a rough upper bound.
+                real_count = len(sessions)
+                if matched.session_count != real_count:
+                    corrected = replace(matched, session_count=real_count)
+                    # Update snapshot and view so the sidebar counter updates.
+                    if self._project_snapshot:
+                        for i, p in enumerate(self._project_snapshot):
+                            if p.encoded_name == matched.encoded_name:
+                                self._project_snapshot[i] = corrected
+                                break
+                    self._selected_project = corrected
+                    projects = [corrected if p.encoded_name == matched.encoded_name
+                                else p for p in projects]
+                    self._projects_pane.set_projects(projects)
             else:
                 self._selected_project = None
                 self._projects_pane.set_selected(None)
