@@ -890,31 +890,46 @@ class App:
                            click_outside_to_close=True)
 
     def _open_help_modal(self) -> None:
-        # Temporarily shrink the right pane so help gets full terminal width.
-        # Claude keeps running — it's in a detached tmux session.
+        # Make the two panes equal width so the help modal has enough room
+        # without annihilating the agent pane (which caused garbled reflow
+        # when restored from width 1).
         self._help_right_was_open = (
             self._right_pane_id is not None
             and tmux_ctl.pane_alive(self._right_pane_id)
         )
         if self._help_right_was_open:
             import subprocess as _sp
-            # Save current width so we can restore it exactly.
+            # Save current right-pane width so we can restore it exactly.
             saved = _sp.check_output(
                 ["tmux", "display-message", "-p", "-t", self._right_pane_id,
                  "-F", "#{pane_width}"],
                 stderr=_sp.DEVNULL,
             )
             self._help_saved_width = saved.decode().strip()
+            # Resize to match the left pane → ~1:1 split.
+            left_w = _sp.check_output(
+                ["tmux", "display-message", "-p", "-F", "#{pane_width}"],
+                stderr=_sp.DEVNULL,
+            )
             _sp.run(
-                ["tmux", "resize-pane", "-t", self._right_pane_id, "-x", "1"],
+                ["tmux", "resize-pane", "-t", self._right_pane_id, "-x",
+                 left_w.decode().strip()],
                 stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
             )
+            # Read back the actual left-pane width after resize so the modal
+            # fits the available space exactly.
+            actual_w = _sp.check_output(
+                ["tmux", "display-message", "-p", "-F", "#{pane_width}"],
+                stderr=_sp.DEVNULL,
+            )
+            modal_w = max(50, int(actual_w.decode().strip()) - 4)
+        else:
+            modal_w = 60
 
         modal = HelpModal(on_close=self._close_help_modal)
-        # Fixed dimensions — the right pane is already shrunk so the modal
-        # has the full terminal to itself.  Avoid the 1.6×/1.35× boost that
-        # _show_overlay applies when it sees the right pane is still "open".
-        self._show_overlay(modal, width=60, height=80,
+        # Fixed pixel dimensions based on the real left-pane width after the
+        # 1:1 split — avoids _show_overlay's relative-dimension boost.
+        self._show_overlay(modal, width=modal_w, height=80,
                            click_outside_to_close=True,
                            on_click_outside=self._close_help_modal,
                            fixed_width=True, fixed_height=True)
