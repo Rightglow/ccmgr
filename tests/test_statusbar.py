@@ -277,7 +277,7 @@ def _hint_rows(bar: HintBar, width: int) -> list[str]:
 def test_hintbar_wide_shows_all_keys_no_ellipsis():
     bar = HintBar()
     bar.set_context(keymap.CTX_SESSIONS)
-    rows = _hint_rows(bar, 120)  # wider than the full sessions hint
+    rows = _hint_rows(bar, 140)  # wider than the full sessions hint (incl. x Codex)
     joined = "".join(rows)
     assert "…" not in joined
     assert "F9 fullscreen" in joined  # last key is present
@@ -348,17 +348,17 @@ def test_buttonbar_lists_help_quit_detach():
     )
     canvas = bar.render((60,), False)
     text = "".join(t.decode() for t in canvas.text)
-    assert "help" in text and "quit" in text and "detach" in text
+    assert "Help" in text and "Quit" in text and "Detach" in text
 
 
-def test_buttonbar_bracket_format():
-    """Buttons are rendered as [key desc] with bracket delimiters."""
+def test_buttonbar_button_format():
+    """Each button is rendered with key + capitalized desc, underlined."""
     bar = ButtonBar(on_help=lambda: None, on_quit=lambda: None, on_detach=lambda: None)
     canvas = bar.render((60,), False)
     text = "".join(t.decode() for t in canvas.text)
-    assert "[? help]" in text
-    assert "[q quit]" in text
-    assert "[C-b d detach]" in text
+    assert "? Help" in text
+    assert "q Quit" in text
+    assert "C-b d Detach" in text
 
 
 def test_buttonbar_mouse_click_hits_button():
@@ -369,7 +369,7 @@ def test_buttonbar_mouse_click_hits_button():
         on_quit=lambda: calls.append("quit"),
         on_detach=lambda: calls.append("detach"),
     )
-    # The first hit area (lowest start column) is [? help].
+    # The first hit area (lowest start column) is ? help.
     help_start, help_end = sorted(bar._hit_areas)[0][:2]
     mid = (help_start + help_end) // 2
     bar.mouse_event((60,), "mouse press", 1, mid, 0, False)
@@ -384,8 +384,8 @@ def test_buttonbar_mouse_click_miss_does_nothing():
         on_quit=lambda: calls.append("quit"),
         on_detach=lambda: calls.append("detach"),
     )
-    # Click in the gap between [? help] and [q quit].
-    bar.mouse_event((60,), "mouse press", 1, 8, 0, False)
+    # Click in the gap between ? help and q quit — gap is 1 column at pos 6.
+    bar.mouse_event((60,), "mouse press", 1, 6, 0, False)
     assert calls == []
 
 

@@ -62,6 +62,8 @@ PALETTE = [
     ("selected", "black,bold", "dark cyan"),
     ("title", "white,bold", ""),
     ("dim", "dark gray", ""),
+    # ButtonBar — bright bold + underline reads as a clickable control.
+    ("btn", "white,bold,underline", ""),
     ("live", "light green,bold", ""),
     ("current_path", "yellow,bold", ""),
     # Status dots — the ● glyph carries its own palette attribute so it keeps
@@ -153,10 +155,6 @@ class _RightPaneState:
 
 
 class App:
-    # Double-backtick toggle for Codex developer mode.
-    _DOUBLE_BACKTICK_INTERVAL = 0.5
-    _last_backtick_ts: float = 0.0
-
     # tmux may apply DoubleClick1Pane after the application's double callback.
     # Wait past that multi-click window before selecting the right pane.
     _DOUBLE_CLICK_FOCUS_DELAY = 0.35
@@ -289,6 +287,7 @@ class App:
             on_help=self._open_help_modal,
             on_quit=self._open_quit_confirm,
             on_detach=self._on_detach,
+            on_codex_toggle=self._toggle_codex_mode,
         )
         # Footer: context key hints, then the constant button row, then the
         # status/tips line. The status line is index 2 — filter mode swaps it.
@@ -1296,9 +1295,6 @@ class App:
         # zoom stuck, for example.
         if self._loop is not None and self._loop.widget is not self._frame:
             return
-        if key == "`":
-            self._on_backtick()
-            return
         if key == "esc":
             # Esc navigates "up" the pane hierarchy:
             #   Running → Sessions → Projects
@@ -1334,19 +1330,10 @@ class App:
             getattr(self, action)()
             return
 
-    def _on_backtick(self) -> None:
-        """Double-tap `` ` `` within the interval → toggle Codex developer mode."""
-        now = time.monotonic()
-        if (now - App._last_backtick_ts < App._DOUBLE_BACKTICK_INTERVAL
-                and App._last_backtick_ts > 0):
-            App._last_backtick_ts = 0.0
-            self._toggle_codex_mode()
-        else:
-            App._last_backtick_ts = now
-
     def _toggle_codex_mode(self) -> None:
         """Switch between Claude and Codex views."""
         self._codex_mode = not self._codex_mode
+        self._button_bar.set_codex_mode(self._codex_mode)
         if self._codex_mode:
             self._codex_project_filter = self._codex_index.all_cwds()
             self._projects_pane.set_projects(self._visible_projects())
