@@ -264,7 +264,7 @@ def test_unknown_level_falls_back_to_info():
     assert bar._level == "info"
 
 
-# ── HintBar: context-sensitive, two-line wrap, overflow ellipsis ─────────
+# ── HintBar: context-sensitive, two-line wrap, overflow paging ──────────
 
 from ccmgr.ui import keymap  # noqa: E402
 
@@ -283,13 +283,39 @@ def test_hintbar_wide_shows_all_keys_no_ellipsis():
     assert "F9 fullscreen" in joined  # last key is present
 
 
-def test_hintbar_narrow_uses_two_lines_and_ellipsis():
+def test_hintbar_narrow_still_two_lines_height():
     bar = HintBar()
     bar.set_context(keymap.CTX_SESSIONS)  # widest context
     rows = _hint_rows(bar, 30)
     assert len(rows) == 2                 # fixed two-line height
     assert all(_cols(r) <= 30 for r in rows)
-    assert rows[1].rstrip().endswith("…")  # signals more keys are hidden
+
+
+def test_hintbar_narrow_splits_into_multiple_pages():
+    """When the text overflows 2 lines it's split into pages (no ellipsis)."""
+    bar = HintBar()
+    bar.set_context(keymap.CTX_SESSIONS)
+    bar._reflow(30)
+    assert len(bar._pages) >= 2, "narrow width should need multiple pages"
+
+
+def test_hintbar_no_paging_when_text_fits():
+    """Single page when the full hint fits in 2 lines — no timer needed."""
+    bar = HintBar()
+    bar.set_context(keymap.CTX_SESSIONS)
+    bar._reflow(120)
+    assert len(bar._pages) == 1
+
+
+def test_hintbar_context_switch_resets_to_first_page():
+    bar = HintBar()
+    bar.set_context(keymap.CTX_SESSIONS)
+    bar._reflow(30)
+    bar._show_page(1)  # flip to page 2
+    assert bar._page_idx == 1
+    # Context switch resets.
+    bar.set_context(keymap.CTX_RUNNING)
+    assert bar._page_idx == 0
 
 
 def test_hintbar_context_switch_changes_keys():

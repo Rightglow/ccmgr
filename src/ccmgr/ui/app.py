@@ -2297,6 +2297,7 @@ class App:
         )
         from ccmgr.ui._widgets import ClickableRow
         ClickableRow._main_loop = self._loop
+        self._hint_bar.set_loop(self._loop)
         try:
             self._loop.screen.set_terminal_properties(colors=256)
         except Exception:

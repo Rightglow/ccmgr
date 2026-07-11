@@ -78,6 +78,26 @@ def reflow_two_lines(text: str, maxcol: int) -> tuple[str, str]:
     return line1, line2
 
 
+def reflow_pages(text: str, maxcol: int, lines: int = 2) -> list[tuple[str, ...]]:
+    """Split *text* into a list of pages, each a tuple of *lines* strings.
+
+    When the text fits in one page the result has a single entry.  Callers use
+    this to detect overflow and drive a page-flipping animation."""
+    maxcol = max(1, maxcol)
+    pages: list[tuple[str, ...]] = []
+    remaining = text
+    while remaining:
+        page: list[str] = []
+        for _ in range(lines):
+            if not remaining:
+                page.append("")
+                continue
+            head, remaining = split_at_width(remaining, maxcol)
+            page.append(head)
+        pages.append(tuple(page))
+    return pages
+
+
 class _HelpButton(urwid.WidgetWrap):
     """A compact clickable label for the trailing help-hint bar."""
 
@@ -134,19 +154,30 @@ class HintBar(urwid.WidgetWrap):
     so it can't drift from dispatch.
 
     Two fixed lines (height never changes, so the sidebar doesn't jitter). The
-    hint soft-wraps across both lines by display width; when it needs more than
-    two lines the second is truncated with an ellipsis so it's clear some keys
-    aren't shown (the full list is in the ``?`` help modal).
+    hint soft-wraps across both lines by display width.  When it needs more than
+    two lines the bar auto-flips through pages every *PAGE_INTERVAL* seconds
+    rather than truncating — every key is shown eventually.
     """
+
+    PAGE_INTERVAL: float = 5.0
 
     def __init__(self) -> None:
         self._context: str | None = None
         self._text = keymap.hint_text_for(self._context).split("\n", 1)[0]
         self._line1 = urwid.Text("", align="left", wrap="clip")
         self._line2 = urwid.Text("", align="left", wrap="clip")
+        self._pages: list[tuple[str, str]] = []
+        self._page_idx: int = 0
+        self._timer_handle: object | None = None
+        self._loop: urwid.MainLoop | None = None
         body = urwid.Pile([self._line1, self._line2])
         super().__init__(urwid.AttrMap(body, "dim"))
         self._reflow(80)
+
+    def set_loop(self, loop: urwid.MainLoop) -> None:
+        self._loop = loop
+        # If pages were computed before the loop was available, start the timer.
+        self._start_timer_if_needed()
 
     def set_context(self, context: str | None) -> None:
         """Switch to the key set for *context* (a ``keymap.CTX_*`` value, or
@@ -155,12 +186,55 @@ class HintBar(urwid.WidgetWrap):
             return
         self._context = context
         self._text = keymap.hint_text_for(context).split("\n", 1)[0]
+        self._page_idx = 0
         self._reflow(80)
 
     def _reflow(self, maxcol: int) -> None:
-        line1, line2 = reflow_two_lines(self._text, maxcol)
+        new_pages = reflow_pages(self._text, maxcol, lines=2)
+        # Cast each page to exactly 2 strings to keep the type narrow.
+        new_pages = [(p[0] if len(p) > 0 else "",
+                       p[1] if len(p) > 1 else "") for p in new_pages]
+        pages_changed = len(new_pages) != len(self._pages)
+        self._pages = new_pages
+        # Only reset to page 0 when the number of pages actually changed
+        # (context switch, terminal resize).  Otherwise keep the current
+        # page so the auto-flip animation isn't stomped on every tick.
+        if pages_changed:
+            self._show_page(0)
+        else:
+            # Clamp index in case pages changed slightly but count stayed same.
+            if self._page_idx >= len(self._pages):
+                self._show_page(0)
+            else:
+                line1, line2 = self._pages[self._page_idx]
+                self._line1.set_text(line1)
+                self._line2.set_text(line2)
+
+    def _show_page(self, idx: int) -> None:
+        self._page_idx = idx
+        line1, line2 = self._pages[idx] if self._pages else ("", "")
         self._line1.set_text(line1)
         self._line2.set_text(line2)
+        self._start_timer_if_needed()
+
+    def _start_timer_if_needed(self) -> None:
+        self._cancel_timer()
+        if len(self._pages) <= 1 or self._loop is None:
+            return
+        self._timer_handle = self._loop.set_alarm_in(
+            self.PAGE_INTERVAL, self._on_page_tick)
+
+    def _cancel_timer(self) -> None:
+        if self._timer_handle is not None and self._loop is not None:
+            self._loop.remove_alarm(self._timer_handle)
+        self._timer_handle = None
+
+    def _on_page_tick(self, _loop, _user_data) -> None:
+        self._timer_handle = None
+        if len(self._pages) <= 1:
+            return
+        nxt = (self._page_idx + 1) % len(self._pages)
+        self._show_page(nxt)
 
     def render(self, size, focus: bool = False):
         if size:
