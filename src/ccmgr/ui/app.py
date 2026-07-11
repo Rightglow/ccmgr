@@ -911,9 +911,13 @@ class App:
             )
 
         modal = HelpModal(on_close=self._close_help_modal)
+        # Fixed dimensions — the right pane is already shrunk so the modal
+        # has the full terminal to itself.  Avoid the 1.6×/1.35× boost that
+        # _show_overlay applies when it sees the right pane is still "open".
         self._show_overlay(modal, width=60, height=80,
                            click_outside_to_close=True,
-                           on_click_outside=self._close_help_modal)
+                           on_click_outside=self._close_help_modal,
+                           fixed_width=True, fixed_height=True)
 
     def _close_help_modal(self) -> None:
         self._close_modal()
