@@ -653,6 +653,16 @@ def new_detached_session(name: str, cmd: str) -> bool:
             ["tmux", "set-option", "-t", name, "set-clipboard", "on"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
+        # Hide this inner session's own status bar. The right pane attaches to it
+        # via nested tmux, so its bar would otherwise stack directly above the
+        # outer ccmgr status bar — a redundant second line (the sidebar already
+        # tracks every session, and the outer bar is ccmgr's status surface).
+        # Turning it off reclaims a row for the agent's output. Session-scoped on
+        # this ccmgr-owned session, so the user's global tmux config is untouched.
+        subprocess.check_call(
+            ["tmux", "set-option", "-t", name, "status", "off"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False

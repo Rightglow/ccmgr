@@ -201,7 +201,7 @@ class SessionInfoModal(urwid.WidgetWrap):
             body_lines = [urwid.Text("No session selected.")]
         else:
             body_lines = [
-                urwid.Text(("title", session.display_title)),
+                urwid.Text(("title", session.display_title), wrap="clip"),
                 urwid.Divider(),
                 urwid.Text(f"project:   {session.project.real_path}"),
                 urwid.Text(f"session id: {session.session_id}"),
@@ -239,7 +239,7 @@ class RunningInfoModal(urwid.WidgetWrap):
         self._on_close = on_close
 
         body_lines: list = [
-            urwid.Text(("title", label)),
+            urwid.Text(("title", label), wrap="clip"),
             urwid.Divider(),
             urwid.Text(f"tmux session:  {tmux_name}"),
         ]

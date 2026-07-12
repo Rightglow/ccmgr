@@ -154,6 +154,11 @@ def _scan_session(project: Project, jsonl_path: Path) -> SessionMeta | None:
     if title is None and first_user_message:
         first_line = first_user_message.split("\n")[0]
         title = first_line[:60] + ("..." if len(first_line) > 60 else "")
+    elif title is not None and len(title) > 80:
+        # Claude Code ai-title can be a long sentence.  Truncate so the
+        # InfoModal and sidebar rows stay readable; the full text is still
+        # in the JSONL and can be seen via less preview (C-b →).
+        title = title[:80] + "…"
 
     # Truncate last user message for display (keep first line, ~120 chars).
     preview: str | None = None

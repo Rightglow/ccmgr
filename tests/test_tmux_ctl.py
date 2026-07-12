@@ -296,3 +296,26 @@ def test_split_window_h_can_leave_focus_on_current_pane():
     ]
     assert "-d" in args
     assert "-l" in args
+
+
+# ── new_detached_session: inner-session options ──────────────────────────
+
+def test_new_detached_session_hides_inner_status_bar():
+    """The inner (agent) session's own status bar is turned off so it doesn't
+    stack a redundant second bar above the outer ccmgr status bar; mouse and
+    clipboard sync are enabled. All session-scoped on the ccmgr-owned session."""
+    from ccmgr.tmux_ctl import new_detached_session
+    with patch("subprocess.check_call") as call:
+        assert new_detached_session("cc-abc", "claude --resume") is True
+
+    argvs = [c.args[0] for c in call.call_args_list]
+    assert ["tmux", "new-session", "-d", "-s", "cc-abc", "claude --resume"] in argvs
+    assert ["tmux", "set-option", "-t", "cc-abc", "mouse", "on"] in argvs
+    assert ["tmux", "set-option", "-t", "cc-abc", "set-clipboard", "on"] in argvs
+    assert ["tmux", "set-option", "-t", "cc-abc", "status", "off"] in argvs
+
+
+def test_new_detached_session_survives_tmux_missing():
+    from ccmgr.tmux_ctl import new_detached_session
+    with patch("subprocess.check_call", side_effect=FileNotFoundError):
+        assert new_detached_session("cc-abc", "claude") is False
