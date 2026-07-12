@@ -350,7 +350,7 @@ class App:
         self._less_mouse_flag: str = self._detect_less_mouse()
         self._scroll_manager = ScrollManager(enabled=scroll_coalescing)
         self._soft_quit_flag: bool = False
-        # Codex mode (developer toggle, double-tap backtick).
+        # Codex mode (developer toggle via the x key / ButtonBar).
         self._codex_mode: bool = False
         self._codex_index = CodexIndex(
             Path(config.codex_home).expanduser())
@@ -664,7 +664,7 @@ class App:
         self._pending_project = None
         if project is None:
             if self._codex_mode:
-                self._set_status("New project only in Claude mode (double-tap `)")
+                self._set_status("New project only in Claude mode (press x to switch)")
                 return
             self._open_new_project_modal()
             return
@@ -1455,12 +1455,12 @@ class App:
             self._codex_project_filter = self._codex_index.all_cwds()
             self._projects_pane.set_projects(self._visible_projects())
             if not self._codex_project_filter:
-                self._set_status("Codex mode — no Codex sessions found  (double-tap ` to exit)")
+                self._set_status("Codex mode — no Codex sessions found  (x to exit)")
                 self._sessions_pane.set_sessions(None, [],
                     running_ids=set(self._running),
                     favorite_ids=self._favorites.get_ids())
                 return
-            self._set_status("Codex mode  (double-tap ` to exit)")
+            self._set_status("Codex mode  (x to exit)")
             # Switch to a project that has Codex sessions, if available.
             if self._selected_project is not None and self._selected_project.real_path in self._codex_project_filter:
                 self._on_project_select(self._selected_project)
@@ -1474,7 +1474,7 @@ class App:
                         favorite_ids=self._favorites.get_ids())
         else:
             self._projects_pane.set_projects(self._visible_projects())
-            self._set_status("Claude mode  (double-tap ` for Codex)")
+            self._set_status("Claude mode  (x for Codex)")
             if self._selected_project is not None:
                 self._on_project_select(self._selected_project)
 
