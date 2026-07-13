@@ -165,15 +165,20 @@ class HelpModal(urwid.WidgetWrap):
         self._on_close = on_close
         rows: list = []
         for section_title, bindings in self.SECTIONS:
-            rows.append(_Selectable(urwid.Text(("title", section_title))))
+            rows.append(urwid.Text(("title", section_title)))
             for key, desc in bindings:
-                rows.append(_Selectable(urwid.Columns([
+                rows.append(urwid.Columns([
                     ("fixed", 26, urwid.Text(key, align="left")),
                     urwid.Text(desc, align="left"),
-                ], dividechars=1)))
-            rows.append(_Selectable(urwid.Divider()))
+                ], dividechars=1))
+            rows.append(urwid.Divider())
         for legend_row in self._legend_rows():
-            rows.append(_Selectable(legend_row))
+            rows.append(legend_row)
+        # Deliberately no _Selectable wrappers: when every row is selectable,
+        # ListBox._keypress_down moves focus row-by-row through them all before
+        # ever scrolling the viewport.  With bare widgets (none selectable)
+        # the ListBox enters the "must scroll" branch immediately — one
+        # keypress / wheel tick scrolls one line.
         self._listbox = urwid.ListBox(urwid.SimpleFocusListWalker(rows))
         super().__init__(urwid.LineBox(self._listbox, title="Help"))
 
@@ -184,9 +189,26 @@ class HelpModal(urwid.WidgetWrap):
         if key in ("enter", "esc"):
             self._on_close()
             return None
-        if key in ("up", "down"):
-            return self._listbox.keypress(size, key)
+        if key in ("up", "down", "page up", "page down", "home", "end"):
+            # Keyboard nav goes directly to the ListBox.  We must bypass the
+            # LineBox → WidgetDecoration chain because WidgetDecoration.keypress
+            # returns the key unconditionally and never delegates to the inner
+            # widget.  Swallow the return so boundary-overflow never leaks to
+            # the frame below.
+            #
+            # Adjust size for the LineBox border (1 char each side) so the
+            # ListBox's visibility calculations match what's actually on screen.
+            inner = (max(1, size[0] - 2), max(1, size[1] - 2))
+            self._listbox.keypress(inner, key)
+            return None
         return key
+
+    # No mouse_event override — the standard delegation chain (WidgetWrap →
+    # DelegateToWidgetMixin → LineBox → ListBox) correctly adjusts coordinates
+    # for the LineBox border before forwarding to the ListBox.  Bypassing it
+    # would pass wrong coordinates and break hit-testing / scroll handling.
+    # _CloseOnClickOverlay independently handles the "click inside must not
+    # dismiss" contract by checking the overlay's screen-space rectangle.
 
 
 class SessionInfoModal(urwid.WidgetWrap):
@@ -308,7 +330,8 @@ class DeleteConfirmModal(urwid.WidgetWrap):
             self._on_cancel()
             return None
         if key in ("up", "down"):
-            return self._listbox.keypress(size, key)
+            self._listbox.keypress(size, key)
+            return None
         return key
 
 
@@ -479,9 +502,10 @@ class PathBrowser(urwid.WidgetWrap):
             self._header_pile.focus_position = 1  # focus the filter Edit
             return self._filter_edit.keypress(size, key)
 
-        if key in ("up", "down"):
+        if key in ("up", "down", "page up", "page down", "home", "end"):
             self._header_pile.focus_position = 3
-            return self._listbox.keypress(size, key)
+            self._listbox.keypress(size, key)
+            return None
         if key == "enter":
             self._header_pile.focus_position = 3
             p = self._cur_path()

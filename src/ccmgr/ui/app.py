@@ -148,7 +148,15 @@ class _Running:
 
 class _CloseOnClickOverlay(urwid.Overlay):
     """An ``urwid.Overlay`` that calls *on_click_outside* when the user
-    left-clicks anywhere outside the overlay's area."""
+    left-clicks anywhere outside the overlay's area.
+
+    The overlay calculates its own screen-space rectangle so it can tell
+    "inside, but the child didn't handle the event" from "truly outside".
+    Without this, a left-click on non-interactive content inside the modal
+    (e.g. a ``Text`` row) would propagate ``False`` back up, and the
+    overlay would misinterpret it as an outside click and dismiss the
+    modal.
+    """
 
     def __init__(self, top_w: urwid.Widget, bottom_w: urwid.Widget,
                  align, width, valign, height,
@@ -156,9 +164,55 @@ class _CloseOnClickOverlay(urwid.Overlay):
         self._on_click_outside = on_click_outside
         super().__init__(top_w, bottom_w, align, width, valign, height)
 
+    # -- screen-space rectangle -------------------------------------------
+
+    def _overlay_rect(self, size) -> tuple[int, int, int, int]:
+        """Return ``(left, top, width, height)`` of the overlay in screen
+        coordinates, matching urwid's own layout calculation."""
+        maxcol, maxrow = size
+        # Resolve width (int or ("relative", percent)).
+        if isinstance(self.width, tuple) and self.width[0] == "relative":
+            ow = int(maxcol * self.width[1] / 100)
+        else:
+            ow = self.width
+        # Resolve height.
+        if isinstance(self.height, tuple) and self.height[0] == "relative":
+            oh = int(maxrow * self.height[1] / 100)
+        else:
+            oh = self.height
+        # Horizontal alignment.
+        align = self.align
+        if align == "center":
+            left = (maxcol - ow) // 2
+        elif align == "right":
+            left = maxcol - ow
+        else:
+            left = 0
+        # Vertical alignment.
+        valign = self.valign
+        if valign == "middle":
+            top = (maxrow - oh) // 2
+        elif valign == "bottom":
+            top = maxrow - oh
+        else:
+            top = 0
+        return left, top, ow, oh
+
+    # -- mouse ------------------------------------------------------------
+
     def mouse_event(self, size, event, button, col, row, focus):
-        # Let Overlay dispatch first.  A click inside the overlay area
-        # goes to the top widget and returns True if handled.
+        left, top, ow, oh = self._overlay_rect(size)
+        within = (left <= col < left + ow and top <= row < top + oh)
+
+        if within:
+            # Inside the overlay: let the top widget handle scroll events
+            # etc., but always return True — a click inside the modal must
+            # never trigger on_click_outside, even when the child widget
+            # doesn't consume the event (e.g. a plain Text row).
+            super().mouse_event(size, event, button, col, row, focus)
+            return True
+
+        # Outside the overlay: delegate to the bottom widget (the frame).
         handled = super().mouse_event(size, event, button, col, row, focus)
         if not handled and event == "mouse press" and button == 1:
             self._on_click_outside()
