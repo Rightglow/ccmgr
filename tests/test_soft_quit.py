@@ -296,7 +296,7 @@ def test_teardown_reverts_every_bar_option(monkeypatch):
         if (argv := c.args[0])[:4] == ["tmux", "set-option", "-u", "-t"]
     }
     expected = ({opt for opt, _ in App._TMUX_BAR_OPTIONS}
-                | set(App._TMUX_THEME_OPTIONS) | {"status-right"})
+                | set(App._TMUX_BAR_STYLE_OPTIONS) | {"status-right"})
     assert reverted == expected
     # Regression guard: the noisy window list and the unified bar style are
     # among what we set — and therefore must be among what we revert.

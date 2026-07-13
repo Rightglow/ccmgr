@@ -6,7 +6,14 @@ throwaway tmux session.
 """
 from unittest.mock import MagicMock
 
-from ccmgr.ui.app import App, _TMUX_THEMES
+from ccmgr.ui.app import (
+    App,
+    _TMUX_BAR_STYLE_NORMAL,
+    _TMUX_BAR_STYLE_ERROR,
+    _TMUX_BRAND_NORMAL,
+    _TMUX_BRAND_ERROR,
+    _TMUX_LEVEL_STYLE,
+)
 
 
 def _status_app(*, enabled=True, session="ccmgr"):
@@ -16,18 +23,27 @@ def _status_app(*, enabled=True, session="ccmgr"):
     return app
 
 
-def _set_option_call(run):
-    """The tmux set-option invocation among the captured subprocess calls."""
+def _style_calls(run, option):
+    """Every value pushed to ``option`` via tmux set-option, in call order."""
+    return [
+        c.args[0][5]
+        for c in run.call_args_list
+        if c.args[0][:2] == ["tmux", "set-option"] and c.args[0][4] == option
+    ]
+
+
+def _status_right_call(run):
+    """The full argv of the status-right set-option (skips the bar-style swap)."""
     for call in run.call_args_list:
         argv = call.args[0]
-        if argv[:2] == ["tmux", "set-option"]:
+        if argv[:2] == ["tmux", "set-option"] and argv[4] == "status-right":
             return argv
-    raise AssertionError("no tmux set-option call captured")
+    raise AssertionError("no status-right set-option captured")
 
 
 def _payload(run):
     """The status-right value pushed by the set-option call."""
-    return _set_option_call(run)[5]
+    return _status_right_call(run)[5]
 
 
 def test_escapes_hash_and_percent_inside_style(monkeypatch):
@@ -39,9 +55,9 @@ def test_escapes_hash_and_percent_inside_style(monkeypatch):
 
     _status_app()._render_status_to_tmux("50% done #{x} #[bold] /a#b", "info")
 
-    argv = _set_option_call(run)
+    argv = _status_right_call(run)
     assert argv[:5] == ["tmux", "set-option", "-t", "ccmgr", "status-right"]
-    assert argv[5] == "#[bg=colour236,fg=colour114]50%% done ##{x} ##[bold] /a##b#[default]"
+    assert argv[5] == "#[fg=colour231]50%% done ##{x} ##[bold] /a##b#[default]"
 
 
 def test_forces_status_redraw(monkeypatch):
@@ -55,7 +71,7 @@ def test_forces_status_redraw(monkeypatch):
     argvs = [c.args[0] for c in run.call_args_list]
     assert ["tmux", "refresh-client", "-S"] in argvs
     # set-option must come before the refresh so the redraw shows the new value.
-    assert argvs.index(_set_option_call(run)) < argvs.index(["tmux", "refresh-client", "-S"])
+    assert argvs.index(_status_right_call(run)) < argvs.index(["tmux", "refresh-client", "-S"])
 
 
 def test_level_styles_differ(monkeypatch):
@@ -64,15 +80,15 @@ def test_level_styles_differ(monkeypatch):
     app = _status_app()
 
     app._render_status_to_tmux("boom", "error")
-    assert _payload(run) == "#[bg=colour52,fg=colour231,bold]boom#[default]"
+    assert _payload(run) == "#[fg=colour231,bold]boom#[default]"
 
     run.reset_mock()
     app._render_status_to_tmux("careful", "warn")
-    assert _payload(run) == "#[bg=colour236,fg=colour214,bold]careful#[default]"
+    assert _payload(run) == "#[fg=colour220,bold]careful#[default]"
 
     run.reset_mock()
     app._render_status_to_tmux("hint", "tip")
-    assert _payload(run) == "#[bg=colour236,fg=colour245]hint#[default]"
+    assert _payload(run) == "#[fg=colour0]hint#[default]"
 
 
 def test_unknown_level_is_unstyled(monkeypatch):
@@ -113,85 +129,85 @@ def test_swallows_tmux_errors(monkeypatch):
     _status_app()._render_status_to_tmux("hello", "info")
 
 
-# ── preview themes: ` cycles the outer bar's colour scheme ───────────────
+# ── whole-bar error flip (green normal, dark red on error) ───────────────
 
-def test_render_follows_active_theme(monkeypatch):
-    # The per-level style comes from the ACTIVE theme, not a fixed constant.
+def test_error_flips_whole_bar_then_reverts(monkeypatch):
     run = MagicMock()
     monkeypatch.setattr("subprocess.run", run)
-    app = _status_app()
-    app._tmux_theme_index = 3  # system blue
+    app = _status_app()  # starts in normal (green) mode
 
-    app._render_status_to_tmux("hi", "info")
-
-    assert _payload(run) == _TMUX_THEMES[3]["levels"]["info"] + "hi#[default]"
-
-
-def _status_right(run):
-    """The status-right value pushed by the last set-option among the calls."""
-    found = None
-    for c in run.call_args_list:
-        argv = c.args[0]
-        if argv[:2] == ["tmux", "set-option"] and argv[4] == "status-right":
-            found = argv[5]
-    assert found is not None, "no status-right set-option captured"
-    return found
-
-
-def test_preview_cycles_the_four_levels(monkeypatch):
-    # Each ` press steps tip → info → warn → error, rendered at that level's
-    # colour with sample text, all within theme 0.
-    run = MagicMock()
-    monkeypatch.setattr("subprocess.run", run)
-    app = _status_app()
-
-    seen = []
-    for _ in range(len(app._TMUX_PREVIEW_SAMPLES)):
-        run.reset_mock()
-        app._cycle_tmux_preview()
-        seen.append((app._status_level, _status_right(run)))
-
-    assert [lvl for lvl, _ in seen] == ["tip", "info", "warn", "error"]
-    assert app._tmux_theme_index == 0  # stays on theme 0 for the first lap
-    for lvl, payload in seen:
-        assert payload.startswith(_TMUX_THEMES[0]["levels"][lvl])
-
-
-def test_preview_rolls_to_next_theme_after_a_full_lap(monkeypatch):
-    run = MagicMock()
-    monkeypatch.setattr("subprocess.run", run)
-    app = _status_app()
-
-    for _ in range(len(app._TMUX_PREVIEW_SAMPLES)):  # exhaust theme 0's levels
-        app._cycle_tmux_preview()
-    assert app._tmux_theme_index == 0
+    app._render_status_to_tmux("ERROR: boom", "error")
+    assert app._tmux_error_bar is True
+    assert _style_calls(run, "status-style")[-1] == _TMUX_BAR_STYLE_ERROR
+    assert _style_calls(run, "status-left")[-1] == _TMUX_BRAND_ERROR
 
     run.reset_mock()
-    app._cycle_tmux_preview()  # next lap → tip again, theme rolls to 1
-
-    assert app._status_level == "tip"
-    assert app._tmux_theme_index == 1
-    argvs = [c.args[0] for c in run.call_args_list]
-    assert ["tmux", "set-option", "-t", "ccmgr", "status-style",
-            _TMUX_THEMES[1]["bar"]] in argvs  # bar repainted for the new theme
+    app._render_status_to_tmux("→ back to normal", "info")
+    assert app._tmux_error_bar is False
+    assert _style_calls(run, "status-style")[-1] == _TMUX_BAR_STYLE_NORMAL
+    assert _style_calls(run, "status-left")[-1] == _TMUX_BRAND_NORMAL
 
 
-def test_apply_theme_noop_when_disabled(monkeypatch):
+def test_non_error_levels_leave_the_bar_green(monkeypatch):
+    # info/warn/tip must not touch status-style/status-left — the bar stays green
+    # and only the status-right text colour changes.
+    run = MagicMock()
+    monkeypatch.setattr("subprocess.run", run)
+    app = _status_app()
+
+    for level in ("info", "warn", "tip"):
+        run.reset_mock()
+        app._render_status_to_tmux("msg", level)
+        assert _style_calls(run, "status-style") == []
+        assert _style_calls(run, "status-left") == []
+        assert app._tmux_error_bar is False
+
+
+def test_error_bar_not_repainted_while_staying_in_error(monkeypatch):
+    # A second error render (or a held error re-render) must not re-push the bar
+    # style — the swap only fires on the normal↔error transition.
+    run = MagicMock()
+    monkeypatch.setattr("subprocess.run", run)
+    app = _status_app()
+
+    app._render_status_to_tmux("ERROR: one", "error")
+    run.reset_mock()
+    app._render_status_to_tmux("ERROR: two", "error")
+    assert _style_calls(run, "status-style") == []  # no re-paint
+    assert _payload(run) == "#[fg=colour231,bold]ERROR: two#[default]"
+
+
+def test_apply_bar_sets_normal_and_error_styles(monkeypatch):
+    run = MagicMock()
+    monkeypatch.setattr("subprocess.run", run)
+    app = _status_app()
+
+    app._apply_tmux_bar(error=False)
+    assert _style_calls(run, "status-style")[-1] == _TMUX_BAR_STYLE_NORMAL
+    assert _style_calls(run, "status-left")[-1] == _TMUX_BRAND_NORMAL
+
+    run.reset_mock()
+    app._apply_tmux_bar(error=True)
+    assert _style_calls(run, "status-style")[-1] == _TMUX_BAR_STYLE_ERROR
+    assert _style_calls(run, "status-left")[-1] == _TMUX_BRAND_ERROR
+
+
+def test_apply_bar_noop_when_disabled(monkeypatch):
     run = MagicMock()
     monkeypatch.setattr("subprocess.run", run)
 
-    _status_app(enabled=False)._apply_tmux_theme()
+    _status_app(enabled=False)._apply_tmux_bar(error=True)
 
     run.assert_not_called()
 
 
-def test_every_theme_is_well_formed():
-    assert len(_TMUX_THEMES) == 5
-    names = [t["name"] for t in _TMUX_THEMES]
-    assert names[0] == "dark"                    # shipped default first
-    assert len(set(names)) == len(names)         # names unique
-    for t in _TMUX_THEMES:
-        assert {"name", "bar", "brand", "levels"} <= t.keys()
-        assert set(t["levels"]) == {"info", "warn", "error", "tip"}
-        # error always keeps its OWN pill bg — never plain red text on the bar.
-        assert "bg=colour" in t["levels"]["error"]
+def test_level_styles_are_pill_free():
+    # The design decision: info/warn/tip sit directly on the green bar and error
+    # sits on the whole-bar red — so NO per-level style carries its own bg.
+    for level, style in _TMUX_LEVEL_STYLE.items():
+        assert "bg=" not in style, f"{level} should not set its own background"
+    # warn is the only non-error level bolded (alert without a pill); error too.
+    assert "bold" in _TMUX_LEVEL_STYLE["warn"]
+    assert "bold" in _TMUX_LEVEL_STYLE["error"]
+    # The bar/brand styles are what carry the background.
+    assert "bg=" in _TMUX_BAR_STYLE_NORMAL and "bg=" in _TMUX_BAR_STYLE_ERROR
