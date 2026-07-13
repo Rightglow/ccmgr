@@ -31,6 +31,7 @@ def _minimal_app(*, selected_project=None):
     app = App.__new__(App)
     app._selected_project = selected_project
     app._running = {}
+    app._codex_mode = False
     app._claude_home = Path.home() / ".claude"
     app._session_cache = MagicMock()
     app._session_cache.list_sessions.return_value = []

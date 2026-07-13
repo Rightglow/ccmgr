@@ -13,13 +13,15 @@ from ccmgr.ui.app import (
     _TMUX_BRAND_NORMAL,
     _TMUX_BRAND_ERROR,
     _TMUX_LEVEL_STYLE,
+    _tmux_status_left,
 )
 
 
-def _status_app(*, enabled=True, session="ccmgr"):
+def _status_app(*, enabled=True, session="ccmgr", codex_mode=False):
     app = App.__new__(App)
     app._tmux_status_enabled = enabled
     app._tmux_status_session = session
+    app._codex_mode = codex_mode
     return app
 
 
@@ -139,13 +141,13 @@ def test_error_flips_whole_bar_then_reverts(monkeypatch):
     app._render_status_to_tmux("ERROR: boom", "error")
     assert app._tmux_error_bar is True
     assert _style_calls(run, "status-style")[-1] == _TMUX_BAR_STYLE_ERROR
-    assert _style_calls(run, "status-left")[-1] == _TMUX_BRAND_ERROR
+    assert _style_calls(run, "status-left")[-1] == _tmux_status_left(True, False)
 
     run.reset_mock()
     app._render_status_to_tmux("→ back to normal", "info")
     assert app._tmux_error_bar is False
     assert _style_calls(run, "status-style")[-1] == _TMUX_BAR_STYLE_NORMAL
-    assert _style_calls(run, "status-left")[-1] == _TMUX_BRAND_NORMAL
+    assert _style_calls(run, "status-left")[-1] == _tmux_status_left(False, False)
 
 
 def test_non_error_levels_leave_the_bar_green(monkeypatch):
@@ -184,12 +186,41 @@ def test_apply_bar_sets_normal_and_error_styles(monkeypatch):
 
     app._apply_tmux_bar(error=False)
     assert _style_calls(run, "status-style")[-1] == _TMUX_BAR_STYLE_NORMAL
-    assert _style_calls(run, "status-left")[-1] == _TMUX_BRAND_NORMAL
+    assert _style_calls(run, "status-left")[-1] == _tmux_status_left(False, False)
 
     run.reset_mock()
     app._apply_tmux_bar(error=True)
     assert _style_calls(run, "status-style")[-1] == _TMUX_BAR_STYLE_ERROR
-    assert _style_calls(run, "status-left")[-1] == _TMUX_BRAND_ERROR
+    assert _style_calls(run, "status-left")[-1] == _tmux_status_left(True, False)
+
+
+def test_status_left_shows_current_mode(monkeypatch):
+    # The brand carries a "· Claude Code" / "· Codex" indicator that reflects
+    # the current mode; toggling mode repaints status-left.
+    run = MagicMock()
+    monkeypatch.setattr("subprocess.run", run)
+
+    _status_app(codex_mode=False)._apply_tmux_bar(error=False)
+    claude_left = _style_calls(run, "status-left")[-1]
+    assert "Claude Code" in claude_left and "Codex" not in claude_left
+
+    run.reset_mock()
+    _status_app(codex_mode=True)._apply_tmux_bar(error=False)
+    codex_left = _style_calls(run, "status-left")[-1]
+    assert codex_left.endswith("· Codex #[default]")
+    assert claude_left != codex_left
+
+
+def test_status_left_pure_function():
+    # Brand prefix stays; the mode segment is in the same weight as tips (no bold).
+    normal = _tmux_status_left(False, False)
+    assert normal.startswith(_TMUX_BRAND_NORMAL)
+    assert normal.endswith("· Claude Code #[default]")
+    assert "bold" not in normal
+    error = _tmux_status_left(True, True)
+    assert error.startswith(_TMUX_BRAND_ERROR)
+    assert error.endswith("· Codex #[default]")
+    assert "bold" not in error
 
 
 def test_apply_bar_noop_when_disabled(monkeypatch):

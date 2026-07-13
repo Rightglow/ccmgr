@@ -95,8 +95,19 @@ PALETTE = [
 # brand (status-left) follows the bar so its fg stays legible in both modes.
 _TMUX_BAR_STYLE_NORMAL = "bg=colour2,fg=colour0"    # green bar, black default fg
 _TMUX_BAR_STYLE_ERROR = "bg=colour52,fg=colour231"  # dark-red bar, white fg
-_TMUX_BRAND_NORMAL = "#[fg=colour0,bold] ccmgr #[default]"
-_TMUX_BRAND_ERROR = "#[fg=colour231,bold] ccmgr #[default]"
+_TMUX_BRAND_NORMAL = "#[fg=colour0] ccmgr #[default]"
+_TMUX_BRAND_ERROR = "#[fg=colour231] ccmgr #[default]"
+
+
+def _tmux_status_left(error: bool, codex_mode: bool) -> str:
+    """The tmux status-left segment: the ``ccmgr`` brand plus a current-mode
+    indicator (``· Claude Code`` / ``· Codex``), rendered in the tips colour
+    (colour0 = black on green, or white on red)."""
+    brand = _TMUX_BRAND_ERROR if error else _TMUX_BRAND_NORMAL
+    fg = "colour231" if error else "colour0"
+    label = "Codex" if codex_mode else "Claude Code"
+    return f"{brand}#[fg={fg}]· {label} #[default]"
+
 # Per-level foreground for the status text (status-right). No pill backgrounds:
 # info/warn/tip sit directly on the green bar (info white, warn bold gold, tip
 # black/muted); error is white-bold because the whole bar is already dark red.
@@ -226,11 +237,14 @@ class App:
     #     so its `0:tmux*` list entry is pure noise.
     #   - status: forced on (the bar is now the only status surface).
     #   - status-right-length: raised from the ~40 default so messages aren't cut.
+    #   - status-left-length: raised from the 10 default so "ccmgr · Claude Code"
+    #     (the brand + mode indicator) isn't truncated.
     _TMUX_BAR_OPTIONS = (
         ("status", "on"),
         ("window-status-format", ""),
         ("window-status-current-format", ""),
         ("status-right-length", str(_TMUX_STATUS_RIGHT_LENGTH)),
+        ("status-left-length", "40"),
     )
     # Bar options set dynamically (normal green / error red); reverted on teardown.
     _TMUX_BAR_STYLE_OPTIONS = ("status-style", "status-left")
@@ -299,7 +313,7 @@ class App:
         self._less_mouse_flag: str = self._detect_less_mouse()
         self._scroll_manager = ScrollManager(enabled=scroll_coalescing)
         self._soft_quit_flag: bool = False
-        # Codex mode (developer toggle via the x key / ButtonBar).
+        # Codex mode (toggle via the m key / ButtonBar).
         self._codex_mode: bool = False
         self._codex_index = CodexIndex(
             Path(config.codex_home).expanduser(), self._renames)
@@ -347,7 +361,7 @@ class App:
             on_help=self._open_help_modal,
             on_quit=self._open_quit_confirm,
             on_detach=self._on_detach,
-            on_codex_toggle=self._toggle_codex_mode,
+            on_mode_toggle=self._toggle_codex_mode,
         )
         # Footer: context key hints, then the constant button row. Status/tips
         # are shown in the outer tmux status bar, not here — filter mode borrows
@@ -613,7 +627,7 @@ class App:
         self._pending_project = None
         if project is None:
             if self._codex_mode:
-                self._set_status("New project only in Claude mode (press x to switch)")
+                self._set_status("New project only in Claude mode (press m to switch)")
                 return
             self._open_new_project_modal()
             return
@@ -1393,19 +1407,21 @@ class App:
             return
 
     def _toggle_codex_mode(self) -> None:
-        """Switch between Claude and Codex views."""
+        """Switch between Claude Code and Codex views."""
         self._codex_mode = not self._codex_mode
-        self._button_bar.set_codex_mode(self._codex_mode)
+        # Repaint the tmux brand so its "· Claude Code / · Codex" indicator
+        # reflects the new mode (keeps the current error/normal bar colour).
+        self._apply_tmux_bar(self._tmux_error_bar)
         if self._codex_mode:
             self._codex_project_filter = self._codex_index.all_cwds()
             self._projects_pane.set_projects(self._visible_projects())
             if not self._codex_project_filter:
-                self._set_status("Codex mode — no Codex sessions found  (x to exit)")
+                self._set_status("Codex mode — no Codex sessions found  (m to exit)")
                 self._sessions_pane.set_sessions(None, [],
                     running_ids=set(self._running),
                     favorite_ids=self._favorites.get_ids())
                 return
-            self._set_status("Codex mode  (x to exit)")
+            self._set_status("Codex mode  (m to exit)")
             # Switch to a project that has Codex sessions, if available.
             if self._selected_project is not None and self._selected_project.real_path in self._codex_project_filter:
                 self._on_project_select(self._selected_project)
@@ -1419,7 +1435,7 @@ class App:
                         favorite_ids=self._favorites.get_ids())
         else:
             self._projects_pane.set_projects(self._visible_projects())
-            self._set_status("Claude mode  (x for Codex)")
+            self._set_status("Claude mode  (m for Codex)")
             if self._selected_project is not None:
                 self._on_project_select(self._selected_project)
 
@@ -2467,12 +2483,13 @@ class App:
     def _apply_tmux_bar(self, error: bool) -> None:
         """Set the whole-bar background (status-style) + brand (status-left) for
         the normal (green) or error (dark red) mode. Called from run() for the
-        initial paint and from _render_status_to_tmux on the normal↔error
-        transition. Best-effort — a tmux hiccup must not raise into the UI."""
+        initial paint, from _render_status_to_tmux on the normal↔error
+        transition, and from _toggle_codex_mode so the mode indicator repaints.
+        Best-effort — a tmux hiccup must not raise into the UI."""
         if not self._tmux_status_enabled or not self._tmux_status_session:
             return
         bar = _TMUX_BAR_STYLE_ERROR if error else _TMUX_BAR_STYLE_NORMAL
-        brand = _TMUX_BRAND_ERROR if error else _TMUX_BRAND_NORMAL
+        brand = _tmux_status_left(error, self._codex_mode)
         try:
             import subprocess as _sp
             for opt, val in (("status-style", bar), ("status-left", brand)):
@@ -2481,6 +2498,10 @@ class App:
                      opt, val],
                     stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
                 )
+            # Force an immediate repaint (default status-interval is 15s) so a
+            # mode toggle or error flip shows at once, not on the next tick.
+            _sp.run(["tmux", "refresh-client", "-S"],
+                    stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
         except Exception:
             pass
 

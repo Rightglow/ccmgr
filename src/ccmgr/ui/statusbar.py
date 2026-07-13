@@ -78,28 +78,20 @@ class ButtonBar(urwid.WidgetWrap):
     no background — so the row stays clean while still reading as clickable.
 
     ``? Help``  ``q Quit``  ``C-b d Detach`` are always present.
-    ``x Codex`` / ``x Claude`` toggles developer mode (optional, at end).
+    ``m Mode`` toggles between Claude Code and Codex (optional, at end).
     """
 
     def __init__(self, on_help: Callable[[], None],
                  on_quit: Callable[[], None],
                  on_detach: Callable[[], None],
-                 on_codex_toggle: Callable[[], None] | None = None) -> None:
-        self._on_codex_toggle = on_codex_toggle
-        self._codex_mode = False
+                 on_mode_toggle: Callable[[], None] | None = None) -> None:
+        self._on_mode_toggle = on_mode_toggle
         self._on_help = on_help
         self._on_quit = on_quit
         self._on_detach = on_detach
         self._hit_areas: list[tuple[int, int, Callable[[], None]]] = []
         self._text = urwid.Text("", align="left", wrap="clip")
         super().__init__(urwid.AttrMap(self._text, "dim"))
-        self._rebuild()
-
-    def set_codex_mode(self, active: bool) -> None:
-        """Flip the Codex toggle label between ``x Codex`` and ``x Claude``."""
-        if self._codex_mode == active:
-            return
-        self._codex_mode = active
         self._rebuild()
 
     def _rebuild(self) -> None:
@@ -133,9 +125,8 @@ class ButtonBar(urwid.WidgetWrap):
                  self._on_detach if "detach" in item_lower else
                  (lambda: None))
 
-        if self._on_codex_toggle is not None:
-            _add("x Codex" if not self._codex_mode else "x Claude",
-                 self._on_codex_toggle)
+        if self._on_mode_toggle is not None:
+            _add("m Mode", self._on_mode_toggle)
 
         self._text.set_text(markup)
 
