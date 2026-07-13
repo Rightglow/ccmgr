@@ -180,6 +180,32 @@ def _hint_rows(bar: HintBar, width: int) -> list[str]:
     return [t.decode() for t in canvas.text]
 
 
+# ── idle tip focus guard (regression for CJK IME flicker) ─────────────────
+
+def test_idle_tip_skips_tmux_repaint_while_agent_pane_focused(app, clock, shown):
+    """When the right agent pane has focus, idle tip rotation must NOT repaint
+    the shared tmux status bar — ``refresh-client -S`` inside the repaint
+    path makes the CJK preedit box jump (regression of 18f8c18, re-introduced
+    when the status line moved into the outer tmux bar)."""
+    app._ccmgr_has_focus = False
+    app._tip_since = 0.0  # tip is due immediately
+    shown.clear()
+    app._update_status()
+    assert shown == [], "must not repaint tmux bar while agent pane focused"
+
+
+def test_idle_tip_repaints_when_ccmgr_focused(app, clock, shown):
+    """When ccmgr has focus the idle tip rotation repaints the tmux status
+    bar normally — the focus guard only suppresses repaints while the user
+    is typing in the agent pane."""
+    app._ccmgr_has_focus = True
+    app._tip_since = 0.0  # tip is due immediately
+    shown.clear()
+    app._update_status()
+    assert len(shown) == 1
+    assert shown[0] in TIPS
+
+
 def _cols(s: str) -> int:
     import urwid
     return urwid.calc_width(s, 0, len(s))

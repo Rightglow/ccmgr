@@ -2611,7 +2611,13 @@ class App:
         if not TIPS:
             return
         if self._tip_since == 0.0 or now - self._tip_since >= self._TIP_INTERVAL:
-            self._render_status_to_tmux(TIPS[self._tip_index], "tip")
+            # Only repaint the shared tmux status bar when ccmgr has focus.
+            # When the user is typing in the right agent pane, refresh-client -S
+            # inside _render_status_to_tmux makes the CJK preedit box jump.
+            # The counter still advances so tips don't stall during long typing
+            # sessions — the next tip appears as soon as focus returns.
+            if self._ccmgr_has_focus:
+                self._render_status_to_tmux(TIPS[self._tip_index], "tip")
             self._tip_index = (self._tip_index + 1) % len(TIPS)
             self._tip_since = now
 
