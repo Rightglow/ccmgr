@@ -2280,16 +2280,19 @@ class App:
             self._set_status("Rename cleared.")
             return
         self._renames.set(session.session_id, new_title)
-        import json
-        record = json.dumps({"type": "ai-title", "aiTitle": new_title})
+        # Echo the rename into the session JSONL so `claude --resume`'s own
+        # picker reflects it too (best-effort).  Claude-only — Codex rollout
+        # files use a different schema, and appending Claude records would
+        # change the mtime and pollute the file.
         synced = True
-        try:
-            with session.jsonl_path.open("a") as f:
-                f.write(record + "\n")
-        except OSError:
-            # The sidecar rename already succeeded; the JSONL echo (so
-            # `claude --resume` shows it too) is best-effort.
-            synced = False
+        if session.session_type == "claude":
+            import json
+            record = json.dumps({"type": "ai-title", "aiTitle": new_title})
+            try:
+                with session.jsonl_path.open("a") as f:
+                    f.write(record + "\n")
+            except OSError:
+                synced = False
         # Invalidate the caches and refresh so both Sessions and Running
         # panes pick up the new title immediately.
         self._session_cache.invalidate()
