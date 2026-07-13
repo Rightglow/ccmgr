@@ -304,6 +304,38 @@ def test_teardown_reverts_every_bar_option(monkeypatch):
             "status-style", "status-left"} <= reverted
 
 
+def test_run_teardown_reverts_bar_if_setup_raises(monkeypatch):
+    """Regression: run() applies the tmux status-bar overrides BEFORE building the
+    urwid Screen/MainLoop. If that construction raises, `finally` must still call
+    _teardown_tmux, or the user's outer bar keeps ccmgr's status/style/brand."""
+    import ccmgr.ui.app as app_mod
+
+    app = _minimal_app()
+    app._pending_project = None
+    app._pending_restore_state = None
+    app._config = MagicMock(poll_interval_ms=500)
+    app._frame = MagicMock()
+    app._hint_bar = MagicMock()
+    app._set_ccmgr_focus = MagicMock()
+    teardown = MagicMock()
+    app._teardown_tmux = teardown
+
+    monkeypatch.setattr(app_mod.tmux_ctl, "in_tmux", lambda: True)
+    monkeypatch.setattr(app_mod.tmux_ctl, "current_session_name", lambda: "ccmgr")
+    monkeypatch.setattr(app_mod.tmux_ctl, "enable_clipboard_passthrough", lambda: None)
+    monkeypatch.setattr(app_mod.tmux_ctl, "current_pane_id", lambda: "%0")
+    monkeypatch.setattr("subprocess.run", MagicMock())
+    # Screen construction blows up AFTER the status bar has been set up.
+    monkeypatch.setattr("urwid.raw_display.Screen",
+                        MagicMock(side_effect=RuntimeError("boom")))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        app.run()
+
+    assert app._tmux_status_enabled is True  # setup ran (bar was mutated)...
+    teardown.assert_called_once_with()       # ...and teardown reverted it
+
+
 # ── QuitConfirmModal ─────────────────────────────────────────────────────
 
 def _render_text(modal) -> str:

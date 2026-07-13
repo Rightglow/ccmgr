@@ -2516,90 +2516,94 @@ class App:
         # - set-clipboard on: text selection in either pane is copied to the
         #   system clipboard.
         import subprocess as _sp
-        if tmux_ctl.in_tmux():
-            sess = tmux_ctl.current_session_name() or "ccmgr"
-            _sp.run(
-                ["tmux", "set-option", "-t", sess, "set-clipboard", "on"],
-                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
-            )
-            # Force OSC 52 passthrough so a left-drag selection in either pane
-            # copies to the *local* system clipboard (works over SSH / nested
-            # tmux on OSC-52-capable terminals). Pairs with set-clipboard on.
-            tmux_ctl.enable_clipboard_passthrough()
-            _sp.run(
-                ["tmux", "set-option", "-t", sess, "focus-events", "on"],
-                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
-            )
-            _sp.run(
-                ["tmux", "set-option", "-t", sess, "mouse", "on"],
-                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
-            )
-            # Unbind tmux's built-in right-click context menu so right-click
-            # passes through to the application (Claude / less) instead of
-            # flashing display-menu.  Left-click (MouseDown1Pane) is left at
-            # its default: tmux switches pane focus then forwards the event.
-            _sp.run(
-                ["tmux", "unbind-key", "-T", "root", "MouseDown3Pane"],
-                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
-            )
-            # The outer tmux status bar is now ccmgr's only status surface (the
-            # in-pane StatusBar was removed). Apply the static options (window list
-            # blanked, bar forced on, length cap) here; the bar background + brand
-            # are set by _apply_tmux_bar (green now, dark red on error). All
-            # session-scoped + reverted on teardown, so the user's global tmux
-            # config is untouched.
-            for opt, val in self._TMUX_BAR_OPTIONS:
+        # Wrap the whole setup (not just loop.run) so `finally` reverts our tmux
+        # status-bar overrides even if Screen()/MainLoop() construction raises
+        # after we've mutated the outer session — otherwise the user's bar would
+        # keep ccmgr's `status on`, style, brand and blanked window-list.
+        try:
+            if tmux_ctl.in_tmux():
+                sess = tmux_ctl.current_session_name() or "ccmgr"
                 _sp.run(
-                    ["tmux", "set-option", "-t", sess, opt, val],
+                    ["tmux", "set-option", "-t", sess, "set-clipboard", "on"],
                     stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
                 )
-            self._tmux_status_session = sess
-            self._tmux_status_enabled = True
-            self._apply_tmux_bar(error=False)  # initial green bar
+                # Force OSC 52 passthrough so a left-drag selection in either pane
+                # copies to the *local* system clipboard (works over SSH / nested
+                # tmux on OSC-52-capable terminals). Pairs with set-clipboard on.
+                tmux_ctl.enable_clipboard_passthrough()
+                _sp.run(
+                    ["tmux", "set-option", "-t", sess, "focus-events", "on"],
+                    stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                )
+                _sp.run(
+                    ["tmux", "set-option", "-t", sess, "mouse", "on"],
+                    stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                )
+                # Unbind tmux's built-in right-click context menu so right-click
+                # passes through to the application (Claude / less) instead of
+                # flashing display-menu.  Left-click (MouseDown1Pane) is left at
+                # its default: tmux switches pane focus then forwards the event.
+                _sp.run(
+                    ["tmux", "unbind-key", "-T", "root", "MouseDown3Pane"],
+                    stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                )
+                # The outer tmux status bar is now ccmgr's only status surface (the
+                # in-pane StatusBar was removed). Apply the static options (window
+                # list blanked, bar forced on, length cap) here; the bar background
+                # + brand are set by _apply_tmux_bar (green now, dark red on error).
+                # All session-scoped + reverted on teardown, so the user's global
+                # tmux config is untouched.
+                for opt, val in self._TMUX_BAR_OPTIONS:
+                    _sp.run(
+                        ["tmux", "set-option", "-t", sess, opt, val],
+                        stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                    )
+                self._tmux_status_session = sess
+                self._tmux_status_enabled = True
+                self._apply_tmux_bar(error=False)  # initial green bar
 
-        self._ccmgr_pane_id = tmux_ctl.current_pane_id()
-        self._set_ccmgr_focus(True, force_border=True)
-        # bracketed_paste_mode: the terminal frames pastes in begin/end markers
-        # so _filter_input can drop them — sidebar keys are destructive commands,
-        # not text input.
-        screen = urwid.raw_display.Screen(
-            focus_reporting=True, bracketed_paste_mode=True
-        )
-        self._loop = urwid.MainLoop(
-            self._frame,
-            palette=PALETTE,
-            screen=screen,
-            input_filter=self._filter_input,
-            unhandled_input=self._on_input,
-        )
-        from ccmgr.ui._widgets import ClickableRow
-        ClickableRow._main_loop = self._loop
-        self._hint_bar.set_loop(self._loop)
-        try:
-            self._loop.screen.set_terminal_properties(colors=256)
-        except Exception:
-            pass
-        # Intercept Ctrl-C as a regular keypress so we can show a confirm-quit
-        # popup instead of slamming out via SIGINT. Ctrl-\ (quit) is left
-        # active as an emergency hard-exit.
-        try:
-            self._loop.screen.tty_signal_keys(intr="undefined")
-        except Exception:
-            pass
-        # Right pane is created lazily on first session launch — startup is
-        # ccmgr-only, no empty pane.
-        self._loop.set_alarm_in(self._config.poll_interval_ms / 1000.0, self._on_tick)
-        if self._pending_project is not None:
-            self._loop.set_alarm_in(
-                0.05, self._load_pending_project)
-        if self._pending_restore_state is not None:
-            self._loop.set_alarm_in(
-                0.1, self._restore_pending_right_pane)
-        try:
+            self._ccmgr_pane_id = tmux_ctl.current_pane_id()
+            self._set_ccmgr_focus(True, force_border=True)
+            # bracketed_paste_mode: the terminal frames pastes in begin/end markers
+            # so _filter_input can drop them — sidebar keys are destructive commands,
+            # not text input.
+            screen = urwid.raw_display.Screen(
+                focus_reporting=True, bracketed_paste_mode=True
+            )
+            self._loop = urwid.MainLoop(
+                self._frame,
+                palette=PALETTE,
+                screen=screen,
+                input_filter=self._filter_input,
+                unhandled_input=self._on_input,
+            )
+            from ccmgr.ui._widgets import ClickableRow
+            ClickableRow._main_loop = self._loop
+            self._hint_bar.set_loop(self._loop)
+            try:
+                self._loop.screen.set_terminal_properties(colors=256)
+            except Exception:
+                pass
+            # Intercept Ctrl-C as a regular keypress so we can show a confirm-quit
+            # popup instead of slamming out via SIGINT. Ctrl-\ (quit) is left
+            # active as an emergency hard-exit.
+            try:
+                self._loop.screen.tty_signal_keys(intr="undefined")
+            except Exception:
+                pass
+            # Right pane is created lazily on first session launch — startup is
+            # ccmgr-only, no empty pane.
+            self._loop.set_alarm_in(self._config.poll_interval_ms / 1000.0, self._on_tick)
+            if self._pending_project is not None:
+                self._loop.set_alarm_in(
+                    0.05, self._load_pending_project)
+            if self._pending_restore_state is not None:
+                self._loop.set_alarm_in(
+                    0.1, self._restore_pending_right_pane)
             self._loop.run()
         except KeyboardInterrupt:
             # Ctrl-C / SIGINT — fall through to teardown.
             pass
         finally:
-            # Always clean up tmux, regardless of how we exited the loop.
+            # Always clean up tmux, regardless of how (or how early) we exited.
             self._teardown_tmux()
