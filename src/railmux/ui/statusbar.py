@@ -18,8 +18,11 @@ from railmux.ui import keymap
 TIPS: tuple[str, ...] = (
     "Quit with q, then s to soft-quit — leaves every agent session running",
     "Click a stopped session to preview its history without launching the agent",
+    "Double-click a session to open it and jump focus to the agent pane",
+    "[ / ] resize the sidebar divider — shrink or expand",
     "F9 toggles fullscreen for the agent pane",
     "t opens a shell in the focused project's directory",
+    "Codex mode hides codex exec automation threads — only interactive sessions shown",
 )
 
 

@@ -1466,6 +1466,12 @@ class App:
         # Repaint the tmux brand so its "· Claude Code / · Codex" indicator
         # reflects the new mode (keeps the current error/normal bar colour).
         self._apply_tmux_bar(self._tmux_error_bar)
+        # Force a fresh project scan so the sidebar counts come from the
+        # correct source: Claude counts from discovery in Claude mode, Codex
+        # counts from the Codex index in Codex mode.  Without this the
+        # previous mode's counts (written into _project_snapshot by _refresh)
+        # would linger after the switch.
+        self._invalidate_project_snapshot()
         if self._codex_mode:
             self._codex_project_filter = self._codex_index.all_cwds()
             self._projects_pane.set_projects(self._visible_projects())
