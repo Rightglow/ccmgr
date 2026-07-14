@@ -6,6 +6,22 @@ A terminal UI to navigate, resume, and start [Claude Code](https://claude.com/cl
 - **Codex mode** — reads `~/.codex/sessions/*`, same sidebar workflow for Codex sessions
 - Press `m` to toggle between modes
 
+## Why Railmux?
+
+Without Railmux, managing multiple agent sessions means manually tracking tmux
+windows, remembering which session lives where, and copy-pasting session IDs.
+Sessions pile up across projects, context gets lost, and switching between
+them is friction.
+
+Railmux replaces all of that with a single keystroke:
+
+- **One sidebar, all sessions** — browse every Claude Code and Codex session
+  across every project, filter by name, star favourites
+- **Instant switching** — press Enter and the right pane attaches to a different
+  background tmux session; every agent keeps running, no responses lost
+- **Zero manual bookkeeping** — no more `tmux ls | grep cc-` or hunting through
+  `~/.claude/projects/`
+
 ## Install
 
 ```bash
@@ -98,7 +114,7 @@ poll_interval_ms = 1000
 
 ## FAQ
 
-### How do I copy text from the agent pane?
+### 1. How do I copy text from the agent pane?
 
 Under tmux the sidebar and agent share the screen, and over SSH your clipboard
 lives on the *local* machine.
@@ -114,7 +130,7 @@ Selection → "Applications in terminal may access clipboard"*.)
 > `Ctrl-B z` also toggles fullscreen (built into tmux) but zooms whichever
 > pane has focus — it may fullscreen the sidebar instead of the agent.
 
-### Mouse clicks or F9 don't work — what's wrong?
+### 2. Mouse clicks or F9 don't work — what's wrong?
 
 These are usually terminal‑side settings, not tmux or railmux.
 
@@ -129,7 +145,7 @@ keys"*. On Windows laptops the Fn‑lock key (`Fn+Esc`) toggles function‑key
 behaviour. If your terminal has a "Pass function keys to terminal" option,
 enable it.
 
-### Using railmux over SSH
+### 3. Using railmux over SSH
 
 railmux works over SSH out of the box — the scroll‑agent integration is
 SSH‑transparent, so mouse scrolling in the agent pane works the same as
@@ -153,7 +169,7 @@ If the connection is so slow that the sidebar can't refresh one frame per
 second, skip the mouse and use keyboard navigation — `↑↓ / Tab / Enter`
 cover every operation and don't depend on a fast redraw.
 
-### Will automated review sessions pollute my session list?
+### 4. Will automated review sessions pollute my session list?
 
 **Codex**: sessions created by `codex exec` (headless automation, pre‑commit
 hooks, CI) are filtered automatically — railmux only shows interactive
@@ -172,7 +188,7 @@ claude -p "review this diff" --user-data-dir ~/.claude-automation
 
 Then your normal `~/.claude` stays clean for interactive sessions only.
 
-### pip install fails with "externally-managed-environment"
+### 5. pip install fails with "externally-managed-environment"
 
 Use `pipx` (recommended) or pass `--break-system-packages`:
 
