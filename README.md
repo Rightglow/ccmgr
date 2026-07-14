@@ -1,8 +1,10 @@
-# railmux — Claude Code session manager
+# railmux — session manager for Claude Code & Codex
 
-A terminal UI to navigate, resume, and start [Claude Code](https://claude.com/claude-code) sessions across all your projects from one place. railmux lives in the left pane of a tmux window; the right pane shows the currently-active claude. Each claude session runs as its own detached tmux session in the background, so switching between sessions preserves all in-progress work — no responses or tool calls are interrupted.
+A terminal UI to navigate, resume, and start [Claude Code](https://claude.com/claude-code) and [Codex](https://github.com/openai/codex) sessions across all your projects. railmux lives in the left pane of a tmux window; the right pane shows the active agent. Each session runs as its own detached tmux session in the background — switching preserves all in-progress work, no responses or tool calls are interrupted.
 
-> **This is a fork** of [regmi-saugat/railmux](https://github.com/regmi-saugat/railmux) (v0.1.5), developed with agent-assisted programming using [Claude Code](https://claude.ai/claude-code).
+- **Claude Code mode** — reads `~/.claude/projects/*`, lists sessions by project, resume with `claude --resume`
+- **Codex mode** — reads `~/.codex/sessions/*`, same sidebar workflow for Codex sessions
+- Press `m` to toggle between modes
 
 ## Install
 
@@ -36,13 +38,14 @@ If you're not already inside a tmux session, railmux will launch one automatical
 | Key | Action |
 |-----|--------|
 | `Enter` | Resume or start the selected session |
-| `n` | Start a fresh claude session in the current project |
+| `n` | Start a fresh session in the current project |
 | `i` | Popup with session details |
 | `r` | Rename the focused session |
 | `s` | Toggle star — starred sessions pinned to top with ⭐ |
-| `k` | Kill the running Claude process (keeps session file) |
+| `k` | Kill the running agent process (keeps session file) |
 | `d` | Delete the focused session (prompts for confirmation) |
 | `t` | Open a terminal in the active project directory |
+| `m` | Toggle between Claude Code and Codex modes |
 | `F9` | Fullscreen the agent pane (toggle) for clean text selection |
 | `?` | Full help popup with all keybindings |
 | `q` or `Ctrl-C` | Quit with confirmation |
@@ -58,7 +61,7 @@ If you're not already inside a tmux session, railmux will launch one automatical
 
 ## History preview
 
-Left-click a non-running session to view its conversation history in the right pane without starting Claude. The transcript is colour-coded (user = cyan, assistant = green, tool use = yellow) and displayed via `less`. Press `q` to exit — the right pane restores whatever was there before. Double-click to skip the preview and open the session directly.
+Left-click a non-running session to view its conversation history in the right pane without starting the agent. The transcript is colour-coded (user = cyan, assistant = green, tool use = yellow) and displayed via `less`. Press `q` to exit — the right pane restores whatever was there before. Double-click to skip the preview and open the session directly.
 
 Clicking a running session attaches to it immediately (focus stays left so you can keep browsing). Double-clicking steals focus to the right pane for both running and non-running sessions.
 
@@ -72,7 +75,7 @@ Each session shows a coloured ● reflecting its current state:
 
 ## How it works
 
-`railmux` reads `~/.claude/projects/*` (Claude's per-project session history) and lists everything. Pressing `Enter` on a session does two things: (1) if a detached tmux session running `claude --resume <id>` doesn't already exist, railmux creates one with `tmux new-session -d`; (2) railmux's right pane runs `tmux attach -t cc-<id>` so you see and interact with that claude. Switching sessions just respawns the right pane to attach to a different background tmux session — the detached claudes keep running with all their state intact.
+`railmux` reads agent session files from `~/.claude/projects/*` (Claude Code) or `~/.codex/sessions/*` (Codex) and lists everything. Pressing `Enter` on a session does two things: (1) if a detached tmux session for that session doesn't already exist, railmux creates one with `tmux new-session -d`; (2) railmux's right pane attaches to it so you see and interact with the agent. Switching sessions just respawns the right pane — the detached sessions keep running with all their state intact.
 
 ## SSH / remote use
 
@@ -92,13 +95,13 @@ Host your-server
     Compression yes           # smoother tmux pane scrolling over SSH
 ```
 
-## Copying text from the Claude pane
+## Copying text from the agent pane
 
-Selecting text is awkward under tmux: the sidebar and Claude share the screen,
+Selecting text is awkward under tmux: the sidebar and agent share the screen,
 and over SSH your clipboard lives on the *local* machine.
 
 - **OSC 52** (iTerm2, kitty, WezTerm, Alacritty, foot, Windows Terminal):
-  drag-select in the Claude pane — copies to local clipboard automatically,
+  drag-select in the agent pane — copies to local clipboard automatically,
   even over SSH. No Shift needed. (iTerm2: enable *Settings → General →
   Selection → "Applications in terminal may access clipboard"*.)
 - **Without OSC 52** (Terminal.app, etc.): **F9** to fullscreen the agent →
@@ -115,7 +118,16 @@ Optional config at `~/.config/railmux/config.toml`:
 # Path to the claude binary (default: "claude")
 binary = "claude"
 
+[codex]
+# Path to the codex binary (default: "codex")
+binary = "codex"
+home = "~/.codex"
+
 [live]
 # How often to refresh the session list (ms)
 poll_interval_ms = 1000
 ```
+
+## Acknowledgements
+
+The tmux sidebar idea and initial architecture came from [regmi-saugat/ccmgr](https://github.com/regmi-saugat/ccmgr). railmux extends it with Codex support, session history preview, starring, in-app renaming, mouse interaction, and a status bar integrated into the tmux status line.

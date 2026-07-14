@@ -122,6 +122,7 @@ class HelpModal(urwid.WidgetWrap):
             ("s", "Toggle star (pin to top of session list)"),
             ("k", "Kill the running agent process (keeps session file)"),
             ("d", "Delete the focused session (prompts for confirmation)"),
+            ("m", "Toggle between Claude Code and Codex modes"),
             ("t", "Open a terminal in the active project"),
             ("F9", "Fullscreen the agent pane (toggle) for clean text copy"),
             ("q or Ctrl-C", "Quit railmux (prompts for confirmation)"),
