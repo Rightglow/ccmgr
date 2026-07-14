@@ -50,17 +50,22 @@ class CodexIndex:
         """Refresh cached metadata once for a group of related queries."""
         self._refresh()
 
-    def all_cwds(self, *, refresh: bool = True) -> set[Path]:
-        """Set of cwds that have at least one Codex session.
+    def all_cwds(self, *, refresh: bool = True) -> dict[Path, int]:
+        """Map from cwd to Codex session count for every cwd that has at
+        least one Codex session.
 
         Used to filter the Projects pane in Codex mode — only projects whose
-        ``real_path`` is in this set are shown.
+        ``real_path`` is a key in this dict are shown, and the count is used
+        for the sidebar badge.
         """
         if refresh:
             self._refresh()
-        return {meta.project.real_path
-                for _, meta in self._entries.values()
-                if meta.project is not None}
+        counts: dict[Path, int] = {}
+        for _, meta in self._entries.values():
+            if meta.project is not None:
+                cwd = meta.project.real_path
+                counts[cwd] = counts.get(cwd, 0) + 1
+        return counts
 
     def sessions_for_cwd(
         self, cwd: Path, *, refresh: bool = True,

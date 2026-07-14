@@ -1,4 +1,4 @@
-# railmux — session manager for Claude Code & Codex
+# Railmux — session manager for Claude Code & Codex
 
 A terminal UI to navigate, resume, and start [Claude Code](https://claude.com/claude-code) and [Codex](https://github.com/openai/codex) sessions across all your projects. railmux lives in the left pane of a tmux window; the right pane shows the active agent. Each session runs as its own detached tmux session in the background — switching preserves all in-progress work, no responses or tool calls are interrupted.
 

@@ -95,8 +95,8 @@ PALETTE = [
 # brand (status-left) follows the bar so its fg stays legible in both modes.
 _TMUX_BAR_STYLE_NORMAL = "bg=colour2,fg=colour0"    # green bar, black default fg
 _TMUX_BAR_STYLE_ERROR = "bg=colour52,fg=colour231"  # dark-red bar, white fg
-_TMUX_BRAND_NORMAL = "#[fg=colour0] railmux #[default]"
-_TMUX_BRAND_ERROR = "#[fg=colour231] railmux #[default]"
+_TMUX_BRAND_NORMAL = "#[fg=colour0] Railmux #[default]"
+_TMUX_BRAND_ERROR = "#[fg=colour231] Railmux #[default]"
 
 
 def _tmux_status_left(error: bool, codex_mode: bool) -> str:
@@ -371,7 +371,7 @@ class App:
         self._codex_mode: bool = False
         self._codex_index = CodexIndex(
             Path(config.codex_home).expanduser(), self._renames)
-        self._codex_project_filter: set[Path] = set()  # cwds with Codex sessions
+        self._codex_project_filter: dict[Path, int] = {}  # cwd → Codex session count
 
         projects = list_projects(claude_home)
         self._project_snapshot = projects
@@ -1576,7 +1576,7 @@ class App:
                 by_resolved[p.real_path] = p
         visible: list[Project] = []
         seen_encoded: set[str] = set()
-        for cwd in self._codex_project_filter:
+        for cwd, codex_count in self._codex_project_filter.items():
             try:
                 key = cwd.resolve()
             except OSError:
@@ -1585,11 +1585,13 @@ class App:
             if existing is not None:
                 if existing.encoded_name not in seen_encoded:
                     seen_encoded.add(existing.encoded_name)
-                    visible.append(existing)
+                    # In Codex mode show the Codex session count, not the
+                    # Claude count from discovery.
+                    visible.append(replace(existing, session_count=codex_count))
             else:
                 # Codex-only directory — synthesise a project entry so the
                 # user can browse and launch sessions here.
-                synth = self._synthesise_codex_project(cwd)
+                synth = self._synthesise_codex_project(cwd, codex_count)
                 if synth.encoded_name not in seen_encoded:
                     seen_encoded.add(synth.encoded_name)
                     visible.append(synth)
@@ -1609,7 +1611,7 @@ class App:
         self._project_snapshot_at = 0.0
 
     @staticmethod
-    def _synthesise_codex_project(cwd: Path) -> Project:
+    def _synthesise_codex_project(cwd: Path, session_count: int = 0) -> Project:
         """Create a synthetic Project for a Codex-only directory."""
         from railmux.codex_index import _safe_encoded_name
         try:
@@ -1620,7 +1622,7 @@ class App:
             real_path=resolved,
             encoded_name=_safe_encoded_name(resolved),
             claude_dir=Path(),  # no Claude sessions directory
-            session_count=0,
+            session_count=session_count,
             last_activity_ts=0.0,
         )
 

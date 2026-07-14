@@ -248,7 +248,7 @@ def test_codex_index_cached_queries_do_not_rescan(
         lambda: pytest.fail("cached query unexpectedly rescanned"),
     )
 
-    assert idx.all_cwds(refresh=False) == {Path("/project-a")}
+    assert idx.all_cwds(refresh=False) == {Path("/project-a"): 1}
     assert len(idx.sessions_for_cwd(Path("/project-a"), refresh=False)) == 1
     assert idx.get(sid, refresh=False) is not None
 
@@ -349,7 +349,7 @@ def test_codex_index_invalidate(tmp_path: Path):
 
 def test_codex_index_no_sessions_dir(tmp_path: Path):
     idx = CodexIndex(tmp_path / "nonexistent")
-    assert idx.all_cwds() == set()
+    assert idx.all_cwds() == {}
     assert idx.sessions_for_cwd(Path("/x")) == []
     assert idx.get("x") is None
 

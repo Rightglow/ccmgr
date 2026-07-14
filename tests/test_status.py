@@ -338,7 +338,7 @@ def test_refresh_scans_codex_once_and_uses_cached_queries(app, monkeypatch):
 
         def all_cwds(self, *, refresh=True):
             self.all_cwds_calls.append(refresh)
-            return set()
+            return {}
 
         def get(self, session_id, *, refresh=True):
             self.get_calls.append((session_id, refresh))
