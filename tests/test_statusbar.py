@@ -9,9 +9,12 @@ from railmux.ui.statusbar import TIPS, ButtonBar, HintBar
 
 
 @pytest.fixture
-def app(tmp_path):
+def app(tmp_path, monkeypatch):
     ch = tmp_path / ".claude"
     (ch / "projects").mkdir(parents=True)
+    # App startup normally re-adopts real detached tmux sessions. Status tests
+    # must not inherit the developer machine's external tmux/Codex state.
+    monkeypatch.setattr(app_mod.App, "_discover_orphans", lambda self: None)
     return app_mod.App(claude_home=ch, config=Config(), auto_launched=False)
 
 
@@ -330,4 +333,3 @@ def test_buttonbar_not_selectable():
     """ButtonBar must not steal keyboard focus from the sidebar."""
     bar = ButtonBar(on_help=lambda: None, on_quit=lambda: None, on_detach=lambda: None)
     assert bar.selectable() is False
-

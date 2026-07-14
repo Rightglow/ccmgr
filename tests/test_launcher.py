@@ -3,7 +3,34 @@ from pathlib import Path
 
 import pytest
 
-from railmux.launcher import build_resume_command, build_new_session_command, launch
+from railmux.launcher import (
+    build_resume_command,
+    build_new_session_command,
+    build_codex_new_command,
+    build_codex_resume_command,
+    launch,
+)
+
+
+_YOLO = "--dangerously-bypass-approvals-and-sandbox"
+
+
+def test_build_codex_commands_no_yolo_by_default():
+    assert build_codex_new_command("codex", Path("/p")) == ["codex", "-C", "/p"]
+    assert build_codex_resume_command("codex", "sid", Path("/p")) == [
+        "codex", "resume", "sid", "-C", "/p"]
+    assert _YOLO not in build_codex_new_command("codex", Path("/p"))
+
+
+def test_build_codex_new_command_yolo_appends_bypass_flag():
+    cmd = build_codex_new_command("codex", Path("/p"), yolo=True)
+    assert cmd == ["codex", "-C", "/p", _YOLO]
+
+
+def test_build_codex_resume_command_yolo_prepends_before_subcommand():
+    # The bypass flag is a top-level option, so it must precede `resume`.
+    cmd = build_codex_resume_command("codex", "sid", Path("/p"), yolo=True)
+    assert cmd == ["codex", _YOLO, "resume", "sid", "-C", "/p"]
 
 
 def test_build_resume_command():

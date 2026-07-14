@@ -13,6 +13,8 @@ import tempfile
 import time
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -170,6 +172,142 @@ def session_has_child(session_name: str) -> bool | None:
         return process_has_child(int(pid))
     except (OSError, subprocess.CalledProcessError, ValueError):
         return None
+
+
+# A Codex rollout is stored as ``rollout-<timestamp>-<uuid>.jsonl``; the trailing
+# UUID is the session_id railmux binds a placeholder to (#12). Match the standard
+# 8-4-4-4-12 hex form anchored to the ``.jsonl`` suffix.
+_ROLLOUT_UUID_RE = re.compile(
+    r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$"
+)
+
+
+def pane_pid_for_session(session_name: str) -> int | None:
+    """Return the first pane's PID for *session_name*, or None.
+
+    railmux launches each agent as its own detached session with a single pane,
+    so the first pane PID is the login+interactive shell hosting the agent (the
+    real codex is a descendant of it — see :func:`descendant_pids`)."""
+    try:
+        out = subprocess.check_output(
+            ["tmux", "list-panes", "-t", session_name, "-F", "#{pane_pid}"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except (OSError, subprocess.CalledProcessError, UnicodeError):
+        return None
+    if not out:
+        return None
+    try:
+        return int(out.splitlines()[0])
+    except ValueError:
+        return None
+
+
+def proc_fs_available() -> bool:
+    """True when a Linux-style ``/proc`` with fd symlinks is present.
+
+    Correlation (#12) reads ``/proc/<pid>/fd/*``; macOS and other platforms
+    without procfs return False so callers fall back to the heuristic."""
+    return os.path.isdir("/proc")
+
+
+def descendant_pids(pid: int) -> list[int]:
+    """All transitive descendant PIDs of *pid* (breadth-first via ``pgrep -P``).
+
+    The real codex process is a grandchild of the pane PID (the pane runs
+    ``$SHELL -li -c 'exec codex …'``), so a single ``pgrep -P`` is not enough.
+    Returns an empty list on error or when there are no descendants. Never
+    raises."""
+    seen: list[int] = []
+    visited = {pid}
+    frontier = [pid]
+    while frontier:
+        nxt: list[int] = []
+        for p in frontier:
+            try:
+                res = subprocess.run(
+                    ["pgrep", "-P", str(p)],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            except OSError:
+                continue
+            if res.returncode != 0:
+                continue
+            for tok in res.stdout.decode(errors="ignore").split():
+                try:
+                    child = int(tok)
+                except ValueError:
+                    continue
+                if child not in visited:
+                    visited.add(child)
+                    seen.append(child)
+                    nxt.append(child)
+        frontier = nxt
+    return seen
+
+
+def open_rollout_uuids_for_pid(pid: int, sessions_dir: Path) -> set[str]:
+    """UUIDs of ``*.jsonl`` rollout files under *sessions_dir* that *pid* holds
+    open, read from ``/proc/<pid>/fd/*``.
+
+    Returns an empty set when the process is gone, ``/proc`` fd access is denied,
+    or nothing matches. Never raises — correlation is strictly best-effort."""
+    fd_dir = os.path.join("/proc", str(pid), "fd")
+    try:
+        fds = os.listdir(fd_dir)
+    except OSError:
+        return set()
+    root = os.path.realpath(sessions_dir)
+    ids: set[str] = set()
+    for fd in fds:
+        try:
+            target = os.readlink(os.path.join(fd_dir, fd))
+        except OSError:
+            continue
+        if not target.endswith(".jsonl"):
+            continue
+        real = os.path.realpath(target)
+        # Fence to the codex sessions dir so an unrelated open .jsonl elsewhere
+        # can never be mistaken for a rollout.
+        if real != root and not real.startswith(root + os.sep):
+            continue
+        m = _ROLLOUT_UUID_RE.search(os.path.basename(real))
+        if m:
+            ids.add(m.group(1))
+    return ids
+
+
+def session_rollout_ids(session_name: str, sessions_dir: Path) -> set[str] | None:
+    """Correlate *session_name*'s pane to the rollout UUID(s) its codex process
+    currently holds open under *sessions_dir* (#12).
+
+    This is the exact child→rollout link: railmux launched the placeholder in
+    this tmux session, the codex running in its pane holds its OWN rollout
+    ``*.jsonl`` open, and that file's UUID is the placeholder's real session_id.
+
+    Returns:
+      * ``None`` only when correlation is UNAVAILABLE on this PLATFORM (no
+        procfs, e.g. macOS) — the caller may then fall back to the heuristic;
+      * a set of UUIDs (possibly EMPTY) when procfs IS available. An empty set
+        means "correlation ran but codex hasn't opened its rollout fd yet (or
+        the pane pid isn't up yet)" — a TRANSIENT state; the caller must WAIT
+        for the next tick, NOT fall back (falling back could bind an unrelated
+        rollout that appeared first — the staggered race, #12).
+
+    Never raises."""
+    # Platform gate first: only a missing procfs is a true (permanent)
+    # unavailability. A not-yet-ready pane pid on a procfs system is transient.
+    if not proc_fs_available():
+        return None
+    pid = pane_pid_for_session(session_name)
+    if pid is None:
+        return set()  # transient: pane not up yet → caller waits, not fallback
+    ids: set[str] = set()
+    for p in (pid, *descendant_pids(pid)):
+        ids |= open_rollout_uuids_for_pid(p, sessions_dir)
+    return ids
 
 
 def current_pane_id() -> str | None:
@@ -457,7 +595,7 @@ def wait_window_user_option(target_window: str, name: str, value: str,
 
 _SCROLL_TABLES = ("copy-mode", "copy-mode-vi")
 _SCROLL_KEYS = ("WheelUpPane", "WheelDownPane")
-ScrollBindingBackup = dict[tuple[str, str], str | None]
+ScrollBindingBackup = dict[tuple[str, str], Optional[str]]
 
 
 def _read_key_binding(table: str, key: str) -> str | None:
@@ -632,11 +770,37 @@ def restore_scroll_bindings(backup: ScrollBindingBackup) -> None:
                 pass
 
 
-def new_detached_session(name: str, cmd: str) -> bool:
-    """Create a detached tmux session running `cmd`. Used for background claudes."""
+def new_detached_session(name: str, cmd: str,
+                         env: dict[str, str] | None = None) -> bool:
+    """Create a detached tmux session running `cmd`. Used for background claudes.
+
+    *env* entries are passed to tmux via ``-e KEY=VALUE`` so they land in the
+    session environment (inherited by the launched process). railmux uses this
+    only for the NON-secret ``CODEX_HOME``; provider API keys are deliberately
+    never passed here (tmux RETAINS ``-e`` values in the session environment,
+    queryable via ``tmux show-environment``, so ``-e`` would leak a secret just
+    as much as embedding it — see App._codex_env). The launched Codex runs under
+    a login+interactive shell that sources the user's profile and loads the key
+    the normal way.
+
+    ``-e`` on ``new-session`` requires tmux >= 3.0, so we gate on the detected
+    version rather than blindly retrying without env on ANY failure — a broad
+    retry would silently mask unrelated launch errors. On older tmux the env is
+    dropped (callers also carry non-secret values like CODEX_HOME in the command
+    string as a fallback); a genuine failure on a capable tmux now surfaces as a
+    returned ``False`` instead of being swallowed by the fallback path.
+    """
+    # `new-session -e KEY=VALUE` was added in tmux 3.2 (not 3.0/3.1).
+    use_env = bool(env) and tmux_version() >= (3, 2)
+    args = ["tmux", "new-session", "-d"]
+    if use_env and env:
+        for k, v in env.items():
+            args.extend(["-e", f"{k}={v}"])
+    args.extend(["-s", name, cmd])
+
     try:
         subprocess.check_call(
-            ["tmux", "new-session", "-d", "-s", name, cmd],
+            args,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )

@@ -7,7 +7,7 @@ name = "railmux"
 dynamic = ["version"]
 description = "Terminal UI to navigate, resume, and start Claude Code sessions across all your projects"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.9"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [
@@ -21,6 +21,9 @@ classifiers = [
   "Operating System :: POSIX :: Linux",
   "Operating System :: MacOS",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Topic :: Software Development",
@@ -29,6 +32,7 @@ classifiers = [
 ]
 dependencies = [
   "urwid>=2.6.16",
+  "tomli>=2.0.1; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]

@@ -303,3 +303,253 @@ def test_main_writes_to_stdout(tmp_path, capsys):
     captured = capsys.readouterr()
     assert "hi" in captured.out
     assert captured.err == ""
+
+
+# ── Codex format detection (issue #5) ────────────────────────────────────
+# The UI previews via ``tail -n 2000`` before piping into this module, so for
+# rollouts longer than 2000 lines the leading ``session_meta`` header is gone
+# and the first record seen is a ``response_item`` / ``event_msg`` /
+# ``turn_context``.  These must still be detected as Codex, not Claude.
+
+import io
+
+
+def test_codex_detected_without_session_meta_header():
+    """A Codex rollout whose first record is NOT session_meta still renders
+    as Codex (regression for the tail-truncated long-rollout case)."""
+    lines = [
+        json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "resumed answer"}],
+            },
+        }),
+        json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "a follow-up"}],
+            },
+        }),
+    ]
+    text = "\n".join(lines) + "\n"
+    joined = "".join(format_transcript(io.StringIO(text)))
+    # Rendered via the Codex path (would be blank under Claude parsing).
+    assert "resumed answer" in joined
+    assert "a follow-up" in joined
+    assert "Assistant" in joined
+    assert "User" in joined
+
+
+@pytest.mark.parametrize("first_type", ["event_msg", "turn_context"])
+def test_codex_detected_from_leading_lifecycle_record(first_type):
+    """A tail-truncated rollout can start with an event_msg / turn_context."""
+    lines = [
+        json.dumps({"type": first_type, "payload": {"type": "token_count"}}),
+        json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hello from codex"}],
+            },
+        }),
+    ]
+    text = "\n".join(lines) + "\n"
+    joined = "".join(format_transcript(io.StringIO(text)))
+    assert "hello from codex" in joined
+    assert "token_count" not in joined  # lifecycle noise still skipped
+
+
+def test_explicit_format_hint_forces_codex():
+    """An explicit ``fmt='codex'`` hint overrides auto-detection."""
+    line = json.dumps({
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "forced codex"}],
+        },
+    }) + "\n"
+    joined = "".join(format_transcript(io.StringIO(line), fmt="codex"))
+    assert "forced codex" in joined
+
+
+def test_explicit_format_hint_forces_claude():
+    """An explicit ``fmt='claude'`` hint keeps Claude parsing even if a
+    Codex-looking record leads (defensive back-compat)."""
+    line = json.dumps({
+        "type": "user",
+        "message": {"role": "user", "content": "claude msg"},
+    }) + "\n"
+    joined = "".join(format_transcript(io.StringIO(line), fmt="claude"))
+    assert "claude msg" in joined
+
+
+def test_main_accepts_format_flag(tmp_path, capsys):
+    jsonl = tmp_path / "codex.jsonl"
+    _write_jsonl(jsonl, [
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hi codex"}],
+            },
+        },
+    ])
+    main(["transcript", "--format", "codex", str(jsonl)])
+    captured = capsys.readouterr()
+    assert "hi codex" in captured.out
+
+
+# ── Codex tool-call rendering (issue #3) ──────────────────────────────────
+# Real rollouts are dominated by custom_tool_call / custom_tool_call_output;
+# function_call / function_call_output are the minority.  All four must render.
+
+def test_codex_custom_tool_call_and_output_render_and_pair():
+    lines = [
+        json.dumps({"type": "session_meta", "payload": {"id": "x", "cwd": "/tmp"}}),
+        json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": "call_ABC",
+                "input": "run ls -la",
+            },
+        }),
+        json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call_ABC",
+                "output": [
+                    {"type": "input_text", "text": "total 8\n"},
+                    {"type": "input_text", "text": "drwxr-xr-x\n"},
+                ],
+            },
+        }),
+    ]
+    text = "\n".join(lines) + "\n"
+    joined = "".join(format_transcript(io.StringIO(text)))
+    assert "───── Tool: exec ─────" in joined
+    assert "run ls -la" in joined
+    # Output rendered and attributed back to the call by call_id.
+    assert "Tool output: exec" in joined
+    assert "total 8" in joined
+    assert "drwxr-xr-x" in joined
+
+
+def test_codex_function_call_output_renders():
+    lines = [
+        json.dumps({"type": "session_meta", "payload": {"id": "x", "cwd": "/tmp"}}),
+        json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "shell",
+                "call_id": "call_XYZ",
+                "arguments": '{"cmd": "pwd"}',
+            },
+        }),
+        json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_XYZ",
+                "output": "/home/user\n",
+            },
+        }),
+    ]
+    text = "\n".join(lines) + "\n"
+    joined = "".join(format_transcript(io.StringIO(text)))
+    assert "───── Tool: shell ─────" in joined
+    assert "pwd" in joined
+    assert "Tool output: shell" in joined
+    assert "/home/user" in joined
+
+
+def test_codex_tool_output_string_form():
+    """Output may be a plain string rather than a list of blocks."""
+    lines = [
+        json.dumps({"type": "session_meta", "payload": {"id": "x", "cwd": "/tmp"}}),
+        json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "unknown_call",
+                "output": "plain string output",
+            },
+        }),
+    ]
+    text = "\n".join(lines) + "\n"
+    joined = "".join(format_transcript(io.StringIO(text)))
+    # No matching call recorded → generic label, but output still shown.
+    assert "plain string output" in joined
+    assert "Tool output" in joined
+
+
+def test_codex_tool_output_empty_skipped():
+    lines = [
+        json.dumps({"type": "session_meta", "payload": {"id": "x", "cwd": "/tmp"}}),
+        json.dumps({
+            "type": "response_item",
+            "payload": {"type": "custom_tool_call_output", "call_id": "c", "output": "   "},
+        }),
+        json.dumps({
+            "type": "response_item",
+            "payload": {"type": "custom_tool_call_output", "call_id": "c", "output": []},
+        }),
+    ]
+    text = "\n".join(lines) + "\n"
+    joined = "".join(format_transcript(io.StringIO(text)))
+    assert "Tool output" not in joined
+
+
+def test_codex_tool_call_output_truncates_long_output():
+    lines = [
+        json.dumps({"type": "session_meta", "payload": {"id": "x", "cwd": "/tmp"}}),
+        json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "c",
+                "output": "y" * 2000,
+            },
+        }),
+    ]
+    text = "\n".join(lines) + "\n"
+    joined = "".join(format_transcript(io.StringIO(text)))
+    assert "…" in joined
+    assert joined.count("y") < 2000  # truncated
+
+
+def test_transcript_skips_malformed_json_values():
+    text = "\n".join([
+        json.dumps([1, 2, 3]),
+        json.dumps({"type": "user", "message": "not-a-dict"}),
+        json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": "hello"},
+        }),
+    ])
+    assert "hello" in "".join(format_transcript(io.StringIO(text)))
+
+
+def test_transcript_unknown_prefix_does_not_force_claude_detection():
+    text = "\n".join([
+        json.dumps({"type": "future_codex_metadata", "payload": {}}),
+        json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "codex hello"}],
+            },
+        }),
+    ])
+    assert "codex hello" in "".join(format_transcript(io.StringIO(text)))

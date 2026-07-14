@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from railmux.atomic_file import atomic_write_text
+from railmux.atomic_file import atomic_write_text, migrate_from_ccmgr
 
 
 def _renames_path() -> Path:
@@ -28,6 +28,7 @@ class Renames:
         self._load()
 
     def _load(self) -> None:
+        migrate_from_ccmgr(self._path)
         if not self._path.is_file():
             return
         try:

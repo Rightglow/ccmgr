@@ -1,17 +1,23 @@
 """Tests for railmux.tmux_ctl — CLI wrappers (mocked, no real tmux needed)."""
 
 import subprocess
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+import railmux.tmux_ctl as tmux_ctl
 from railmux.tmux_ctl import (
     _bindings_are_tmux_defaults,
     _read_key_binding,
     _set_scroll_bindings,
+    descendant_pids,
     enable_clipboard_passthrough,
     install_scroll_bindings,
+    open_rollout_uuids_for_pid,
+    pane_pid_for_session,
     prepare_scroll_bindings,
     process_has_child,
     restore_scroll_bindings,
+    session_rollout_ids,
     set_window_border_style,
     set_window_user_option,
     session_has_child,
@@ -125,6 +131,100 @@ def test_session_pane_id_returns_first_pane():
 def test_session_pane_id_handles_empty_session():
     with _mock_check_output(""):
         assert session_pane_id("cc-example") is None
+
+
+# ── #12: exact child→rollout correlation via /proc ───────────────────────
+
+_UUID_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+_UUID_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+
+def test_pane_pid_for_session_reads_first_pane_pid():
+    with _mock_check_output("4242\n4243\n"):
+        assert pane_pid_for_session("cx-example") == 4242
+
+
+def test_pane_pid_for_session_handles_empty_and_error():
+    with _mock_check_output(""):
+        assert pane_pid_for_session("cx-example") is None
+    with patch("subprocess.check_output",
+               side_effect=subprocess.CalledProcessError(1, "tmux")):
+        assert pane_pid_for_session("cx-example") is None
+
+
+def test_descendant_pids_walks_transitively():
+    # 100 -> 200 -> 300 (codex is a grandchild of the pane shell).
+    def fake_run(argv, **kw):
+        parent = argv[2]
+        table = {"100": "200\n", "200": "300\n", "300": ""}
+        out = table.get(parent, "")
+        return MagicMock(returncode=0 if out else 1, stdout=out.encode())
+
+    with patch("subprocess.run", side_effect=fake_run):
+        assert descendant_pids(100) == [200, 300]
+
+
+def test_open_rollout_uuids_filters_to_sessions_dir(tmp_path):
+    sessions = tmp_path / "sessions"
+    good = sessions / "2026" / "07" / "14" / f"rollout-2026-{_UUID_A}.jsonl"
+    good.parent.mkdir(parents=True)
+    good.write_text("{}")
+    elsewhere = tmp_path / "other" / f"rollout-2026-{_UUID_B}.jsonl"
+    elsewhere.parent.mkdir(parents=True)
+    elsewhere.write_text("{}")
+    not_jsonl = sessions / "notes.txt"
+    not_jsonl.write_text("x")
+
+    links = {
+        "3": str(good),        # matching rollout under sessions dir
+        "4": str(elsewhere),   # a .jsonl OUTSIDE sessions dir → excluded
+        "5": str(not_jsonl),   # not a rollout → excluded
+    }
+    with patch("os.listdir", return_value=list(links)), \
+         patch("os.readlink", side_effect=lambda p: links[p.rsplit("/", 1)[1]]):
+        ids = open_rollout_uuids_for_pid(999, sessions)
+    assert ids == {_UUID_A}
+
+
+def test_open_rollout_uuids_handles_missing_proc():
+    with patch("os.listdir", side_effect=FileNotFoundError):
+        assert open_rollout_uuids_for_pid(999, Path("/nope")) == set()
+
+
+def test_session_rollout_ids_unions_pid_and_descendants(monkeypatch):
+    monkeypatch.setattr(tmux_ctl, "pane_pid_for_session", lambda name: 100)
+    monkeypatch.setattr(tmux_ctl, "proc_fs_available", lambda: True)
+    monkeypatch.setattr(tmux_ctl, "descendant_pids", lambda pid: [200, 300])
+    opened = {100: set(), 200: {_UUID_A}, 300: set()}
+    monkeypatch.setattr(tmux_ctl, "open_rollout_uuids_for_pid",
+                        lambda pid, d: opened[pid])
+    assert session_rollout_ids("cx-example", Path("/s")) == {_UUID_A}
+
+
+def test_session_rollout_ids_empty_when_pane_pid_not_ready(monkeypatch):
+    # procfs available but the pane pid isn't up yet → EMPTY set (transient),
+    # NOT None: the caller must WAIT, not fall back to the heuristic (#12).
+    monkeypatch.setattr(tmux_ctl, "proc_fs_available", lambda: True)
+    monkeypatch.setattr(tmux_ctl, "pane_pid_for_session", lambda name: None)
+    assert session_rollout_ids("cx-example", Path("/s")) == set()
+
+
+def test_session_rollout_ids_none_without_procfs(monkeypatch):
+    # macOS: no /proc → unavailable → caller falls back to the heuristic.
+    monkeypatch.setattr(tmux_ctl, "pane_pid_for_session", lambda name: 100)
+    monkeypatch.setattr(tmux_ctl, "proc_fs_available", lambda: False)
+    assert session_rollout_ids("cx-example", Path("/s")) is None
+
+
+def test_session_rollout_ids_empty_set_when_no_fd_open(monkeypatch):
+    # procfs present but codex hasn't opened its rollout yet → empty set. The
+    # caller must WAIT (not fall back) so it never binds an unrelated rollout.
+    monkeypatch.setattr(tmux_ctl, "pane_pid_for_session", lambda name: 100)
+    monkeypatch.setattr(tmux_ctl, "proc_fs_available", lambda: True)
+    monkeypatch.setattr(tmux_ctl, "descendant_pids", lambda pid: [])
+    monkeypatch.setattr(tmux_ctl, "open_rollout_uuids_for_pid",
+                        lambda pid, d: set())
+    assert session_rollout_ids("cx-example", Path("/s")) == set()
 
 
 def test_scroll_bindings_target_agent_and_keep_default_fallback():
@@ -319,3 +419,63 @@ def test_new_detached_session_survives_tmux_missing():
     from railmux.tmux_ctl import new_detached_session
     with patch("subprocess.check_call", side_effect=FileNotFoundError):
         assert new_detached_session("cc-abc", "claude") is False
+
+
+def test_new_detached_session_passes_env_via_tmux_e_flag():
+    """The non-secret CODEX_HOME is handed to tmux via ``-e KEY=VALUE`` (tmux
+    >= 3.2, when ``new-session -e`` was added) so it lands in the session
+    environment. railmux never passes a provider API key here (#8)."""
+    from railmux.tmux_ctl import new_detached_session
+    with patch("railmux.tmux_ctl.tmux_version", return_value=(3, 2)), \
+            patch("subprocess.check_call") as call:
+        assert new_detached_session(
+            "cx-abc", "exec codex",
+            env={"CODEX_HOME": "/home/u/.codex"},
+        ) is True
+    argvs = [c.args[0] for c in call.call_args_list]
+    new_session = next(a for a in argvs if a[:3] == ["tmux", "new-session", "-d"])
+    # -e pair is present, and precedes -s <name> <cmd>.
+    assert "-e" in new_session
+    assert "CODEX_HOME=/home/u/.codex" in new_session
+    assert new_session[-3:] == ["-s", "cx-abc", "exec codex"]
+
+
+def test_new_detached_session_drops_env_on_old_tmux():
+    """On tmux < 3.2 (no ``-e`` support — e.g. 3.1) the session is created
+    WITHOUT the env, and there is exactly one new-session call — no blind retry."""
+    from railmux.tmux_ctl import new_detached_session
+    calls = []
+
+    def fake_check_call(argv, **kw):
+        calls.append(argv)
+        return 0
+
+    with patch("railmux.tmux_ctl.tmux_version", return_value=(3, 1)), \
+            patch("subprocess.check_call", side_effect=fake_check_call):
+        assert new_detached_session("cx-abc", "exec codex",
+                                    env={"K": "v"}) is True
+    new_sessions = [a for a in calls if a[:3] == ["tmux", "new-session", "-d"]]
+    assert len(new_sessions) == 1
+    assert "-e" not in new_sessions[0]
+
+
+def test_new_detached_session_does_not_retry_on_real_failure():
+    """A genuine new-session failure on a capable tmux (>= 3.0) is surfaced as
+    False, NOT masked by a broad env-dropping retry (the previous behavior)."""
+    from railmux.tmux_ctl import new_detached_session
+    calls = []
+
+    def fake_check_call(argv, **kw):
+        calls.append(argv)
+        if argv[:3] == ["tmux", "new-session", "-d"]:
+            raise subprocess.CalledProcessError(1, "tmux")
+        return 0
+
+    with patch("railmux.tmux_ctl.tmux_version", return_value=(3, 3)), \
+            patch("subprocess.check_call", side_effect=fake_check_call):
+        assert new_detached_session("cx-abc", "exec codex",
+                                    env={"K": "v"}) is False
+    new_sessions = [a for a in calls if a[:3] == ["tmux", "new-session", "-d"]]
+    # Attempted exactly once (with -e); no second env-less retry.
+    assert len(new_sessions) == 1
+    assert "-e" in new_sessions[0]

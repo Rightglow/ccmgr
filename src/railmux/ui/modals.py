@@ -336,6 +336,51 @@ class DeleteConfirmModal(urwid.WidgetWrap):
         return key
 
 
+class YoloConfirmModal(urwid.WidgetWrap):
+    """First-time Codex prompt: offer to enable auto-run ("yolo") mode.
+
+    Only y/Y enables; Enter/n/N/Esc keeps it off. The dangerous choice never
+    has a default-key shortcut.
+    """
+
+    def __init__(self, on_confirm: Callable[[], None],
+                 on_cancel: Callable[[], None]) -> None:
+        self._on_confirm = on_confirm
+        self._on_cancel = on_cancel
+        rows = [
+            _Selectable(urwid.Text("Enable Codex auto-run (YOLO)?", align="center")),
+            _Selectable(urwid.Divider()),
+            _Selectable(urwid.Text(
+                "Codex will run shell commands WITHOUT approval prompts and "
+                "WITHOUT sandboxing — full access to your files. Only enable "
+                "this if you trust what you run here.", align="center")),
+            _Selectable(urwid.Divider()),
+            _Selectable(urwid.Text(
+                ("dim", "Change later in ~/.config/railmux/settings.json"),
+                align="center")),
+            _Selectable(urwid.Divider()),
+            _Selectable(urwid.Text(
+                ("dim", "y = enable,  Enter / n / Esc = keep off"), align="center")),
+        ]
+        self._listbox = urwid.ListBox(urwid.SimpleFocusListWalker(rows))
+        super().__init__(urwid.LineBox(self._listbox, title="Codex auto-run"))
+
+    def selectable(self) -> bool:
+        return True
+
+    def keypress(self, size, key):
+        if key in ("y", "Y"):
+            self._on_confirm()
+            return None
+        if key in ("n", "N", "esc", "enter"):
+            self._on_cancel()
+            return None
+        if key in ("up", "down"):
+            self._listbox.keypress(size, key)
+            return None
+        return key
+
+
 class RenameModal(urwid.WidgetWrap):
     """Inline rename popup. Enter submits the new title; Esc cancels."""
 

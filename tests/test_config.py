@@ -27,3 +27,20 @@ def test_load_full_override(tmp_path):
     cfg = load_config(config_path=p)
     assert cfg.claude_binary == "/usr/local/bin/claude"
     assert cfg.poll_interval_ms == 2000
+
+
+def test_resolved_codex_home_expands_user(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = Config(codex_home="~/.codex")
+    assert cfg.resolved_codex_home() == tmp_path / ".codex"
+
+
+def test_resolved_codex_home_honours_non_default(tmp_path):
+    cfg = Config(codex_home=str(tmp_path / "alt-codex"))
+    assert cfg.resolved_codex_home() == tmp_path / "alt-codex"
+
+
+def test_resolved_codex_home_makes_relative_path_absolute(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    cfg = Config(codex_home="state/codex")
+    assert cfg.resolved_codex_home() == tmp_path / "state" / "codex"

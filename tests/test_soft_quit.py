@@ -1,6 +1,8 @@
 """Tests for soft-quit feature: state file, orphan discovery, truncated ID
 resolution, QuitConfirmModal s-key, and teardown branching."""
 
+from __future__ import annotations
+
 import json
 import os
 from pathlib import Path
@@ -128,7 +130,7 @@ def test_save_state_always_writes_right_kind(tmp_path, monkeypatch):
     app._save_state()
     assert (tmp_path / "state.json").is_file()
     data = app._load_state()
-    assert data == {"right_kind": "empty"}
+    assert data == {"right_kind": "empty", "codex_mode": False}
 
 
 def test_save_state_with_claude_in_right_pane(tmp_path, monkeypatch):
@@ -152,6 +154,82 @@ def test_save_state_with_preview_in_right_pane(tmp_path, monkeypatch):
     data = app._load_state()
     assert data["right_kind"] == "preview"
     assert data["right_session"] == "abc123"
+
+
+def test_save_state_persists_codex_mode(tmp_path, monkeypatch):
+    """Restart must remember the last mode: _save_state records _codex_mode."""
+    monkeypatch.setattr(App, "_state_path", staticmethod(lambda: tmp_path / "state.json"))
+    app = _minimal_app(selected_project=_project("myproj"))
+    app._codex_mode = True
+    app._save_state()
+    data = app._load_state()
+    assert data["codex_mode"] is True
+
+
+def test_load_state_without_codex_mode_defaults_falsy(tmp_path, monkeypatch):
+    """Backward-compat: an old state file lacking codex_mode restores as Claude."""
+    p = tmp_path / "state.json"
+    p.write_text(json.dumps({"project": "-tmp-myproj", "right_kind": "empty"}))
+    app = _minimal_app()
+    with patch.object(App, "_state_path", return_value=p):
+        data = app._load_state()
+    assert not data.get("codex_mode")
+
+
+def test_enter_codex_mode_on_restore_applies_filter(monkeypatch):
+    """_enter_codex_mode_on_restore flips the mode, loads the Codex filter and
+    repaints the Projects pane with the Codex-visible set."""
+    app = App.__new__(App)
+    app._codex_mode = False
+    app._codex_index = MagicMock()
+    app._codex_index.all_cwds.return_value = {Path("/tmp/myproj"): 2}
+    app._projects_pane = MagicMock()
+    monkeypatch.setattr(app, "_visible_projects", lambda *a, **k: ["visible-proj"])
+
+    app._enter_codex_mode_on_restore()
+
+    assert app._codex_mode is True
+    assert app._codex_project_filter == {Path("/tmp/myproj"): 2}
+    app._projects_pane.set_projects.assert_called_once_with(["visible-proj"])
+
+
+def test_toggle_codex_mode_round_trip_uses_cached_snapshot(monkeypatch):
+    """A rapid Claude-Codex-Claude round trip never scans NFS on the UI path.
+
+    It paints the warm snapshot immediately and schedules one background refresh.
+    """
+    import time as _time
+    proj = _project("myproj")
+    app = App.__new__(App)
+    app._codex_mode = False
+    app._selected_project = None
+    app._project_snapshot = [proj]
+    snapshot_at = _time.monotonic()
+    app._project_snapshot_at = snapshot_at
+    app._running = {}
+    app._favorites = MagicMock()
+    app._favorites.get_ids.return_value = set()
+    app._projects_pane = MagicMock()
+    app._sessions_pane = MagicMock()
+    app._codex_index = MagicMock()
+    app._codex_project_filter = {proj.real_path: 1}
+    app._codex_index.sessions_for_cwd.return_value = []
+    app._session_cache = MagicMock()
+    app._session_cache.list_sessions.return_value = []
+    app._claude_home = Path.home() / ".claude"
+    schedule_refresh = MagicMock()
+    monkeypatch.setattr(app, "_apply_tmux_bar", lambda *a, **k: None)
+    monkeypatch.setattr(app, "_set_status", lambda *a, **k: None)
+    monkeypatch.setattr(app, "_schedule_mode_data_refresh", schedule_refresh)
+
+    with patch("railmux.ui.app.list_projects",
+               side_effect=AssertionError("toggle forced an NFS rescan")):
+        app._toggle_codex_mode()
+        app._toggle_codex_mode()
+
+    assert app._codex_mode is False
+    schedule_refresh.assert_called_once_with()
+    assert app._project_snapshot_at == snapshot_at
 
 
 def test_load_state_missing_file_returns_none():
@@ -187,6 +265,28 @@ def test_discover_orphans_finds_cc_sessions():
     assert full_id in app._running
     assert app._running[full_id].tmux_name == f"cc-{truncated}"
     assert app._running[full_id].project is proj
+
+
+def test_discover_orphans_finds_codex_only_project():
+    """A cx-* session without a Claude project is re-adopted through a
+    synthetic project built from the Codex index."""
+    cwd = Path("/tmp/codex-only")
+    full_id = "ae54affd-ec33-465c-b3c4-c1dc7c46990b"
+    truncated = App._safe_name(full_id, 16)
+    app = _minimal_app()
+    app._codex_index = MagicMock()
+    app._codex_index.all_cwds.return_value = {cwd: 1}
+    app._resolve_truncated_codex_id = MagicMock(return_value=full_id)
+
+    with patch("subprocess.check_output",
+               return_value=f"cx-{truncated}\t{cwd}\n"), \
+         patch("railmux.ui.app.list_projects", return_value=[]):
+        app._discover_orphans()
+
+    running = app._running[full_id]
+    assert running.session_type == "codex"
+    assert running.project.real_path == cwd
+    assert running.project.claude_dir == Path()
 
 
 def test_discover_orphans_skips_placeholder():
@@ -511,3 +611,334 @@ def test_resolve_placeholders_codex_keeps_placeholder_until_jsonl_appears():
 
     assert "__new__-1" in app._running
     assert app._running["__new__-1"].is_placeholder
+
+
+def test_consume_mode_refresh_swaps_both_indexes():
+    import threading
+    proj = _project()
+    index = MagicMock()
+    index.all_cwds.return_value = {proj.real_path: 2}
+    app = App.__new__(App)
+    app._mode_refresh_lock = threading.Lock()
+    app._mode_refresh_result = ([proj], index, None)
+    app._project_snapshot = None
+    app._project_snapshot_at = 0.0
+    app._codex_index = MagicMock()
+    app._codex_project_filter = {}
+
+    assert app._consume_mode_refresh() is True
+    assert app._project_snapshot == [proj]
+    assert app._project_snapshot_at > 0.0
+    assert app._codex_index is index
+    assert app._codex_project_filter == {proj.real_path: 2}
+
+
+def test_restore_codex_preview_uses_codex_index():
+    app = App.__new__(App)
+    app._codex_mode = True
+    app._selected_project = _project()
+    meta = MagicMock()
+    meta.session_id = "codex-session"
+    meta.jsonl_path = Path("/tmp/codex-rollout.jsonl")
+    app._codex_index = MagicMock()
+    app._codex_index.get.return_value = meta
+    app._session_cache = MagicMock()
+    app._show_transcript = MagicMock(return_value=True)
+    app._set_active_target = MagicMock()
+    app._in_history_mode = False
+
+    app._restore_right_pane({"right_kind": "preview", "right_session": meta.session_id})
+
+    app._codex_index.get.assert_called_once_with(meta.session_id)
+    app._session_cache.get.assert_not_called()
+    # Restore passes the explicit Codex format hint so a tailed long rollout
+    # renders correctly (#5), not just the path.
+    app._show_transcript.assert_called_once_with(
+        meta.jsonl_path, session_type=meta.session_type)
+    app._set_active_target.assert_called_once_with(meta.session_id, None)
+
+
+# ── #11: placeholder names are namespaced per process (no restart collision)
+
+def test_placeholder_names_are_process_namespaced():
+    """Two railmux processes (distinct per-process tokens) never generate the
+    same placeholder key OR tmux session name, even though each process's
+    counter restarts at 0 — so a fresh launch can't reuse a previous process's
+    placeholder name and hijack a surviving orphan tmux session (#11)."""
+    def _app(token: str):
+        app = App.__new__(App)
+        app._proc_token = token
+        app._new_session_counter = 0
+        app._codex_mode = True
+        return app
+
+    a, b = _app("aaaaaa"), _app("bbbbbb")
+    # First placeholder of each "process" — identical counter value.
+    ka, kb = a._new_placeholder_key(), b._new_placeholder_key()
+    assert ka != kb
+    assert ka.startswith("__new__-") and kb.startswith("__new__-")
+    # Still classified as placeholders.
+    assert _Running(key=ka, tmux_name="x", label="l").is_placeholder
+    # The token survives _safe_name's 16-char truncation, so the derived tmux
+    # session names differ too (the actual collision surface).
+    assert a._session_name(ka) != b._session_name(kb)
+    assert a._session_name(ka).startswith("cx-")
+
+
+def test_placeholder_counter_reset_still_unique_across_processes():
+    """Within one process the counter increments; across processes the token
+    differs — so `process A #1` and `process B #1` never collide."""
+    def _app(token: str):
+        app = App.__new__(App)
+        app._proc_token = token
+        app._new_session_counter = 0
+        app._codex_mode = False
+        return app
+
+    a, b = _app("a1b2c3"), _app("d4e5f6")
+    keys = {a._new_placeholder_key(), a._new_placeholder_key(),
+            b._new_placeholder_key(), b._new_placeholder_key()}
+    assert len(keys) == 4  # all distinct
+
+
+def test_placeholder_session_name_not_truncated_to_collision():
+    """High counters must not collapse to the same tmux name. Placeholders skip
+    the 16-char _safe_name truncation, so `__new__-<tok>-1000` and `-10000`
+    (which would both truncate to `...-100`) stay distinct (#11)."""
+    app = App.__new__(App)
+    app._proc_token = "abcdef"
+    app._codex_mode = True
+    app._new_session_counter = 999
+    k1 = app._new_placeholder_key()        # counter -> 1000
+    app._new_session_counter = 9999
+    k2 = app._new_placeholder_key()        # counter -> 10000
+    assert app._session_name(k1) != app._session_name(k2)
+
+
+# ── #12: placeholder never binds a pre-existing same-cwd rollout ──────────
+
+def test_resolve_placeholders_ignores_pre_existing_cwd_rollout():
+    """A rollout that existed in the launch cwd BEFORE this placeholder launched
+    (captured in pre_launch_ids) is never bound — even if it is the NEWEST
+    session in the cwd — so a placeholder can't hijack another process's
+    conversation written to the same cwd (#12)."""
+    proj = _project()
+    pre_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    new_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    app = App.__new__(App)
+    app._codex_mode = True
+    app._right_pane_claude = None
+    app._running = {
+        "__new__-tok-1": _Running(
+            key="__new__-tok-1", tmux_name="cx-new---tok-1",
+            label="test-proj/(new)", project=proj,
+            placeholder_path=proj.real_path, created_at=999.0,
+            pre_launch_ids=frozenset({pre_id}),
+        )
+    }
+    app._codex_index = MagicMock()
+    # pre_id is the NEWEST session in the cwd; without the fix it would win.
+    app._codex_index.sessions_for_cwd.return_value = [
+        _codex_session(proj, pre_id, mtime=2000.0),
+        _codex_session(proj, new_id, mtime=1001.0),
+    ]
+
+    app._resolve_placeholders([proj])
+
+    assert pre_id not in app._running                  # never bound
+    assert new_id in app._running                      # our real session bound
+    assert "__new__-tok-1" not in app._running
+    assert not app._running[new_id].is_placeholder
+
+
+def test_resolve_placeholders_ambiguous_new_rollouts_not_bound():
+    """If TWO new rollouts appear in the launch cwd since our launch, a
+    concurrent codex/railmux is writing there and we can't tell which is ours —
+    the placeholder stays unresolved rather than binding the wrong one (#12)."""
+    proj = _project()
+    app = App.__new__(App)
+    app._codex_mode = True
+    app._right_pane_claude = None
+    app._running = {
+        "__new__-tok-1": _Running(
+            key="__new__-tok-1", tmux_name="cx-new----tok-1",
+            label="test-proj/(new)", project=proj,
+            placeholder_path=proj.real_path, created_at=999.0,
+            pre_launch_ids=frozenset(),
+        )
+    }
+    app._codex_index = MagicMock()
+    # Two brand-new rollouts, both post-launch, both unclaimed → ambiguous.
+    app._codex_index.sessions_for_cwd.return_value = [
+        _codex_session(proj, "aaaa1111-0000-0000-0000-000000000000", mtime=1001.0),
+        _codex_session(proj, "bbbb2222-0000-0000-0000-000000000000", mtime=1002.0),
+    ]
+
+    app._resolve_placeholders([proj])
+
+    # Nothing bound; placeholder preserved (safer than mis-binding).
+    assert "__new__-tok-1" in app._running
+    assert app._running["__new__-tok-1"].is_placeholder
+
+
+def test_resolve_placeholders_correlation_binds_exact_rollout(monkeypatch):
+    """Staggered race (#12): our OWN rollout AND an unrelated newer rollout both
+    appear in the launch cwd, so both are candidates. The heuristic would refuse
+    (ambiguous). Exact child→rollout correlation — the codex process in the
+    placeholder's pane holds OUR rollout open — binds THAT id, not the newer one.
+    """
+    proj = _project()
+    ours = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    unrelated = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    app = App.__new__(App)
+    app._codex_mode = True
+    app._right_pane_claude = None
+    app._running = {
+        "__new__-tok-1": _Running(
+            key="__new__-tok-1", tmux_name="cx-new----tok-1",
+            label="test-proj/(new)", project=proj,
+            placeholder_path=proj.real_path, created_at=999.0,
+            session_type="codex",
+        )
+    }
+    app._codex_index = MagicMock()
+    app._codex_index.sessions_for_cwd.return_value = [
+        _codex_session(proj, unrelated, mtime=1002.0),  # newer, NOT ours
+        _codex_session(proj, ours, mtime=1001.0),
+    ]
+    # Correlation resolves the pane's codex process to OUR rollout fd.
+    app._correlate_codex_rollout = lambda r: {ours}
+
+    app._resolve_placeholders([proj])
+
+    assert ours in app._running and not app._running[ours].is_placeholder
+    assert unrelated not in app._running          # newer rollout NOT mis-bound
+    assert "__new__-tok-1" not in app._running
+
+
+def test_resolve_placeholders_correlation_waits_when_id_not_yet_candidate(monkeypatch):
+    """Correlation KNOWS the exact rollout, but it isn't a bindable candidate
+    yet (index lag). Even though an unrelated single rollout is present (which
+    the heuristic would bind), we WAIT rather than let the heuristic mis-bind.
+    """
+    proj = _project()
+    ours = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    unrelated = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    app = App.__new__(App)
+    app._codex_mode = True
+    app._right_pane_claude = None
+    app._running = {
+        "__new__-tok-1": _Running(
+            key="__new__-tok-1", tmux_name="cx-new----tok-1",
+            label="test-proj/(new)", project=proj,
+            placeholder_path=proj.real_path, created_at=999.0,
+            session_type="codex",
+        )
+    }
+    app._codex_index = MagicMock()
+    # Only the unrelated rollout is indexed so far; ours (held open) isn't yet.
+    app._codex_index.sessions_for_cwd.return_value = [
+        _codex_session(proj, unrelated, mtime=1001.0),
+    ]
+    app._correlate_codex_rollout = lambda r: {ours}
+
+    app._resolve_placeholders([proj])
+
+    assert "__new__-tok-1" in app._running          # left unresolved
+    assert app._running["__new__-tok-1"].is_placeholder
+    assert unrelated not in app._running            # heuristic did NOT bind it
+
+
+def test_resolve_placeholders_falls_back_to_heuristic_when_no_correlation(monkeypatch):
+    """Correlation unavailable (None: no procfs/macOS, no pane pid, no fd yet) →
+    the existing exactly-one heuristic still binds the single new rollout, so the
+    #12 fix never regresses the interactive default on platforms without /proc.
+    """
+    proj = _project()
+    real_id = "12345678-1234-1234-1234-1234567890ab"
+    app = App.__new__(App)
+    app._codex_mode = True
+    app._right_pane_claude = None
+    app._running = {
+        "__new__-tok-1": _Running(
+            key="__new__-tok-1", tmux_name="cx-new----tok-1",
+            label="test-proj/(new)", project=proj,
+            placeholder_path=proj.real_path, created_at=999.0,
+            session_type="codex",
+        )
+    }
+    app._codex_index = MagicMock()
+    app._codex_index.sessions_for_cwd.return_value = [
+        _codex_session(proj, real_id, mtime=1000.0)
+    ]
+    app._correlate_codex_rollout = lambda r: None   # correlation unavailable
+
+    app._resolve_placeholders([proj])
+
+    assert real_id in app._running and not app._running[real_id].is_placeholder
+    assert "__new__-tok-1" not in app._running
+
+
+def test_resolve_placeholders_empty_correlation_waits_not_fallback(monkeypatch):
+    """procfs available but codex hasn't opened its rollout fd YET (correlation
+    returns an empty set), while an unrelated rollout already appeared. We must
+    WAIT — NOT fall back to the heuristic, which would mis-bind the unrelated
+    one (the staggered race codex flagged, #12)."""
+    proj = _project()
+    unrelated = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    app = App.__new__(App)
+    app._codex_mode = True
+    app._right_pane_claude = None
+    app._running = {
+        "__new__-tok-1": _Running(
+            key="__new__-tok-1", tmux_name="cx-new----tok-1",
+            label="test-proj/(new)", project=proj,
+            placeholder_path=proj.real_path, created_at=999.0,
+            session_type="codex",
+        )
+    }
+    app._codex_index = MagicMock()
+    app._codex_index.sessions_for_cwd.return_value = [
+        _codex_session(proj, unrelated, mtime=1001.0),
+    ]
+    app._correlate_codex_rollout = lambda r: set()  # procfs, but no fd open yet
+
+    app._resolve_placeholders([proj])
+
+    assert "__new__-tok-1" in app._running          # waited, not bound
+    assert app._running["__new__-tok-1"].is_placeholder
+    assert unrelated not in app._running            # heuristic did NOT fire
+
+
+def test_correlate_codex_rollout_degrades_without_config():
+    """The helper must never raise into the UI: a bare App (no _config) yields
+    None so resolution falls back to the heuristic."""
+    app = App.__new__(App)
+    r = _Running(key="__new__-tok-1", tmux_name="cx-x", label="l",
+                 session_type="codex")
+    assert app._correlate_codex_rollout(r) is None
+
+
+def test_launch_snapshots_pre_existing_ids(monkeypatch):
+    """_launch captures the cwd's existing session ids into the placeholder's
+    pre_launch_ids before starting the child (#12)."""
+    proj = _project()
+    existing = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    app = App.__new__(App)
+    app._running = {}
+    app._set_status = lambda *a, **k: None
+    app._codex_index = MagicMock()
+    app._codex_index.sessions_for_cwd.return_value = [
+        _codex_session(proj, existing, mtime=5.0)]
+    app._shellify = lambda *a, **k: "SHELLCMD"
+    app._ensure_detached_claude = lambda *a, **k: True
+    app._attach_in_right_pane = lambda *a, **k: True
+    app._session_name = lambda key: "cx-abc"
+
+    assert app._launch("__new__-tok-1", ["codex"], proj.real_path, "l", proj,
+                       placeholder_path=proj.real_path, session_type="codex")
+    entry = app._running["__new__-tok-1"]
+    assert entry.pre_launch_ids == frozenset({existing})
+    # Snapshot taken with a fresh scan of the cwd.
+    app._codex_index.sessions_for_cwd.assert_called_once_with(
+        proj.real_path, refresh=True)

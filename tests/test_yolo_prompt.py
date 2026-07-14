@@ -1,0 +1,87 @@
+"""Tests for the first-time Codex auto-run (yolo) prompt in App."""
+from __future__ import annotations
+
+from unittest.mock import MagicMock
+
+from railmux.settings import Settings
+from railmux.ui.app import App
+from railmux.ui.modals import YoloConfirmModal
+
+
+def _app(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "railmux.settings._settings_path", lambda: tmp_path / "settings.json")
+    app = App.__new__(App)
+    app._loop = object()          # non-None → UI is up
+    app._settings = Settings()
+    app._show_overlay = MagicMock()
+    app._close_modal = MagicMock()
+    app._set_status = MagicMock()
+    return app
+
+
+def test_prompt_shown_first_time(tmp_path, monkeypatch):
+    app = _app(tmp_path, monkeypatch)
+    app._maybe_prompt_codex_yolo()
+    app._show_overlay.assert_called_once()
+    assert isinstance(app._show_overlay.call_args[0][0], YoloConfirmModal)
+
+
+def test_confirm_enables_yolo_and_marks_prompted(tmp_path, monkeypatch):
+    app = _app(tmp_path, monkeypatch)
+    app._maybe_prompt_codex_yolo()
+    app._show_overlay.call_args[0][0]._on_confirm()
+    assert app._settings.codex_yolo is True
+    assert app._settings.codex_yolo_prompted is True
+    # Persisted: a fresh store sees it too.
+    assert Settings().codex_yolo is True
+
+
+def test_decline_marks_prompted_but_keeps_yolo_off(tmp_path, monkeypatch):
+    app = _app(tmp_path, monkeypatch)
+    app._maybe_prompt_codex_yolo()
+    app._show_overlay.call_args[0][0]._on_cancel()
+    assert app._settings.codex_yolo is False
+    assert app._settings.codex_yolo_prompted is True
+
+
+def test_not_shown_again_once_prompted(tmp_path, monkeypatch):
+    app = _app(tmp_path, monkeypatch)
+    app._settings.mark_codex_yolo_prompted()
+    app._maybe_prompt_codex_yolo()
+    app._show_overlay.assert_not_called()
+
+
+def test_no_prompt_without_loop(tmp_path, monkeypatch):
+    app = _app(tmp_path, monkeypatch)
+    app._loop = None
+    app._maybe_prompt_codex_yolo()
+    app._show_overlay.assert_not_called()
+
+
+def test_enter_keeps_yolo_off():
+    confirm = MagicMock()
+    cancel = MagicMock()
+    modal = YoloConfirmModal(on_confirm=confirm, on_cancel=cancel)
+    assert modal.keypress((80,), "enter") is None
+    confirm.assert_not_called()
+    cancel.assert_called_once_with()
+
+
+def test_failed_persistence_does_not_enable_yolo(tmp_path, monkeypatch):
+    app = _app(tmp_path, monkeypatch)
+
+    def fail_write(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("railmux.settings.atomic_write_text", fail_write)
+    app._maybe_prompt_codex_yolo()
+    modal = app._show_overlay.call_args[0][0]
+    modal._on_confirm()
+    assert app._settings.codex_yolo is False
+    assert app._settings.codex_yolo_prompted is False
+    app._close_modal.assert_called_once_with()
+    app._set_status.assert_called_once_with(
+        "Could not save Codex auto-run choice; settings unchanged.",
+        "error",
+    )

@@ -25,13 +25,25 @@ _SKIP_TYPES = frozenset({
     "system", "ai-title", "last-prompt", "summary",
 })
 
+# Top-level record types that only ever appear in a Codex rollout JSONL.  The
+# preview pipeline in the UI runs ``tail -n 2000`` before piping into this
+# module, so for rollouts longer than 2000 lines the leading ``session_meta``
+# header is dropped and the first record seen here is a ``response_item`` /
+# ``event_msg`` / ``turn_context``.  Detect Codex by the *presence* of any of
+# these types rather than by a leading ``session_meta`` (see issue #5).
+_CODEX_TYPES = frozenset({
+    "session_meta", "response_item", "event_msg", "turn_context",
+    "compacted", "world_state",
+})
+_CLAUDE_TYPES = _SKIP_TYPES | frozenset({"user", "assistant"})
+
 
 def _is_real_user(record: dict) -> bool:
     """True when *record* is a genuine user message (not a synthetic tool-result)."""
     if record.get("type") != "user":
         return False
     msg = record.get("message")
-    if not msg or msg.get("role") != "user":
+    if not isinstance(msg, dict) or msg.get("role") != "user":
         return False
     content = msg.get("content", "")
     if isinstance(content, str):
@@ -45,7 +57,10 @@ def _is_real_user(record: dict) -> bool:
     if isinstance(content, list):
         # A user message whose content is a list of blocks — treat as real
         # only when at least one block is *not* a tool_result.
-        return any(b.get("type") != "tool_result" for b in content)
+        return any(
+            isinstance(block, dict) and block.get("type") != "tool_result"
+            for block in content
+        )
     return False
 
 
@@ -58,23 +73,32 @@ def _render_user(record: dict) -> str | None:
     # Mixed blocks — emit text blocks only (tool_result blocks are noise).
     parts = [header]
     for block in content:
-        if block.get("type") == "text" and block.get("text", "").strip():
+        if (isinstance(block, dict) and block.get("type") == "text"
+                and isinstance(block.get("text"), str)
+                and block["text"].strip()):
             parts.append(block["text"].strip() + "\n")
     return "".join(parts) if len(parts) > 1 else None
 
 
 def _render_assistant_blocks(record: dict):
     """Yield formatted strings for each display-worthy block in an assistant message."""
-    content = record.get("message", {}).get("content")
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return
+    content = message.get("content")
     if not isinstance(content, list):
         return
 
-    usage = record.get("message", {}).get("usage", {})
+    usage = message.get("usage", {})
+    if not isinstance(usage, dict):
+        usage = {}
     tokens = None
     if usage:
         tokens = usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
 
     for block in content:
+        if not isinstance(block, dict):
+            continue
         bt = block.get("type", "")
         if bt == "text":
             token_str = f"  ({tokens:,} tokens)" if tokens else ""
@@ -92,10 +116,15 @@ def _render_assistant_blocks(record: dict):
                 yield f"  {DIM}{key}:{RESET} {val_str}\n"
 
 
-def format_transcript(source: Path | object):
+def format_transcript(source: Path | object, fmt: str | None = None):
     """Read a session JSONL and yield ANSI-formatted strings.
 
     *source* may be a ``Path`` or any file-like object (e.g. ``sys.stdin``).
+
+    *fmt* is an optional explicit format hint (``"codex"`` or ``"claude"``).
+    When omitted (the default), the format is auto-detected from the record
+    types actually present in the stream, so a Codex rollout whose leading
+    ``session_meta`` header was stripped by ``tail`` still renders as Codex.
 
     Callers should write each chunk to stdout, e.g.::
 
@@ -106,6 +135,13 @@ def format_transcript(source: Path | object):
     fh = None
     # When True we're rendering a Codex rollout JSONL; when False, Claude.
     _codex: bool | None = None
+    if fmt == "codex":
+        _codex = True
+    elif fmt == "claude":
+        _codex = False
+    # call_id -> tool name, so Codex tool outputs can be labelled with the
+    # call that produced them (issue #3).
+    codex_calls: dict[str, str] = {}
     try:
         if isinstance(source, Path):
             fh = open(source, "r", encoding="utf-8")
@@ -120,15 +156,24 @@ def format_transcript(source: Path | object):
                 record = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(record, dict):
+                continue
 
             rtype = record.get("type", "")
 
-            # -- auto-detect format on first record ---------------------
+            # Unknown metadata should not lock detection to Claude: a tailed
+            # Codex rollout can begin with a future record type before the next
+            # response_item/event_msg establishes the format.
             if _codex is None:
-                _codex = rtype == "session_meta"
+                if rtype in _CODEX_TYPES:
+                    _codex = True
+                elif rtype in _CLAUDE_TYPES:
+                    _codex = False
+                else:
+                    continue
 
             if _codex:
-                yield from _render_codex(record)
+                yield from _render_codex(record, codex_calls)
                 continue
 
             # -- Claude format (legacy) --------------------------------
@@ -151,19 +196,27 @@ def format_transcript(source: Path | object):
 # ── Codex format rendering ──────────────────────────────────────────────
 
 
-def _render_codex(record: dict):
-    """Dispatch a single Codex JSONL record to the right renderer."""
+def _render_codex(record: dict, calls: dict[str, str] | None = None):
+    """Dispatch a single Codex JSONL record to the right renderer.
+
+    *calls* accumulates ``call_id -> tool name`` so that tool-output records
+    can be attributed back to the call that produced them.
+    """
+    if calls is None:
+        calls = {}
     rtype = record.get("type", "")
     if rtype == "session_meta":
         yield from _render_codex_session_meta(record)
     elif rtype == "response_item":
-        yield from _render_codex_response_item(record)
+        yield from _render_codex_response_item(record, calls)
     # event_msg, turn_context — skip (token counts, lifecycle noise)
 
 
 def _render_codex_session_meta(record: dict):
     """Show session metadata as a header."""
     payload = record.get("payload", {}) or {}
+    if not isinstance(payload, dict):
+        return
     sid = payload.get("id", "?")
     cwd = payload.get("cwd", "?")
     version = payload.get("cli_version", "")
@@ -178,14 +231,25 @@ def _render_codex_session_meta(record: dict):
         yield "\n"
 
 
-def _render_codex_response_item(record: dict):
-    """Render a response_item — message, function_call, or function_call_output."""
+def _render_codex_response_item(record: dict, calls: dict[str, str] | None = None):
+    """Render a response_item.
+
+    Handles ``message`` plus both tool-call families:
+    ``function_call`` / ``function_call_output`` and the (far more common)
+    ``custom_tool_call`` / ``custom_tool_call_output`` — see issue #3.
+    """
+    if calls is None:
+        calls = {}
     payload = record.get("payload", {}) or {}
+    if not isinstance(payload, dict):
+        return
     pt = payload.get("type", "")
     if pt == "message":
         yield from _render_codex_message(payload)
-    elif pt == "function_call":
-        yield from _render_codex_function_call(payload)
+    elif pt in ("function_call", "custom_tool_call"):
+        yield from _render_codex_tool_call(payload, calls)
+    elif pt in ("function_call_output", "custom_tool_call_output"):
+        yield from _render_codex_tool_output(payload, calls)
 
 
 def _render_codex_message(payload: dict):
@@ -217,16 +281,62 @@ def _render_codex_message(payload: dict):
     # role == "tool" — skip (tool results)
 
 
-def _render_codex_function_call(payload: dict):
-    """Render a tool / function call."""
+def _truncate(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit] + f"{DIM}…{RESET}"
+
+
+def _render_codex_tool_call(payload: dict, calls: dict[str, str]):
+    """Render a ``function_call`` or ``custom_tool_call``.
+
+    ``function_call`` carries its parameters in ``arguments`` (a JSON string);
+    ``custom_tool_call`` carries them in ``input``.  The ``call_id`` is recorded
+    so the matching output can be attributed back to this call.
+    """
     name = payload.get("name", "?")
-    arguments = payload.get("arguments", "")
+    call_id = payload.get("call_id")
+    if isinstance(call_id, str) and call_id:
+        calls[call_id] = name
     yield f"\n{YELLOW}{BOLD}───── Tool: {name} ─────{RESET}\n"
+    arguments = payload.get("arguments")
+    if arguments is None:
+        arguments = payload.get("input")
     if arguments:
-        arg_str = str(arguments)
-        if len(arg_str) > 300:
-            arg_str = arg_str[:300] + f"{DIM}…{RESET}"
-        yield f"  {DIM}args:{RESET} {arg_str}\n"
+        yield f"  {DIM}args:{RESET} {_truncate(str(arguments), 300)}\n"
+
+
+def _codex_output_text(output) -> str:
+    """Flatten a Codex tool-output value into plain text.
+
+    ``output`` is either a plain string or a list of ``{type, text}`` blocks.
+    """
+    if isinstance(output, str):
+        return output
+    if isinstance(output, list):
+        parts: list[str] = []
+        for block in output:
+            if isinstance(block, dict):
+                text = block.get("text")
+                if isinstance(text, str) and text:
+                    parts.append(text)
+            elif isinstance(block, str) and block:
+                parts.append(block)
+        return "".join(parts)
+    return ""
+
+
+def _render_codex_tool_output(payload: dict, calls: dict[str, str]):
+    """Render a ``function_call_output`` / ``custom_tool_call_output``.
+
+    Paired to the originating call via ``call_id`` where available.
+    """
+    text = _codex_output_text(payload.get("output")).strip()
+    if not text:
+        return
+    call_id = payload.get("call_id")
+    name = calls.pop(call_id, None) if isinstance(call_id, str) else None
+    label = f"Tool output: {name}" if name else "Tool output"
+    yield f"\n{DIM}───── {label} ─────{RESET}\n"
+    yield _truncate(text, 500) + "\n"
 
 
 # ── CLI entry point ──────────────────────────────────────────────────────
@@ -234,19 +344,35 @@ def _render_codex_function_call(payload: dict):
 def main(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv
-    if len(argv) < 2:
-        print("Usage: python3 -m railmux.transcript <jsonl_path|- for stdin>", file=sys.stderr)
+    # Optional explicit format hint: ``--format codex|claude`` (or ``--format=…``).
+    # Kept back-compatible: when absent the format is auto-detected.
+    fmt: str | None = None
+    args: list[str] = []
+    it = iter(argv[1:])
+    for tok in it:
+        if tok == "--format":
+            fmt = next(it, None)
+        elif tok.startswith("--format="):
+            fmt = tok.split("=", 1)[1]
+        else:
+            args.append(tok)
+    if not args:
+        print(
+            "Usage: python3 -m railmux.transcript [--format codex|claude] "
+            "<jsonl_path|- for stdin>",
+            file=sys.stderr,
+        )
         sys.exit(1)
-    source = argv[1]
+    source = args[0]
     if source == "-":
-        for chunk in format_transcript(sys.stdin):
+        for chunk in format_transcript(sys.stdin, fmt):
             sys.stdout.write(chunk)
     else:
         jsonl_path = Path(source)
         if not jsonl_path.exists():
             print(f"File not found: {jsonl_path}", file=sys.stderr)
             sys.exit(1)
-        for chunk in format_transcript(jsonl_path):
+        for chunk in format_transcript(jsonl_path, fmt):
             sys.stdout.write(chunk)
 
 

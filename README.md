@@ -26,9 +26,10 @@ Railmux replaces all of that with a single keystroke:
 
 ```bash
 pip install railmux
+# or: pip3 install railmux
 ```
 
-Requires Python 3.12+, `tmux`, and `less` on `PATH`.
+Requires Python 3.9+, `tmux`, and `less` on `PATH`.
 
 ## Run
 
@@ -175,28 +176,29 @@ cover every operation and don't depend on a fast redraw.
 hooks, CI) are filtered automatically — railmux only shows interactive
 sessions (`codex-tui`, `codex_cli_rs`).
 
-**Claude Code**: if you use a Codex skill that calls `claude -p` to review
-code, those sessions land in `~/.claude/projects/` alongside your normal
-conversations, and Claude's session format doesn't tag them as automated.
-To keep them separate, set a different data directory for the automation
-calls so they write elsewhere:
+**Claude Code**: for one-shot automated reviews, disable session persistence so
+the consultation never appears in `/resume`:
 
 ```bash
-# Automation reviews use their own directory — won't appear in railmux
-claude -p "review this diff" --user-data-dir ~/.claude-automation
+# Print mode only; the review is not saved as a resumable session
+claude -p --no-session-persistence "review this diff"
 ```
 
-Then your normal `~/.claude` stays clean for interactive sessions only.
+(`--no-session-persistence` is a Claude Code print-mode option.)
 
-### 5. pip install fails with "externally-managed-environment"
+### 5. pip reports "externally-managed-environment"
 
-Use `pipx` (recommended) or pass `--break-system-packages`:
+Create a virtual environment, then install Railmux with that environment's
+`pip`. This works on macOS, Linux, and WSL without modifying the system Python:
 
 ```bash
-pipx install railmux
-# or
-pip install --break-system-packages railmux
+python3 -m venv ~/.venvs/railmux
+source ~/.venvs/railmux/bin/activate
+pip install railmux
 ```
+
+`pipx install railmux` is an optional convenience for a globally available CLI;
+it is not required on macOS or any other platform.
 
 ## Acknowledgements
 

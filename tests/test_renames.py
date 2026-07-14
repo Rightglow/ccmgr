@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -77,7 +78,11 @@ def test_codex_rename_does_not_pollute_rollout_file(tmp_path, monkeypatch):
     from railmux.renames import Renames
     from railmux.ui.app import App
 
-    # Build a minimal App with the Renames sidecar wired in.
+    # Build a minimal App with the Renames sidecar wired in.  Point the
+    # sidecar at tmp_path — Renames() otherwise writes the real user config
+    # (~/.config/railmux/renames.json), polluting it with "sid-codex".
+    monkeypatch.setattr("railmux.renames._renames_path",
+                        lambda: tmp_path / "renames.json")
     app = App.__new__(App)
     app._renames = Renames()
     app._session_cache = MagicMock()
@@ -127,7 +132,7 @@ def test_codex_rename_does_not_pollute_rollout_file(tmp_path, monkeypatch):
     assert st[0] == "Renamed to: New Codex Name"
 
 
-def test_claude_rename_still_writes_jsonl_echo(tmp_path):
+def test_claude_rename_still_writes_jsonl_echo(tmp_path, monkeypatch):
     """Claude session rename still appends the ai-title to the JSONL (regression)."""
     from unittest.mock import MagicMock
 
@@ -135,6 +140,9 @@ def test_claude_rename_still_writes_jsonl_echo(tmp_path):
     from railmux.renames import Renames
     from railmux.ui.app import App
 
+    # Sidecar to tmp_path so Renames() doesn't pollute the real user config.
+    monkeypatch.setattr("railmux.renames._renames_path",
+                        lambda: tmp_path / "renames.json")
     app = App.__new__(App)
     app._renames = Renames()
     app._session_cache = MagicMock()
@@ -171,3 +179,32 @@ def test_claude_rename_still_writes_jsonl_echo(tmp_path):
     content = jsonl.read_text()
     assert '{"existing":"content"}' in content
     assert '\"aiTitle\": \"New Claude Name\"' in content
+
+
+# ── ccmgr → railmux one-time config migration ────────────────────────────
+
+def test_migrates_legacy_ccmgr_renames(tmp_path, monkeypatch):
+    """On first load, renames under the legacy ~/.config/ccmgr/ are migrated to
+    ~/.config/railmux/ so they survive the package rename."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    legacy = tmp_path / ".config" / "ccmgr" / "renames.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text('{"sid-1": "Kept Title"}')
+
+    store = Renames()  # real _renames_path() → tmp/.config/railmux/renames.json
+    assert store.get("sid-1") == "Kept Title"
+    assert (tmp_path / ".config" / "railmux" / "renames.json").is_file()
+
+
+def test_migration_never_overwrites_existing_railmux_config(tmp_path, monkeypatch):
+    """One-time only: an existing railmux file is never replaced by the legacy one."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / ".config" / "railmux").mkdir(parents=True)
+    (tmp_path / ".config" / "railmux" / "renames.json").write_text('{"sid-2": "New"}')
+    legacy = tmp_path / ".config" / "ccmgr" / "renames.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text('{"sid-1": "Legacy"}')
+
+    store = Renames()
+    assert store.get("sid-2") == "New"    # railmux file kept
+    assert store.get("sid-1") is None     # legacy NOT merged in
