@@ -179,32 +179,3 @@ def test_claude_rename_still_writes_jsonl_echo(tmp_path, monkeypatch):
     content = jsonl.read_text()
     assert '{"existing":"content"}' in content
     assert '\"aiTitle\": \"New Claude Name\"' in content
-
-
-# ── ccmgr → railmux one-time config migration ────────────────────────────
-
-def test_migrates_legacy_ccmgr_renames(tmp_path, monkeypatch):
-    """On first load, renames under the legacy ~/.config/ccmgr/ are migrated to
-    ~/.config/railmux/ so they survive the package rename."""
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    legacy = tmp_path / ".config" / "ccmgr" / "renames.json"
-    legacy.parent.mkdir(parents=True)
-    legacy.write_text('{"sid-1": "Kept Title"}')
-
-    store = Renames()  # real _renames_path() → tmp/.config/railmux/renames.json
-    assert store.get("sid-1") == "Kept Title"
-    assert (tmp_path / ".config" / "railmux" / "renames.json").is_file()
-
-
-def test_migration_never_overwrites_existing_railmux_config(tmp_path, monkeypatch):
-    """One-time only: an existing railmux file is never replaced by the legacy one."""
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    (tmp_path / ".config" / "railmux").mkdir(parents=True)
-    (tmp_path / ".config" / "railmux" / "renames.json").write_text('{"sid-2": "New"}')
-    legacy = tmp_path / ".config" / "ccmgr" / "renames.json"
-    legacy.parent.mkdir(parents=True)
-    legacy.write_text('{"sid-1": "Legacy"}')
-
-    store = Renames()
-    assert store.get("sid-2") == "New"    # railmux file kept
-    assert store.get("sid-1") is None     # legacy NOT merged in

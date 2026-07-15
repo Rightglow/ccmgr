@@ -1,8 +1,7 @@
 const ITEMS = [
   "Cross-session search across projects",
   "Cost and token-usage dashboard",
-  "Mouse support",
-  "Renaming and closing individual sessions from within ccmgr",
+  "Additional agent integrations",
 ];
 
 export default function RoadmapSection() {
@@ -29,7 +28,7 @@ export default function RoadmapSection() {
         <p className="text-graphite text-base leading-relaxed">
           Issues and pull requests welcome on{" "}
           <a
-            href="https://github.com/regmi-saugat/ccmgr"
+            href="https://github.com/Rightglow/Railmux"
             className="text-ink underline underline-offset-2 decoration-hairline hover:decoration-ink transition-colors"
           >
             GitHub

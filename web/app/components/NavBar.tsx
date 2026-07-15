@@ -12,7 +12,7 @@ export default function NavBar() {
     <nav className="fixed top-0 left-0 right-0 z-50 bg-canvas/80 backdrop-blur-xl border-b border-hairline h-16">
       <div className="max-w-7xl mx-auto px-8 h-full flex items-center justify-between">
         <a href="#" className="text-ink text-lg font-[400]">
-          ccmgr
+          Railmux
         </a>
         <div className="hidden sm:flex items-center gap-8">
           {NAV_LINKS.map((link) => (

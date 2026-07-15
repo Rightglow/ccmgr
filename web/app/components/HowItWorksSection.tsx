@@ -13,7 +13,7 @@ export default function HowItWorksSection() {
         </h2>
         <div className="space-y-6 max-w-3xl mb-12">
           <p className="text-graphite text-base leading-relaxed">
-            ccmgr reads{" "}
+            Railmux reads{" "}
             <code className="text-ink bg-surface-cool px-1.5 py-0.5 rounded text-sm">
               ~/.claude/projects/*
             </code>{" "}
@@ -46,9 +46,9 @@ export default function HowItWorksSection() {
         </div>
         <div className="bg-scrim rounded-lg p-6 sm:p-8 overflow-x-auto">
           <pre className="text-on-primary/80 text-sm leading-relaxed font-mono">
-            <span className="text-on-primary/50"># ccmgr sits in the left pane</span>
+            <span className="text-on-primary/50"># Railmux sits in the left pane</span>
             {"\n"}
-            <span className="text-on-primary">$ ccmgr</span>
+            <span className="text-on-primary">$ railmux</span>
             {"\n\n"}
             <span className="text-on-primary/50"># Each claude runs as a detached tmux session</span>
             {"\n"}

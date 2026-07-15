@@ -13,10 +13,10 @@ export default function HeroSection() {
             <div className="absolute inset-0 bg-gradient-to-r from-cyan-500/40 to-violet-500/40 blur-xl opacity-50" />
           </div>
           <h1 className="text-transparent bg-clip-text bg-gradient-to-r from-white via-zinc-200 to-zinc-400 bg-[length:200%_auto] text-[56px] sm:text-[72px] lg:text-[88px] font-[500] leading-[1.0] tracking-[-2px] mb-8 drop-shadow-sm">
-            ccmgr
+            Railmux
           </h1>
           <p className="text-on-primary/70 text-lg sm:text-xl leading-relaxed max-w-2xl mb-12 font-[300]">
-            A terminal UI to navigate, resume, and start Claude Code
+            A terminal UI to navigate, resume, and start Claude Code and Codex
             sessions across all your projects from one place. Every
             session runs in its own detached tmux session —
             switching preserves all in-progress work.

@@ -3,6 +3,6 @@ import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite";
 
 export default defineConfig({
-  base: "/ccmgr/",
+  base: "/Railmux/",
   plugins: [tailwindcss(), reactRouter()],
 });

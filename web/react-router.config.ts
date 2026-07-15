@@ -2,6 +2,6 @@ import type { Config } from "@react-router/dev/config";
 
 export default {
   ssr: false,
-  basename: "/ccmgr/",
+  basename: "/Railmux/",
   prerender: ["/"],
 } satisfies Config;

@@ -4,10 +4,10 @@ Thanks for your interest in railmux. Issues and pull requests are welcome.
 
 ## Dev setup
 
-railmux targets Python 3.12+ and requires `tmux` on `PATH`.
+railmux targets Python 3.9+ and requires `tmux` on `PATH`.
 
 ```bash
-git clone https://github.com/regmi-saugat/railmux
+git clone https://github.com/Rightglow/Railmux
 cd railmux
 python -m venv .venv
 source .venv/bin/activate
@@ -39,7 +39,7 @@ The entry point is `railmux.cli:main`. Source lives under `src/railmux/`.
 
 ## Reporting bugs
 
-File an issue at https://github.com/regmi-saugat/railmux/issues with:
+File an issue at https://github.com/Rightglow/Railmux/issues with:
 
 - railmux version (`railmux --version` or check `src/railmux/__init__.py`)
 - Python version, OS, and tmux version (`tmux -V`)

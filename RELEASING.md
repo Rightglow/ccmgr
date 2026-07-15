@@ -1,73 +1,71 @@
-# Releasing railmux
+# Releasing Railmux
 
-Maintainer notes for cutting a new release to PyPI.
+Maintainer notes for publishing a new Railmux release to PyPI. Releases use
+GitHub Actions and PyPI Trusted Publishing; no long-lived PyPI token is needed.
 
 ## Versioning
 
-railmux follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`. The single source of truth is `__version__` in `src/railmux/__init__.py`; `pyproject.toml` reads it dynamically via `tool.setuptools.dynamic`.
+Railmux follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`.
+The single source of truth is `__version__` in `src/railmux/__init__.py`;
+`pyproject.toml` reads it dynamically.
 
 - **PATCH** — backwards-compatible bug fixes
 - **MINOR** — backwards-compatible new features
-- **MAJOR** — breaking changes (CLI flags, key bindings, on-disk config format, etc.)
+- **MAJOR** — breaking changes
 
-## Prerequisites
+## One-time publishing setup
 
-- Push access to the [PyPI project](https://pypi.org/project/railmux/) with 2FA enabled.
-- A PyPI API token scoped to the `railmux` project, stored in `~/.pypirc` or exported as `TWINE_PASSWORD` (with `TWINE_USERNAME=__token__`).
-- Dev extras installed: `pip install -e ".[dev]"` — this provides `build` and `twine`.
+1. Create a GitHub environment named `pypi` and require maintainer approval for
+   deployments if the repository plan supports it.
+2. In the existing [Railmux PyPI project](https://pypi.org/project/railmux/),
+   add a GitHub Trusted Publisher with:
+   - Owner: `Rightglow`
+   - Repository: `Railmux`
+   - Workflow: `release.yml`
+   - Environment: `pypi`
+
+The workflow in `.github/workflows/release.yml` requests a short-lived OIDC
+credential and publishes only after its build and test job succeeds.
 
 ## Release steps
 
-1. **Bump the version** in `src/railmux/__init__.py` (e.g. `0.1.3` → `0.1.4`).
-2. **Update `CHANGELOG.md`** with the user-visible changes for this version. If the file does not exist yet, create one using [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
-3. **Run the test suite**:
+1. Update `src/railmux/__init__.py` and move the user-visible entries in
+   `CHANGELOG.md` from **Unreleased** to the new version and date.
+2. Run the full test suite and smoke-test the TUI on supported platforms:
+
    ```bash
-   pytest
+   python -m pytest -q
    ```
-4. **Smoke-test the TUI** locally (`railmux`) — at minimum: list projects, resume a session, switch sessions, quit cleanly.
-5. **Commit** the version bump and changelog:
+
+3. Build and validate clean artifacts locally:
+
    ```bash
-   git commit -am "release: vX.Y.Z"
-   ```
-6. **Build the distributions** from a clean `dist/`:
-   ```bash
-   rm -rf dist/
+   rm -rf dist build src/*.egg-info
    python -m build
-   ```
-   This produces both an sdist (`.tar.gz`) and a wheel (`.whl`) in `dist/`.
-7. **Check the artifacts** — verifies metadata and that the README renders on PyPI:
-   ```bash
    python -m twine check dist/*
    ```
-8. **(Optional) Dry-run on TestPyPI** to catch metadata or auth issues before touching the real index:
+
+4. Commit and push the release preparation. Wait for every Python 3.9–3.13
+   GitHub Actions job to pass.
+5. Create and push only the intended annotated tag. Pushing it starts the
+   publishing workflow, so do not tag until the release commit is ready:
+
    ```bash
-   python -m twine upload --repository testpypi dist/*
-   pip install --index-url https://test.pypi.org/simple/ \
-               --extra-index-url https://pypi.org/simple/ \
-               railmux==X.Y.Z
+   git tag -a vX.Y.Z -m "Railmux X.Y.Z"
+   git push origin vX.Y.Z
    ```
-9. **Upload to PyPI**:
+
+6. Watch the release workflow. It builds and tests on Python 3.9, publishes the
+   checked artifacts to PyPI, and creates a GitHub Release with those artifacts.
+7. Verify the published package from clean Python 3.9 and current-Python virtual
+   environments:
+
    ```bash
-   python -m twine upload dist/*
+   python3.9 -m venv /tmp/railmux-verify
+   /tmp/railmux-verify/bin/pip install --no-cache-dir railmux==X.Y.Z
+   /tmp/railmux-verify/bin/railmux --version
+   rm -rf /tmp/railmux-verify
    ```
-10. **Verify** the install works from a clean virtualenv:
-    ```bash
-    python -m venv /tmp/railmux-verify && source /tmp/railmux-verify/bin/activate
-    pip install --upgrade railmux
-    railmux --version   # should print X.Y.Z
-    deactivate && rm -rf /tmp/railmux-verify
-    ```
-11. **Tag and push** — do this *after* the upload succeeds so a failed publish does not leave a dangling tag:
-    ```bash
-    git tag -a vX.Y.Z -m "railmux vX.Y.Z"
-    git push origin main --follow-tags
-    ```
-12. **Create a GitHub Release** from the tag at https://github.com/regmi-saugat/railmux/releases/new, pasting the changelog entry into the release notes.
 
-## Future: Trusted Publishing
-
-Once releases get more frequent, this flow should move to PyPI [Trusted Publishing](https://docs.pypi.org/trusted-publishers/) via GitHub Actions. That removes the need for long-lived API tokens entirely — PyPI mints a short-lived OIDC credential per workflow run. The migration is roughly:
-
-1. Add a publisher on PyPI pointing at this repo and a workflow filename (e.g. `release.yml`).
-2. Add `.github/workflows/release.yml` triggered on `push: tags: ['v*']` that runs `python -m build` and `pypa/gh-action-pypi-publish`.
-3. Tag-first becomes safe again: pushing the tag triggers the publish.
+Do not use `git push --follow-tags`: push the exact release tag so unrelated
+local tags can never trigger a publication accidentally.

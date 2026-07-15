@@ -16,15 +16,15 @@ export default function InstallRunSection() {
                 Install
               </p>
               <p className="text-on-primary/70 text-base leading-relaxed mb-4">
-                Requires Python 3.12+ and tmux on PATH.
+                Requires Python 3.9+ and tmux on PATH.
               </p>
               <div className="inline-flex items-center gap-3 bg-black/40 rounded-full px-6 py-3 sm:px-8 sm:py-4 w-full sm:w-auto">
                 <span className="text-on-primary/50 text-sm font-mono">$</span>
                 <code className="text-on-primary text-base sm:text-lg font-mono flex-1">
-                  pip install ccmgr
+                  pip install railmux
                 </code>
                 <button
-                  onClick={() => navigator.clipboard.writeText("pip install ccmgr")}
+                  onClick={() => navigator.clipboard.writeText("pip install railmux")}
                   className="text-on-primary/50 hover:text-on-primary transition-colors text-sm font-mono ml-2 shrink-0"
                   aria-label="Copy to clipboard"
                 >
@@ -36,7 +36,7 @@ export default function InstallRunSection() {
 
           <div className="text-center">
             <a
-              href="https://github.com/regmi-saugat/ccmgr"
+              href="https://github.com/Rightglow/Railmux"
               className="bg-on-primary text-primary text-sm font-semibold leading-[1.43] px-8 py-3 rounded-full hover:opacity-90 transition-opacity inline-block"
             >
               View on GitHub

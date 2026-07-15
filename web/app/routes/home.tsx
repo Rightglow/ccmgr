@@ -11,11 +11,11 @@ import FooterSection from "~/components/FooterSection";
 
 export function meta({}: Route.MetaArgs) {
   return [
-    { title: "ccmgr — Terminal UI for Claude Code session management" },
+    { title: "Railmux — Terminal UI for Claude Code and Codex sessions" },
     {
       name: "description",
       content:
-        "Navigate, resume, and start Claude Code sessions across all your projects from one terminal UI. Built on tmux.",
+        "Navigate, resume, and start Claude Code and Codex sessions across all your projects from one terminal UI. Built on tmux.",
     },
   ];
 }
