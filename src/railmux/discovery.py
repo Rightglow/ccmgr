@@ -11,8 +11,24 @@ from railmux.path_codec import decode
 from railmux.session_index import _looks_like_uuid, _scan_session
 
 
-# Module-level cache: (claude_home, projects_dir_mtime) -> list[Project]
-_cache: dict[Path, tuple[float, list[Project]]] = {}
+# The top-level cache avoids repeatedly decoding Claude's encoded project names.
+# Session validity is cached separately per JSONL signature so an existing file
+# can transition from an empty startup stub to a resumable conversation without
+# forcing every session in every project to be reparsed on each poll.
+_cache: dict[Path, tuple[int, list[Project]]] = {}
+_session_validity: dict[
+    Path, dict[Path, tuple[tuple[int, int, int], bool]]
+] = {}
+
+
+def invalidate_session(path: Path) -> None:
+    """Forget cached validity for one Claude JSONL after app-owned mutation."""
+    cached = _session_validity.get(path.parent)
+    if cached is None:
+        return
+    cached.pop(path, None)
+    if not cached:
+        _session_validity.pop(path.parent, None)
 
 
 def _path_cache_file() -> Path:
@@ -43,22 +59,24 @@ def _save_path_cache(cache: dict[str, str]) -> None:
 def list_projects(claude_home: Path) -> list[Project]:
     """Return every project directory under <claude_home>/projects/, sorted by recency.
 
-    Uses a parent-dir-mtime cache: if no project was added/removed since the last
-    call, we skip the full scan and just refresh each project's last_activity_ts
-    via a single stat per project dir (instead of stat-ing every JSONL).
+    Uses a parent-dir-mtime cache to avoid repeatedly decoding project names.
+    Existing project directories still receive a cheap signature scan so
+    session counts and recency track files created, changed, or removed below
+    the cached top-level directory.
     """
     projects_dir = claude_home / "projects"
     if not projects_dir.is_dir():
         return []
 
     try:
-        parent_mtime = projects_dir.stat().st_mtime
+        parent_mtime = projects_dir.stat().st_mtime_ns
     except OSError:
         return []
 
     cached = _cache.get(claude_home)
     if cached is not None and cached[0] == parent_mtime:
-        # Parent dir hasn't changed shape; just refresh last_activity_ts.
+        # Parent dir hasn't changed shape; refresh per-project session metadata
+        # without re-decoding every project name.
         refreshed = _refresh_activity(cached[1])
         _cache[claude_home] = (parent_mtime, refreshed)
         return refreshed
@@ -127,6 +145,12 @@ def list_projects(claude_home: Path) -> list[Project]:
     if path_cache != original_cache:
         _save_path_cache(path_cache)
 
+    # Avoid retaining per-session signatures for project metadata directories
+    # that were removed while railmux was running.
+    for claude_dir in list(_session_validity):
+        if claude_dir.parent == projects_dir and claude_dir.name not in seen:
+            del _session_validity[claude_dir]
+
     results.sort(key=lambda p: p.last_activity_ts, reverse=True)
     _cache[claude_home] = (parent_mtime, results)
     return results
@@ -137,9 +161,11 @@ def _count_and_latest_mtime(claude_dir: Path, real_path: Path) -> tuple[int, flo
     JSONL mtime.  Uses ``_scan_session`` so the count exactly matches the
     sidebar: background jobs, metadata stubs, and orphans are all excluded.
 
-    Only called on the **full-scan** path (a session file was added or removed
-    and the parent directory mtime changed).  On the common refresh path we
-    reuse the last count and only re-stat mtimes, avoiding an open storm.
+    JSONL validity is cached by nanosecond mtime + size. The common refresh path
+    still performs the directory stat walk needed for recency, but opens only
+    files that were added or changed. This is important for new sessions: Claude
+    creates the JSONL before its first complete turn, so its validity can change
+    without the top-level ``projects/`` directory mtime changing.
     """
     # Minimal project object — only .real_path is used by _scan_session (and
     # only for the SessionMeta return value, which we discard).
@@ -149,6 +175,8 @@ def _count_and_latest_mtime(claude_dir: Path, real_path: Path) -> tuple[int, flo
     )
     count = 0
     latest = 0.0
+    current_paths: set[Path] = set()
+    validity = _session_validity.setdefault(claude_dir, {})
     try:
         scan = os.scandir(claude_dir)
     except OSError:
@@ -159,53 +187,55 @@ def _count_and_latest_mtime(claude_dir: Path, real_path: Path) -> tuple[int, flo
                 continue
             if not _looks_like_uuid(Path(entry.name).stem):
                 continue
-            if _scan_session(temp_project, Path(entry.path)) is None:
-                continue
-            count += 1
+            path = Path(entry.path)
+            current_paths.add(path)
             try:
-                m = entry.stat().st_mtime
+                stat = entry.stat()
             except OSError:
                 continue
+            signature = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
+            cached = validity.get(path)
+            if cached is not None and cached[0] == signature:
+                valid = cached[1]
+            elif (cached is not None and cached[1]
+                  and cached[0][0] == stat.st_ino
+                  and stat.st_size > cached[0][2]):
+                # Claude session JSONLs are append-only. Once a file is valid,
+                # a same-inode size increase cannot make the completed turns
+                # disappear, so avoid re-reading a potentially multi-MB active
+                # conversation every refresh. Replacement, truncation, or an
+                # app-owned delete is rescanned (the latter is invalidated
+                # explicitly via ``invalidate_session``).
+                valid = True
+                validity[path] = (signature, True)
+            else:
+                valid = _scan_session(temp_project, path) is not None
+                validity[path] = (signature, valid)
+            if not valid:
+                continue
+            count += 1
+            m = stat.st_mtime
             if m > latest:
                 latest = m
+    for stale in set(validity) - current_paths:
+        del validity[stale]
+    if not validity:
+        _session_validity.pop(claude_dir, None)
     return count, latest
 
 
-def _stat_jsonls_mtime(claude_dir: Path) -> float:
-    """Fast path: max mtime among UUID-named JSONL files without opening any
-    of them.  Used on every poll tick so the parent-dir-mtime cache keeps its
-    promise of zero file reads when nothing was added or removed."""
-    latest = 0.0
-    try:
-        scan = os.scandir(claude_dir)
-    except OSError:
-        return 0.0
-    with scan:
-        for entry in scan:
-            if not entry.name.endswith(".jsonl"):
-                continue
-            if not _looks_like_uuid(Path(entry.name).stem):
-                continue
-            try:
-                m = entry.stat().st_mtime
-            except OSError:
-                continue
-            if m > latest:
-                latest = m
-    return latest
-
-
 def _refresh_activity(projects: list[Project]) -> list[Project]:
-    """Cheap re-stat: update ``last_activity_ts`` from the max JSONL mtime.
+    """Refresh counts and activity while reusing decoded project paths.
 
-    The parent directory mtime hasn't changed (otherwise we'd be on the
-    full-scan path), so no files were added or removed — the count is
-    stable.  We only re-stat JSONL files (no reads) to catch content-only
-    writes, which keep the fast path truly cheap.
+    A top-level ``projects/`` mtime only tells us whether project directories
+    changed. Files are created and removed one level below it, and existing
+    startup stubs become valid through content writes, so counts must be
+    refreshed independently. ``_count_and_latest_mtime`` opens only JSONLs
+    whose signatures changed.
     """
     out: list[Project] = []
     for p in projects:
-        latest = _stat_jsonls_mtime(p.claude_dir)
+        count, latest = _count_and_latest_mtime(p.claude_dir, p.real_path)
         if latest == 0.0:
             try:
                 latest = p.claude_dir.stat().st_mtime
@@ -215,7 +245,7 @@ def _refresh_activity(projects: list[Project]) -> list[Project]:
             real_path=p.real_path,
             encoded_name=p.encoded_name,
             claude_dir=p.claude_dir,
-            session_count=p.session_count,  # stable — no files added/removed
+            session_count=count,
             last_activity_ts=latest,
         ))
     out.sort(key=lambda x: x.last_activity_ts, reverse=True)

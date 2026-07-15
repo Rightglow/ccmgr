@@ -81,6 +81,41 @@ def test_filter_no_matches(tmp_path: Path):
     assert any("no matches" in t.lower() for t in texts)
 
 
+def test_browser_can_submit_new_relative_directory(tmp_path: Path):
+    selected = []
+    browser = PathBrowser(
+        tmp_path, selected.append, allow_create=True)
+    browser._filter_edit.set_edit_text("new/nested")
+
+    labels = _row_labels(browser)
+    assert any("create" in label and "new/nested" in label for label in labels)
+    browser.keypress((80, 20), "enter")
+
+    assert selected == [(tmp_path / "new" / "nested").resolve()]
+    assert not selected[0].exists()  # App creates it only after confirmation.
+
+
+def test_browser_can_submit_new_absolute_directory(tmp_path: Path):
+    selected = []
+    target = tmp_path / "absolute" / "child"
+    browser = PathBrowser(Path.home(), selected.append, allow_create=True)
+    browser._filter_edit.set_edit_text(str(target))
+    browser.keypress((120, 20), "enter")
+    assert selected == [target.resolve()]
+
+
+def test_existing_file_filter_does_not_submit_parent(tmp_path: Path):
+    selected = []
+    (tmp_path / "project.txt").write_text("not a directory")
+    browser = PathBrowser(tmp_path, selected.append, allow_create=True)
+    browser._filter_edit.set_edit_text("project.txt")
+
+    browser.keypress((80, 20), "enter")
+
+    assert selected == []
+    assert browser._path == tmp_path
+
+
 def test_filter_case_insensitive(tmp_path: Path):
     (tmp_path / "MyProject").mkdir()
     browser = _make_browser(tmp_path)

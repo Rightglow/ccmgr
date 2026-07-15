@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from railmux.discovery import list_projects
 
 
@@ -131,3 +133,78 @@ def test_list_projects_excludes_bg_sessions(claude_home, write_session_fixture, 
     projects = list_projects(claude_home)
     assert len(projects) == 1
     assert projects[0].session_count == 2  # only the two normal sessions
+
+
+def test_count_updates_when_existing_stub_becomes_resumable(
+        claude_home, tmp_path):
+    """Content writes must update count even though projects/ mtime is stable."""
+    real = tmp_path / "new_chat"
+    real.mkdir()
+    encoded = str(real).replace("/", "-")
+    project_dir = claude_home / "projects" / encoded
+    project_dir.mkdir()
+    session = project_dir / "11111111-2222-3333-4444-555555555555.jsonl"
+    session.write_text('{"type":"ai-title","aiTitle":"Starting"}\n')
+
+    parent_mtime = (claude_home / "projects").stat().st_mtime_ns
+    assert list_projects(claude_home)[0].session_count == 0
+    with session.open("a") as f:
+        f.write('{"type":"user","message":{"content":"hello"}}\n')
+        f.write(
+            '{"type":"assistant","message":{"stop_reason":"end_turn"}}\n')
+    assert (claude_home / "projects").stat().st_mtime_ns == parent_mtime
+    assert list_projects(claude_home)[0].session_count == 1
+
+
+def test_count_updates_when_last_session_file_is_deleted(
+        claude_home, write_session_fixture, tmp_path):
+    real = tmp_path / "deleted_chat"
+    real.mkdir()
+    encoded = str(real).replace("/", "-")
+    session = write_session_fixture(
+        encoded, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        [{"type": "user", "message": {"content": "hello"}}],
+    )
+    parent_mtime = (claude_home / "projects").stat().st_mtime_ns
+    assert list_projects(claude_home)[0].session_count == 1
+    session.unlink()
+    assert (claude_home / "projects").stat().st_mtime_ns == parent_mtime
+    assert list_projects(claude_home)[0].session_count == 0
+
+
+def test_valid_append_does_not_reparse_whole_jsonl(
+        claude_home, write_session_fixture, tmp_path, monkeypatch):
+    import railmux.discovery as discovery
+
+    real = tmp_path / "active_chat"
+    real.mkdir()
+    encoded = str(real).replace("/", "-")
+    session = write_session_fixture(
+        encoded, "11111111-aaaa-bbbb-cccc-222222222222",
+        [{"type": "user", "message": {"content": "hello"}}],
+    )
+    assert discovery.list_projects(claude_home)[0].session_count == 1
+    monkeypatch.setattr(
+        discovery, "_scan_session",
+        lambda *_args: pytest.fail("valid append reparsed the full JSONL"),
+    )
+    with session.open("a") as f:
+        f.write(
+            '{"type":"assistant","message":{"stop_reason":"end_turn"}}\n')
+    assert discovery.list_projects(claude_home)[0].session_count == 1
+
+
+def test_replaced_valid_jsonl_is_rescanned(
+        claude_home, write_session_fixture, tmp_path):
+    real = tmp_path / "replaced_chat"
+    real.mkdir()
+    encoded = str(real).replace("/", "-")
+    session = write_session_fixture(
+        encoded, "33333333-aaaa-bbbb-cccc-444444444444",
+        [{"type": "user", "message": {"content": "hello"}}],
+    )
+    assert list_projects(claude_home)[0].session_count == 1
+    replacement = session.with_suffix(".replacement")
+    replacement.write_text('{"type":"ai-title","aiTitle":"stub"}\n')
+    replacement.replace(session)
+    assert list_projects(claude_home)[0].session_count == 0

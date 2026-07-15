@@ -7,6 +7,7 @@ def test_load_with_no_file_uses_defaults(tmp_path):
     cfg = load_config(config_path=tmp_path / "does-not-exist.toml")
     assert cfg.claude_binary == "claude"
     assert cfg.poll_interval_ms == 1000
+    assert cfg.show_empty_projects is False
 
 
 def test_load_partial_overrides(tmp_path):
@@ -23,10 +24,18 @@ def test_load_full_override(tmp_path):
     p.write_text(
         "[claude]\nbinary = \"/usr/local/bin/claude\"\n"
         "[live]\npoll_interval_ms = 2000\n"
+        "[projects]\nshow_empty_projects = true\n"
     )
     cfg = load_config(config_path=p)
     assert cfg.claude_binary == "/usr/local/bin/claude"
     assert cfg.poll_interval_ms == 2000
+    assert cfg.show_empty_projects is True
+
+
+def test_show_empty_projects_non_boolean_fails_closed(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('[projects]\nshow_empty_projects = "yes"\n')
+    assert load_config(config_path=p).show_empty_projects is False
 
 
 def test_resolved_codex_home_expands_user(monkeypatch, tmp_path):

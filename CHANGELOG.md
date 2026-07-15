@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- New Project now works in Codex mode and can create missing relative,
+  absolute, or `~`-based directories before launching the first session.
 - Status bar now cycles short idle tips when there's no active message, and
   soft-wraps long messages across both lines (ellipsis only past two lines)
   instead of clipping at line one. _(2026-07-10 02:12 +0800)_
@@ -57,6 +59,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep Claude project counts synchronized when a startup stub becomes a real
+  conversation or the last JSONL is deleted; empty projects are hidden by
+  default and can be shown with `[projects] show_empty_projects = true`.
+- Make unresolved New Project entries actionable from the Running-pane context
+  menu, and wait for the agent writer to exit before deleting Claude history so
+  shutdown cannot recreate a visible title-only stub.
 - Unknown child-process probe results now fall back to JSONL-derived status.
 - Removed stale project selection when its project disappears during refresh.
 - Preserve soft-quit state until deferred right-pane restoration completes.

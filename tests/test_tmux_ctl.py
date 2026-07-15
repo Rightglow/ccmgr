@@ -21,12 +21,14 @@ from railmux.tmux_ctl import (
     set_window_border_style,
     set_window_user_option,
     session_has_child,
+    session_process_ids,
     split_window_h,
     session_pane_id,
     scroll_lines_per_event,
     scroll_bindings_owned_by,
     server_snapshot,
     wait_window_user_option,
+    wait_for_processes_exit,
 )
 
 
@@ -162,6 +164,33 @@ def test_descendant_pids_walks_transitively():
 
     with patch("subprocess.run", side_effect=fake_run):
         assert descendant_pids(100) == [200, 300]
+
+
+def test_session_process_ids_includes_pane_and_descendants(monkeypatch):
+    monkeypatch.setattr(tmux_ctl, "pane_pid_for_session", lambda _name: 100)
+    monkeypatch.setattr(tmux_ctl, "descendant_pids", lambda _pid: [200, 300])
+    assert session_process_ids("cc-example") == (100, 200, 300)
+
+
+def test_wait_for_processes_exit(monkeypatch):
+    probes = {100: 0, 200: 0}
+
+    def fake_kill(pid, _signal):
+        probes[pid] += 1
+        if probes[pid] >= 2:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(tmux_ctl.os, "kill", fake_kill)
+    monkeypatch.setattr(tmux_ctl.time, "sleep", lambda _seconds: None)
+    assert wait_for_processes_exit((100, 200), timeout=1.0)
+
+
+def test_wait_for_processes_exit_times_out(monkeypatch):
+    ticks = iter((0.0, 0.0, 1.0))
+    monkeypatch.setattr(tmux_ctl.os, "kill", lambda _pid, _signal: None)
+    monkeypatch.setattr(tmux_ctl.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(tmux_ctl.time, "sleep", lambda _seconds: None)
+    assert not wait_for_processes_exit((100,), timeout=0.5)
 
 
 def test_open_rollout_uuids_filters_to_sessions_dir(tmp_path):

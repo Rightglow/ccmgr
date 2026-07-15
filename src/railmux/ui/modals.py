@@ -441,9 +441,11 @@ class PathBrowser(urwid.WidgetWrap):
     """
 
     def __init__(self, start_path: Path,
-                 on_select: Callable[[Path], None]) -> None:
+                 on_select: Callable[[Path], None],
+                 allow_create: bool = False) -> None:
         self._path = start_path.expanduser().resolve()
         self._on_select = on_select
+        self._allow_create = allow_create
         self._items: list[Path] = []            # item 0 = current dir
         self._walker = urwid.SimpleFocusListWalker([])
         self._listbox = urwid.ListBox(self._walker)
@@ -460,7 +462,9 @@ class PathBrowser(urwid.WidgetWrap):
             ("weight", 1, self._listbox),
             ("pack", urwid.Divider("─")),
             ("pack", urwid.Text(
-                ("dim", "type to filter  ↑↓  ↵ enter  Esc = cancel"),
+                ("dim", "type to filter/create  ↑↓  ↵ enter  Esc = cancel"
+                 if allow_create else
+                 "type to filter  ↑↓  ↵ enter  Esc = cancel"),
                 align="left",
             )),
         ])
@@ -481,6 +485,27 @@ class PathBrowser(urwid.WidgetWrap):
         if not needle:
             return children
         return [p for p in children if needle in p.name.lower()]
+
+    def _create_candidate(self) -> Path | None:
+        """Return the non-existent path represented by the filter, if any.
+
+        Relative text creates below the directory currently being browsed;
+        absolute paths and ``~`` are accepted so New Project can target a path
+        that does not have any existing parent visible in the browser.
+        """
+        raw = self._filter.strip()
+        if not self._allow_create or not raw:
+            return None
+        try:
+            candidate = Path(raw).expanduser()
+            if not candidate.is_absolute():
+                candidate = self._path / candidate
+            candidate = candidate.resolve(strict=False)
+            if candidate.exists():
+                return None
+        except (OSError, RuntimeError):
+            return None
+        return candidate
 
     # ── refresh / render ──────────────────────────────────────────────
 
@@ -507,7 +532,8 @@ class PathBrowser(urwid.WidgetWrap):
                         path=self._path.parent,
                         on_click=lambda: self._enter_path(self._path.parent)),
         ]
-        for p in self._visible_entries():
+        visible = self._visible_entries()
+        for p in visible:
             label = p.name + ("/" if p.is_dir() else "")
             rows.append(_BrowserRow(
                 "  " + label,
@@ -515,10 +541,29 @@ class PathBrowser(urwid.WidgetWrap):
                 path=p,
                 on_click=lambda p=p: self._enter_path(p),
             ))
+        candidate = self._create_candidate()
+        create_index: int | None = None
+        if candidate is not None:
+            create_index = len(rows)
+            rows.append(_BrowserRow(
+                f"+  create {candidate}/", "current_path", path=candidate,
+                on_click=lambda p=candidate: self._on_select(p),
+            ))
         if len(rows) == 2 and self._filter:
             rows.append(urwid.Text(("dim", "  (no matches)")))
         self._walker[:] = rows
-        self._walker.set_focus(0)
+        # When nothing existing matches, make the explicit create row the
+        # Enter target. With matches present, retain the conservative current-
+        # directory focus and require the user to select the create row.
+        if create_index is not None and not visible:
+            self._walker.set_focus(create_index)
+        elif self._filter and len(visible) == 1:
+            # A unique existing match (including a file) is safer than leaving
+            # Enter on `. (use this path)`, which would silently submit the
+            # parent directory when the typed target cannot be created.
+            self._walker.set_focus(2)
+        else:
+            self._walker.set_focus(0)
 
     def _cur_path(self) -> Path | None:
         """Return the path of the focused row (works correctly when filtered)."""
@@ -536,6 +581,8 @@ class PathBrowser(urwid.WidgetWrap):
         elif p.is_dir():
             self._path = p
             self._refresh()
+        elif p == self._create_candidate():
+            self._on_select(p)
 
     def selectable(self) -> bool:
         return True
@@ -579,9 +626,11 @@ class PathBrowserModal(urwid.WidgetWrap):
 
     def __init__(self, start_path: Path,
                  on_submit: Callable[[Path], None],
-                 on_cancel: Callable[[], None]) -> None:
+                 on_cancel: Callable[[], None],
+                 allow_create: bool = False) -> None:
         self._on_cancel = on_cancel
-        self._browser = PathBrowser(start_path, on_submit)
+        self._browser = PathBrowser(
+            start_path, on_submit, allow_create=allow_create)
         super().__init__(self._browser)
 
     def selectable(self) -> bool:

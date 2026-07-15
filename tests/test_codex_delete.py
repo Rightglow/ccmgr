@@ -54,6 +54,7 @@ def _cleanup_app(monkeypatch, running):
     """Bare App wired for exercising the cleanup helpers."""
     app = App.__new__(App)
     app._config = Config()
+    app._claude_home = Path("/nonexistent-claude-home")
     app._running = running
     app._codex_index = MagicMock()
     app._session_cache = MagicMock()
@@ -253,6 +254,127 @@ def test_cleanup_aborts_if_tmux_writer_cannot_be_stopped(monkeypatch, tmp_path):
     assert UUID in app._running
     assert refreshed == []
     assert statuses[-1][1] == "error"
+
+
+def test_cleanup_waits_for_writer_exit_before_deleting(monkeypatch, tmp_path):
+    jsonl = tmp_path / f"{UUID}.jsonl"
+    jsonl.write_text("{}\n")
+    running = {UUID: _Running(key=UUID, tmux_name="cc-abc", label="x")}
+    app, statuses, refreshed = _cleanup_app(monkeypatch, running)
+    monkeypatch.setattr(app_mod.tmux_ctl, "session_exists", lambda _n: True)
+    monkeypatch.setattr(app_mod.tmux_ctl, "session_process_ids",
+                        lambda _n: (100, 200))
+    monkeypatch.setattr(app_mod.tmux_ctl, "kill_session", lambda _n: True)
+    monkeypatch.setattr(app_mod.tmux_ctl, "wait_for_processes_exit",
+                        lambda _pids: False)
+
+    app._cleanup_session(
+        session_id=UUID, jsonl_path=jsonl, tmux_name="cc-abc", label="x")
+
+    assert jsonl.exists()
+    assert UUID in app._running
+    assert refreshed == []
+    assert statuses[-1][1] == "error"
+    assert "shutting down" in statuses[-1][0]
+
+
+def test_cleanup_removes_recreated_stub_after_history_cleanup(
+        monkeypatch, tmp_path):
+    jsonl = tmp_path / f"{UUID}.jsonl"
+    jsonl.write_text("conversation\n")
+    app, statuses, _refreshed = _cleanup_app(monkeypatch, {})
+
+    def recreate(*_args, **_kwargs):
+        jsonl.write_text('{"type":"ai-title","aiTitle":"stub"}\n')
+        return True
+
+    monkeypatch.setattr(app, "_remove_from_history", recreate)
+    app._cleanup_session(session_id=UUID, jsonl_path=jsonl, label="x")
+
+    assert not jsonl.exists()
+    assert statuses[-1] == ("Deleted: x", "info")
+
+
+def test_cleanup_reports_first_unlink_failure(monkeypatch, tmp_path):
+    jsonl = tmp_path / f"{UUID}.jsonl"
+    jsonl.write_text("conversation\n")
+    app, statuses, _refreshed = _cleanup_app(monkeypatch, {})
+    original_unlink = Path.unlink
+
+    def fail_target(path, *args, **kwargs):
+        if path == jsonl:
+            raise OSError("read-only filesystem")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_target)
+    app._cleanup_session(session_id=UUID, jsonl_path=jsonl, label="x")
+
+    assert jsonl.exists()
+    assert statuses[-1][1] == "error"
+    assert statuses[-1][0].startswith("failed to delete ")
+
+
+def test_cleanup_reports_recreated_stub_unlink_failure(monkeypatch, tmp_path):
+    jsonl = tmp_path / f"{UUID}.jsonl"
+    jsonl.write_text("conversation\n")
+    app, statuses, _refreshed = _cleanup_app(monkeypatch, {})
+    original_unlink = Path.unlink
+    target_unlinks = 0
+
+    def fail_second_target_unlink(path, *args, **kwargs):
+        nonlocal target_unlinks
+        if path == jsonl:
+            target_unlinks += 1
+            if target_unlinks == 2:
+                raise OSError("writer owns file")
+        return original_unlink(path, *args, **kwargs)
+
+    def recreate(*_args, **_kwargs):
+        jsonl.write_text('{"type":"ai-title","aiTitle":"stub"}\n')
+        return True
+
+    monkeypatch.setattr(Path, "unlink", fail_second_target_unlink)
+    monkeypatch.setattr(app, "_remove_from_history", recreate)
+    app._cleanup_session(session_id=UUID, jsonl_path=jsonl, label="x")
+
+    assert jsonl.exists()
+    assert statuses[-1][1] == "error"
+    assert "recreated and could not be deleted" in statuses[-1][0]
+    assert not any(text.startswith("Deleted:") for text, _level in statuses)
+
+
+def test_cleanup_uses_configured_claude_home(monkeypatch, tmp_path):
+    claude_home = tmp_path / "custom-claude"
+    env_dir = claude_home / "session-env" / UUID
+    env_dir.mkdir(parents=True)
+    history = claude_home / "history.jsonl"
+    history.write_text(
+        '{"sessionId":"' + UUID + '","display":"remove"}\n'
+        '{"sessionId":"keep","display":"keep"}\n')
+    jsonl = tmp_path / f"{UUID}.jsonl"
+    jsonl.write_text("conversation\n")
+    app, statuses, _refreshed = _cleanup_app(monkeypatch, {})
+    app._claude_home = claude_home
+
+    app._cleanup_session(session_id=UUID, jsonl_path=jsonl, label="x")
+
+    assert not env_dir.exists()
+    assert UUID not in history.read_text()
+    assert '"sessionId":"keep"' in history.read_text()
+    assert statuses[-1] == ("Deleted: x", "info")
+
+
+def test_cleanup_claude_placeholder_reports_killed(monkeypatch):
+    key = "__new__-test-1"
+    running = {key: _Running(key=key, tmux_name="cc-new", label="p/(new)")}
+    app, statuses, _refreshed = _cleanup_app(monkeypatch, running)
+    monkeypatch.setattr(app_mod.tmux_ctl, "session_exists", lambda _n: False)
+
+    app._cleanup_session(
+        session_id=None, tmux_name="cc-new", label="p/(new)")
+
+    assert key not in app._running
+    assert statuses[-1] == ("Killed: p/(new)", "info")
 
 
 # ── #8: railmux never injects the provider API key by ANY channel ────────

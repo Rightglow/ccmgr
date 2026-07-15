@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "railmux"
 dynamic = ["version"]
-description = "Terminal UI to navigate, resume, and start Claude Code sessions across all your projects"
+description = "Terminal UI to navigate, resume, and start Claude Code and Codex sessions"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"

@@ -67,6 +67,12 @@ If you're not already inside a tmux session, railmux will launch one automatical
 | `?` | Full help popup with all keybindings |
 | `q` or `Ctrl-C` | Quit with confirmation |
 
+`+ New project` works in both Claude Code and Codex modes. Browse to an
+existing directory and choose `. (use this path)`, or type a new relative,
+absolute, or `~`-based path. When no existing entry matches, select the
+explicit `+ create …` row (it is focused automatically) and press `Enter`;
+railmux creates the directory before starting the agent.
+
 ### Mouse
 
 | Action | Effect |
@@ -107,6 +113,10 @@ binary = "claude"
 # Path to the codex binary (default: "codex")
 binary = "codex"
 home = "~/.codex"
+
+[projects]
+# Show projects with no resumable sessions (default: false)
+show_empty_projects = false
 
 [live]
 # How often to refresh the session list (ms)

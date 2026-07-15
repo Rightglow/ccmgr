@@ -24,6 +24,20 @@ def test_empty_project_returns_no_sessions(claude_home, write_session_fixture, t
     assert list_sessions(projects[0]) == []
 
 
+def test_title_only_metadata_stub_is_hidden(claude_home, tmp_path):
+    real = tmp_path / "title_stub"
+    real.mkdir()
+    encoded = str(real).replace("/", "-")
+    project_dir = claude_home / "projects" / encoded
+    project_dir.mkdir()
+    (project_dir / "01234567-89ab-cdef-0123-456789abcdef.jsonl").write_text(
+        '{"type":"ai-title","aiTitle":"Recreated stub"}\n')
+
+    project = list_projects(claude_home)[0]
+    assert project.session_count == 0
+    assert list_sessions(project) == []
+
+
 def test_session_basic_metadata(claude_home, write_session_fixture, tmp_path):
     project = _make_one_project(claude_home, tmp_path, write_session_fixture, [
         ("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", [

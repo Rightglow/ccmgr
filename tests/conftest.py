@@ -9,8 +9,13 @@ def isolate_path_cache(tmp_path, monkeypatch):
     """Redirect discovery's persistent path cache into the test's tmp dir so
     tests never read or write the real ~/.config/railmux/path-cache.json."""
     import railmux.discovery as discovery
+    discovery._cache.clear()
+    discovery._session_validity.clear()
     cache_file = tmp_path / "path-cache.json"
     monkeypatch.setattr(discovery, "_path_cache_file", lambda: cache_file)
+    yield
+    discovery._cache.clear()
+    discovery._session_validity.clear()
 
 
 @pytest.fixture

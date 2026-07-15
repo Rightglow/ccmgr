@@ -248,6 +248,49 @@ def descendant_pids(pid: int) -> list[int]:
     return seen
 
 
+def session_process_ids(session_name: str) -> tuple[int, ...]:
+    """Snapshot the pane process and all of its current descendants.
+
+    Capturing this before ``kill-session`` lets destructive cleanup wait until
+    the agent writer has actually exited instead of assuming tmux's command
+    return means every child has finished its shutdown writes.
+    """
+    pid = pane_pid_for_session(session_name)
+    if pid is None:
+        return ()
+    return (pid, *descendant_pids(pid))
+
+
+def wait_for_processes_exit(pids: tuple[int, ...], timeout: float = 2.0,
+                            poll_interval: float = 0.02) -> bool:
+    """Wait briefly for a captured process set to disappear.
+
+    Returns False on timeout. Permission errors count as "still alive"; other
+    lookup errors count as gone. The bounded wait is normally only one poll but
+    protects session files from a late Claude/Codex shutdown flush.
+    """
+    if not pids:
+        return True
+    deadline = time.monotonic() + timeout
+    remaining = set(pids)
+    while remaining:
+        for pid in list(remaining):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                remaining.remove(pid)
+            except PermissionError:
+                pass
+            except OSError:
+                remaining.remove(pid)
+        if not remaining:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_interval)
+    return True
+
+
 def open_rollout_uuids_for_pid(pid: int, sessions_dir: Path) -> set[str]:
     """UUIDs of ``*.jsonl`` rollout files under *sessions_dir* that *pid* holds
     open, read from ``/proc/<pid>/fd/*``.

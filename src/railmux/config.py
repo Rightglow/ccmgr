@@ -15,6 +15,7 @@ class Config:
     codex_binary: str = "codex"
     codex_home: str = "~/.codex"
     poll_interval_ms: int = 1000
+    show_empty_projects: bool = False
 
     def resolved_codex_home(self) -> Path:
         """The one resolved ``CODEX_HOME`` directory.
@@ -48,10 +49,12 @@ def load_config(config_path: Path | None = None) -> Config:
     claude = data.get("claude", {})
     codex = data.get("codex", {})
     live = data.get("live", {})
+    projects = data.get("projects", {})
 
     return Config(
         claude_binary=claude.get("binary", "claude"),
         codex_binary=codex.get("binary", "codex"),
         codex_home=codex.get("home", "~/.codex"),
         poll_interval_ms=int(live.get("poll_interval_ms", 1000)),
+        show_empty_projects=projects.get("show_empty_projects") is True,
     )

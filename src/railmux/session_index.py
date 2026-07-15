@@ -120,10 +120,11 @@ def _scan_session(project: Project, jsonl_path: Path) -> SessionMeta | None:
         return None
 
     # Skip sessions that can't be meaningfully resumed:
-    # 1. No messages AND no title → pure metadata stub.
+    # 1. No messages → metadata stub. Claude may recreate a deleted JSONL with
+    #    only an ai-title record, which is still not a resumable conversation.
     # 2. Has user messages but zero assistant replies → orphan (e.g. a fork
     #    that never received a response).  Claude Code cannot resume these.
-    if message_count == 0 and title is None:
+    if message_count == 0:
         return None
     if user_count > 0 and assistant_count == 0:
         return None
