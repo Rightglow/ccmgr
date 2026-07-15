@@ -34,7 +34,7 @@ def shown(app, monkeypatch):
     seen: list[str] = []
     monkeypatch.setattr(
         app, "_render_status_to_tmux",
-        lambda text, level="info": seen.append(text))
+        lambda text, level="info", refresh=True: seen.append(text))
     return seen
 
 

@@ -3059,13 +3059,19 @@ class App:
     _STATUS_MIN_HOLD = {"error": 4.0, "warn": 2.0}
     _LEVEL_PRIORITY = {"tip": 0, "info": 1, "warn": 2, "error": 3}
 
-    def _render_status_to_tmux(self, text: str, level: str = "info") -> None:
+    def _render_status_to_tmux(self, text: str, level: str = "info",
+                               refresh: bool = True) -> None:
         """Render the current status line into the outer tmux status bar.
 
         This is railmux's only status surface — there is no in-pane status widget.
         The tmux bar is full terminal width, so far more fits on one line than
         the old ~30%-wide sidebar bar could show. Best-effort — a tmux hiccup
         must never raise into the UI.
+
+        When *refresh* is False the ``set-option status-right`` is sent but
+        ``refresh-client -S`` is skipped.  Callers use this to clear a stale
+        status message while the user is typing in the right agent pane, where
+        ``-S`` would briefly jitter the CJK preedit box.
 
         tmux runs status strings through BOTH its own ``#{...}``/``#[...]``/
         ``#(...)`` format expansion AND strftime, so a literal ``#`` must be
@@ -3098,10 +3104,11 @@ class App:
                  "status-right", payload],
                 stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
             )
-            _sp.run(
-                ["tmux", "refresh-client", "-S"],
-                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
-            )
+            if refresh:
+                _sp.run(
+                    ["tmux", "refresh-client", "-S"],
+                    stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                )
         except Exception:
             pass
 
@@ -3209,11 +3216,21 @@ class App:
             ttl = self._STATUS_TTL.get(self._status_level, 6.0)
             if ttl is None or now - self._status_since < ttl:
                 return
-            # Expired → clear and fall through so the idle branch shows the next
-            # tip on this same tick (and advances the index uniformly, avoiding
-            # the first post-message tip lingering for two intervals).
+            # Expired → clear immediately so a tip replaces the stale message
+            # on the bar.  Use refresh=False when railmux doesn't have focus
+            # (the user is typing in the right agent pane) so refresh-client -S
+            # doesn't jitter the CJK preedit box — set-option alone is enough
+            # to clear the old text; tmux will paint the new value on its next
+            # status-interval cycle (or on the first railmux-focus re-entry,
+            # which calls refresh-client -S as usual).
             self._status_text = None
             self._tip_since = 0.0
+            if TIPS:
+                refresh = self._railmux_has_focus
+                self._render_status_to_tmux(
+                    TIPS[self._tip_index], "tip", refresh=refresh)
+                self._tip_index = (self._tip_index + 1) % len(TIPS)
+            return
         # Idle: rotate tips on their own cadence.
         if not TIPS:
             return
