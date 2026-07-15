@@ -3223,17 +3223,21 @@ class App:
             # the first post-message tip lingering for two intervals).
             self._status_text = None
             self._tip_since = 0.0
+            self._status_just_expired = True
         # Idle: rotate tips on their own cadence.
         if not TIPS:
             return
         if self._tip_since == 0.0 or now - self._tip_since >= self._TIP_INTERVAL:
-            # Only repaint the shared tmux status bar when railmux has focus.
-            # When the user is typing in the right agent pane, refresh-client -S
-            # inside _render_status_to_tmux makes the CJK preedit box jump.
-            # The counter still advances so tips don't stall during long typing
-            # sessions — the next tip appears as soon as focus returns.
+            # When a status just expired we MUST clear the stale message, even
+            # without focus — the right agent pane may have focus (#CJK).
+            # Only skip refresh-client -S in that case to avoid IME jitter.
+            just_expired = self._status_just_expired
+            self._status_just_expired = False
             if self._railmux_has_focus:
                 self._render_status_to_tmux(TIPS[self._tip_index], "tip")
+            elif just_expired:
+                self._render_status_to_tmux(
+                    TIPS[self._tip_index], "tip", refresh=False)
             self._tip_index = (self._tip_index + 1) % len(TIPS)
             self._tip_since = now
 
