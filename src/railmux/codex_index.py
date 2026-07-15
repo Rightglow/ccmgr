@@ -18,9 +18,12 @@ from pathlib import Path
 from railmux.models import Project, SessionMeta
 from railmux.renames import Renames
 
-# Same threshold as session_index.py — a pending function_call that hasn't
-# written in this many seconds is presumed blocked on user approval.
-_TOOL_BLOCK_AGE_S = 10
+# Codex has no reliable provider-neutral signal that distinguishes a long
+# running tool from a tool waiting for approval.  Red is an attention signal,
+# so presume a pending function_call is blocked only after a conservative
+# two-minute delay, avoiding false alarms from ordinary builds, SSH commands,
+# and other tools that routinely exceed ten seconds.
+_TOOL_BLOCK_AGE_S = 120
 
 
 FileSignature = tuple[int, int]  # (mtime_ns, size)
@@ -333,10 +336,15 @@ def _parse_codex_session(path: Path, f) -> SessionMeta | None:
     # they still register as pending (they can never be paired).
     pending_calls: set[str] = set()
     nocid_seq = 0
-    # Last status-relevant signal, in file order, used to derive busy/idle.
-    #   "user"/"task_started" -> a turn is (re)active -> busy
-    #   "assistant"/turn-end lifecycle -> turn settled -> idle
-    last_signal: str = ""
+    # Modern Codex rollouts have explicit turn lifecycle records.  Assistant
+    # messages are *not* turn boundaries: Codex can emit one, run more tools,
+    # and continue reasoning before the eventual task_complete.  Keep the
+    # lifecycle state separate from the last message role so an intermediate
+    # assistant message cannot make an active turn flash idle.  Old rollouts
+    # without lifecycle records retain the legacy last-role fallback.
+    lifecycle_seen = False
+    turn_active = False
+    last_message_role = ""
 
     for raw in f:
         line = raw.strip()
@@ -359,7 +367,10 @@ def _parse_codex_session(path: Path, f) -> SessionMeta | None:
                 role = rp.get("role", "")
                 if role == "user":
                     message_count += 1
-                    last_signal = "user"
+                    last_message_role = "user"
+                    # Bias a user message toward active even if task_started is
+                    # flushed just after it (or absent in a legacy rollout).
+                    turn_active = True
                     content = rp.get("content")
                     if isinstance(content, list):
                         text = _extract_codex_text(content)
@@ -368,7 +379,7 @@ def _parse_codex_session(path: Path, f) -> SessionMeta | None:
                             first_user_message = text
                 elif role == "assistant":
                     message_count += 1
-                    last_signal = "assistant"
+                    last_message_role = "assistant"
             elif pt in _CODEX_TOOL_CALLS:
                 cid = rp.get("call_id")
                 if isinstance(cid, str) and cid:
@@ -392,12 +403,14 @@ def _parse_codex_session(path: Path, f) -> SessionMeta | None:
                 if tok is not None:
                     token_total = tok
             elif et == "task_started":
-                last_signal = "task_started"
+                lifecycle_seen = True
+                turn_active = True
             elif et in _CODEX_TURN_END:
                 # task_complete / turn_aborted / thread_rolled_back: the turn is
                 # over and any dangling tool calls are dead — clear them so an
                 # aborted/rolled-back session never reads as busy/blocked.
-                last_signal = et
+                lifecycle_seen = True
+                turn_active = False
                 pending_calls.clear()
 
     # -- skip empty sessions --------------------------------------------
@@ -419,10 +432,13 @@ def _parse_codex_session(path: Path, f) -> SessionMeta | None:
     if pending_tool:
         age = time.time() - mtime
         status = "blocked" if age > _TOOL_BLOCK_AGE_S else "busy"
-    elif last_signal in ("user", "task_started"):
+    elif lifecycle_seen:
+        status = "busy" if turn_active else "idle"
+    elif last_message_role == "user":
+        # Compatibility for old Codex rollouts without lifecycle records.
         status = "busy"
     else:
-        # "assistant", task_complete, turn_aborted, thread_rolled_back, or none.
+        # Legacy last-assistant, or a metadata-only lifecycle-free stream.
         status = "idle"
 
     # -- title fallback: first user message, first line ------------------

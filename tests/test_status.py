@@ -134,6 +134,28 @@ def test_effective_status_probe_failure_falls_back_to_jsonl(app, monkeypatch):
     assert a._effective_status(recent) == "busy"
 
 
+def test_effective_status_codex_pending_skips_claude_child_probe(app, monkeypatch):
+    """A Codex pane has permanent children, so Claude's child-process probe
+    cannot distinguish an active tool from an approval prompt."""
+    a, _Running = app
+    a._running[_UID] = _Running(
+        key=_UID, tmux_name="cx-x", label="l", session_type="codex")
+    monkeypatch.setattr(
+        tmux_ctl, "process_has_child",
+        lambda _pid: pytest.fail("Codex used the Claude process heuristic"),
+    )
+    monkeypatch.setattr(
+        tmux_ctl, "session_has_child",
+        lambda _name: pytest.fail("Codex used the Claude process heuristic"),
+    )
+    meta = SessionMeta(
+        project=None, session_id=_UID, jsonl_path=Path("/x"), title="t",
+        message_count=1, token_total=1, last_mtime=0.0,
+        status="blocked", pending_tool=True, session_type="codex",
+    )
+    assert a._effective_status(meta) == "blocked"
+
+
 def test_effective_status_reuses_probe_within_refresh(app, monkeypatch):
     a, _Running = app
     a._running[_UID] = _Running(key=_UID, tmux_name="cc-x", label="l")

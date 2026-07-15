@@ -813,6 +813,16 @@ def restore_scroll_bindings(backup: ScrollBindingBackup) -> None:
                 pass
 
 
+def _single_line_error(text: str, limit: int = 500) -> str:
+    """Make subprocess output safe and compact for a one-line UI error bar."""
+    clean = " ".join(
+        "".join(ch if ch.isprintable() else " " for ch in text).split()
+    )
+    if len(clean) > limit:
+        return clean[:limit - 1] + "…"
+    return clean
+
+
 def new_detached_session(name: str, cmd: str,
                          env: dict[str, str] | None = None) -> tuple[bool, str | None]:
     """Create a detached tmux session running `cmd`. Used for background claudes.
@@ -829,7 +839,7 @@ def new_detached_session(name: str, cmd: str,
     a login+interactive shell that sources the user's profile and loads the key
     the normal way.
 
-    ``-e`` on ``new-session`` requires tmux >= 3.0, so we gate on the detected
+    ``-e`` on ``new-session`` requires tmux >= 3.2, so we gate on the detected
     version rather than blindly retrying without env on ANY failure — a broad
     retry would silently mask unrelated launch errors. On older tmux the env is
     dropped (callers also carry non-secret values like CODEX_HOME in the command
@@ -854,12 +864,16 @@ def new_detached_session(name: str, cmd: str,
     except FileNotFoundError:
         return False, "tmux: command not found"
     except subprocess.CalledProcessError as e:
-        err = (
-            e.stderr.decode("utf-8", errors="replace").strip()
-            if e.stderr
-            else f"tmux new-session failed (exit {e.returncode})"
-        )
+        if isinstance(e.stderr, bytes):
+            raw_err = e.stderr.decode("utf-8", errors="replace")
+        else:
+            raw_err = str(e.stderr or "")
+        err = _single_line_error(raw_err)
+        if not err:
+            err = f"tmux new-session failed (exit {e.returncode})"
         return False, err
+    except OSError as e:
+        return False, _single_line_error(f"tmux new-session failed: {e}")
 
     # Step 2 — post-creation setup: mouse, clipboard, inner status bar.
     # Best-effort — don't lose a working session over a setup failure.
@@ -881,7 +895,7 @@ def new_detached_session(name: str, cmd: str,
             ["tmux", "set-option", "-t", name, "status", "off"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except (subprocess.SubprocessError, OSError):
         pass  # setup is best-effort
 
     # Step 3 — health check: did the agent command exit immediately?
@@ -893,12 +907,24 @@ def new_detached_session(name: str, cmd: str,
             ["tmux", "list-panes", "-t", name, "-F", "#{pane_dead}"],
             capture_output=True, text=True, timeout=2,
         )
+        if dead.returncode != 0:
+            # With tmux's default ``remain-on-exit off``, an immediately
+            # failing command destroys its only pane (and usually its session),
+            # so there is no dead pane left to report as ``1``.  Distinguish
+            # that high-confidence launch failure from a transient list-panes
+            # error while an otherwise healthy session still exists.
+            if not session_exists(name):
+                return False, (
+                    "agent command exited immediately "
+                    "(tmux session disappeared)"
+                )
+            return True, None
         if dead.stdout.strip() == "1":
             capture = subprocess.run(
                 ["tmux", "capture-pane", "-t", name, "-p", "-S", "-20"],
                 capture_output=True, text=True, timeout=2,
             )
-            pane_content = capture.stdout.strip()
+            pane_content = capture.stdout.strip() if capture.returncode == 0 else ""
             # Clean up the dead session — it can never recover.
             subprocess.run(
                 ["tmux", "kill-session", "-t", name],
@@ -907,12 +933,13 @@ def new_detached_session(name: str, cmd: str,
             if pane_content:
                 lines = [ln.strip() for ln in pane_content.splitlines()
                          if ln.strip()]
+                detail = _single_line_error("; ".join(lines[-3:]))
                 reason = "agent command failed: " + (
-                    "; ".join(lines[-3:]) if lines else "exited immediately")
+                    detail if detail else "exited immediately")
             else:
                 reason = "agent command exited immediately (no output)"
             return False, reason
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+    except (subprocess.SubprocessError, OSError):
         pass  # health check itself failed; assume the session is ok
 
     return True, None

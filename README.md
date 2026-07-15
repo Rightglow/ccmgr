@@ -84,7 +84,21 @@ railmux creates the directory before starting the agent.
 
 ## History preview
 
-Left-click a non-running session to view its conversation history in the right pane without starting the agent. The transcript is colour-coded (user = cyan, assistant = green, tool use = yellow) and displayed via `less`. Press `q` to exit — the right pane restores whatever was there before. Double-click to skip the preview and open the session directly.
+Left-click a non-running session to view its conversation history in the right
+pane without starting or resuming the agent. The preview reads the saved JSONL
+directly, so it cannot send a message or mutate the session. It follows the
+providers' conversation structure as closely as their saved data allows:
+user/assistant messages, tool calls and abbreviated tool output are
+colour-coded, while internal system context and encrypted reasoning are hidden.
+Plaintext Codex reasoning summaries are shown when present.
+
+The viewer uses `less`, the standard pager available on both Linux and macOS,
+because neither provider currently exposes a native read-only history view.
+It opens at the latest activity and streams at most the latest 2,000 JSONL
+records for fast previews of large sessions. Press `/` to search, `n`/`N` to
+move between matches, and `q` to exit; the right pane restores whatever was
+there before. Shell/editor commands and pager history are disabled in preview
+mode. Double-click to skip the preview and open the session directly.
 
 Clicking a running session attaches to it immediately (focus stays left so you can keep browsing). Double-clicking steals focus to the right pane for both running and non-running sessions.
 
@@ -95,6 +109,13 @@ Each session shows a coloured ● reflecting its current state:
 - **Green** — idle (assistant last responded normally)
 - **Yellow** — busy (assistant is processing)
 - **Red** — blocked (waiting for tool approval)
+
+For Codex rollouts with lifecycle events, only `task_complete`, `turn_aborted`,
+or `thread_rolled_back` ends an active turn; intermediate assistant messages and
+tool results remain busy. Older rollouts without lifecycle records fall back to
+their last user/assistant message. Because Codex has no reliable approval-wait
+signal, a pending tool must remain unchanged for two minutes before it turns
+red, reducing false alerts from normal long-running commands.
 
 ## How it works
 

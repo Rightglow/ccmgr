@@ -1,5 +1,6 @@
 """Tests for railmux.transcript — JSONL → ANSI text formatting."""
 
+import io
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -10,6 +11,7 @@ from railmux.transcript import (
     _is_real_user,
     _render_user,
     _render_assistant_blocks,
+    _sanitize_text,
     format_transcript,
     main,
 )
@@ -212,6 +214,66 @@ def test_render_assistant_truncates_long_input_values():
     assert len(text) < 2000  # should be truncated
 
 
+def test_sanitize_text_removes_terminal_controls_but_keeps_layout():
+    raw = ("before\tcolumn\n"
+           "\x1b]8;;https://evil.invalid\x1b\\click\x1b]8;;\x1b\\"
+           "\x1b[6n\x7f\x85after")
+    safe = _sanitize_text(raw)
+    assert "\t" in safe and "\n" in safe
+    assert "before" in safe and "after" in safe
+    assert "\x1b" not in safe
+    assert "\x7f" not in safe
+    assert "\x85" not in safe
+
+
+def test_claude_tool_result_is_paired_rendered_and_truncated():
+    records = [
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use", "id": "tool-1", "name": "Bash",
+                    "input": {"command": "printf ok"},
+                }],
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result", "tool_use_id": "tool-1",
+                    "content": "x" * 800,
+                }],
+            },
+        },
+    ]
+    text = "\n".join(json.dumps(record) for record in records) + "\n"
+    rendered = "".join(format_transcript(io.StringIO(text), fmt="claude"))
+    assert "Tool output: Bash" in rendered
+    assert "x" * 500 in rendered
+    assert "x" * 501 not in rendered
+    assert "…" in rendered
+
+
+def test_session_text_cannot_inject_osc_or_terminal_query():
+    record = {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": "safe\x1b]8;;file:///tmp/trap\x07click\x1b]8;;\x07\x1b[6n",
+        },
+    }
+    rendered = "".join(format_transcript(
+        io.StringIO(json.dumps(record) + "\n"), fmt="claude"))
+    assert "safe" in rendered and "click" in rendered
+    assert "\x1b]8" not in rendered
+    assert "\x1b[6n" not in rendered
+    # Railmux's own trusted colour remains.
+    assert "\x1b[36m" in rendered
+
+
 # ── format_transcript (pipeline) ─────────────────────────────────────────
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:
@@ -311,8 +373,6 @@ def test_main_writes_to_stdout(tmp_path, capsys):
 # and the first record seen is a ``response_item`` / ``event_msg`` /
 # ``turn_context``.  These must still be detected as Codex, not Claude.
 
-import io
-
 
 def test_codex_detected_without_session_meta_header():
     """A Codex rollout whose first record is NOT session_meta still renders
@@ -404,6 +464,57 @@ def test_main_accepts_format_flag(tmp_path, capsys):
     main(["transcript", "--format", "codex", str(jsonl)])
     captured = capsys.readouterr()
     assert "hi codex" in captured.out
+
+
+def test_main_preview_banner_and_footer(tmp_path, capsys):
+    jsonl = tmp_path / "claude.jsonl"
+    _write_jsonl(jsonl, [
+        {"type": "user", "message": {"role": "user", "content": "hello"}},
+    ])
+    main(["transcript", "--format", "claude", "--preview-limit", "2000",
+          str(jsonl)])
+    output = capsys.readouterr().out
+    assert "Read-only history preview" in output
+    assert "latest 2,000 records" in output
+    assert "/ search" in output and "q close" in output
+
+
+def test_main_rejects_bad_preview_limit(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["transcript", "--preview-limit", "nope", "-"])
+    assert exc.value.code == 2
+    assert "positive integer" in capsys.readouterr().err
+
+
+def test_main_treats_broken_pipe_as_normal_exit(tmp_path):
+    jsonl = tmp_path / "claude.jsonl"
+    _write_jsonl(jsonl, [
+        {"type": "user", "message": {"role": "user", "content": "hello"}},
+    ])
+
+    class ClosedPager:
+        def write(self, _text):
+            raise BrokenPipeError
+
+    with patch("railmux.transcript.sys.stdout", ClosedPager()):
+        main(["transcript", str(jsonl)])
+
+
+def test_main_handles_broken_pipe_during_final_flush(tmp_path):
+    jsonl = tmp_path / "claude.jsonl"
+    _write_jsonl(jsonl, [
+        {"type": "user", "message": {"role": "user", "content": "hello"}},
+    ])
+
+    class PagerClosedAfterWrites:
+        def write(self, _text):
+            return 1
+
+        def flush(self):
+            raise BrokenPipeError
+
+    with patch("railmux.transcript.sys.stdout", PagerClosedAfterWrites()):
+        main(["transcript", str(jsonl)])
 
 
 # ── Codex tool-call rendering (issue #3) ──────────────────────────────────

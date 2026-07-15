@@ -195,3 +195,52 @@ def test_codex_transcript_mixed_blocks():
     joined = "".join(chunks)
     assert "Let me check." in joined
     assert "Assistant" in joined
+
+
+def test_codex_transcript_filters_internal_context_but_keeps_angle_text():
+    lines = [
+        json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "message", "role": "user",
+                "content": [
+                    {"type": "input_text",
+                     "text": "<environment_context>secret cwd</environment_context>"},
+                    {"type": "input_text", "text": "<html> is real user text"},
+                ],
+            },
+        }),
+        json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text",
+                             "text": "# AGENTS.md instructions\ninternal"}],
+            },
+        }),
+    ]
+    joined = "".join(format_transcript(
+        io.StringIO("\n".join(lines) + "\n"), fmt="codex"))
+    assert "secret cwd" not in joined
+    assert "AGENTS.md" not in joined
+    assert "<html> is real user text" in joined
+
+
+def test_codex_transcript_renders_plaintext_reasoning_summary_only():
+    record = {
+        "type": "response_item",
+        "payload": {
+            "type": "reasoning",
+            "summary": [
+                {"type": "summary_text", "text": "Checked the call graph."},
+                {"type": "future_type", "text": "do not display"},
+            ],
+            "encrypted_content": "never-render-this-secret",
+        },
+    }
+    joined = "".join(format_transcript(
+        io.StringIO(json.dumps(record) + "\n"), fmt="codex"))
+    assert "Reasoning summary" in joined
+    assert "Checked the call graph." in joined
+    assert "do not display" not in joined
+    assert "never-render-this-secret" not in joined

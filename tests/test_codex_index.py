@@ -8,7 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from railmux.codex_index import CodexIndex, _scan_codex_session
+from railmux.codex_index import (
+    CodexIndex,
+    _TOOL_BLOCK_AGE_S,
+    _scan_codex_session,
+)
 
 
 def _write_codex_session(path: Path, session_id: str, cwd: str,
@@ -105,13 +109,39 @@ def test_scan_codex_session_blocked(tmp_path: Path):
                          ],
                          extra_lines=[record])
     # Set mtime far in the past so it's detected as blocked.
-    old_mtime = time.time() - 60
+    old_mtime = time.time() - _TOOL_BLOCK_AGE_S - 1
     os.utime(path, (old_mtime, old_mtime))
     meta = _scan_codex_session(path)
     assert meta is not None
     assert meta.pending_tool is True
     # With old mtime it should be "blocked"
     assert meta.status == "blocked"
+
+
+def test_scan_codex_minute_long_tool_stays_busy(tmp_path: Path):
+    """A normal long-running Codex tool must not demand attention after only
+    one minute; blocked is intentionally a conservative signal."""
+    path = tmp_path / "rollout-long-tool.jsonl"
+    record = json.dumps({
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "call_id": "call-long",
+            "name": "run_shell_command",
+            "arguments": '{"cmd": "build"}',
+        },
+    })
+    _write_codex_session(
+        path, "019f4509-2908-7a70-a36b-9e1044cb7a88", "/tmp",
+        messages=[{"role": "user", "text": "build"}],
+        extra_lines=[record],
+    )
+    one_minute_old = time.time() - 60
+    os.utime(path, (one_minute_old, one_minute_old))
+    meta = _scan_codex_session(path)
+    assert meta is not None
+    assert meta.pending_tool is True
+    assert meta.status == "busy"
 
 
 def _token_event(*, total_tokens=None, input_tokens=None, output_tokens=None):
@@ -545,6 +575,20 @@ def _event(etype: str, **extra):
     return json.dumps({"type": "event_msg", "payload": payload})
 
 
+def _message(role: str, text: str):
+    return json.dumps({
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": role,
+            "content": [{
+                "type": "output_text" if role == "assistant" else "input_text",
+                "text": text,
+            }],
+        },
+    })
+
+
 @pytest.mark.parametrize("call_kind,out_kind", [
     ("custom_tool_call", "custom_tool_call_output"),
     ("function_call", "function_call_output"),
@@ -580,7 +624,7 @@ def test_scan_codex_unpaired_tool_call_is_pending(tmp_path, call_kind, out_kind)
                              _tool_call(call_kind, "call_1"),
                              _tool_output(out_kind, "call_OTHER"),
                          ])
-    old = time.time() - 60
+    old = time.time() - _TOOL_BLOCK_AGE_S - 1
     os.utime(p, (old, old))
     meta = _scan_codex_session(p)
     assert meta is not None
@@ -628,6 +672,66 @@ def test_scan_codex_task_started_without_complete_is_busy(tmp_path):
     _write_codex_session(p, "sid-inflight", "/tmp/proj", originator="codex-tui",
                          messages=[{"role": "user", "text": "go"}],
                          extra_lines=[_event("task_started")])
+    meta = _scan_codex_session(p)
+    assert meta is not None
+    assert meta.status == "busy"
+
+
+def test_scan_codex_intermediate_assistant_does_not_end_active_turn(tmp_path):
+    """Codex emits assistant messages before a turn's task_complete.  A
+    paired tool result and later reasoning must not make that live turn idle."""
+    p = tmp_path / "rollout.jsonl"
+    reasoning = json.dumps({
+        "type": "response_item",
+        "payload": {"type": "reasoning", "summary": []},
+    })
+    _write_codex_session(
+        p, "sid-inflight-assistant", "/tmp/proj", originator="codex-tui",
+        messages=[{"role": "user", "text": "go"}],
+        extra_lines=[
+            _event("task_started"),
+            _message("assistant", "I will inspect that."),
+            _tool_call("custom_tool_call", "call_1"),
+            _tool_output("custom_tool_call_output", "call_1"),
+            reasoning,
+        ],
+    )
+    meta = _scan_codex_session(p)
+    assert meta is not None
+    assert meta.pending_tool is False
+    assert meta.status == "busy"
+
+
+def test_scan_codex_legacy_assistant_without_lifecycle_is_idle(tmp_path):
+    """Rollouts from before lifecycle events keep last-message semantics."""
+    p = tmp_path / "rollout.jsonl"
+    _write_codex_session(
+        p, "sid-legacy", "/tmp/proj", originator="codex-tui",
+        messages=[
+            {"role": "user", "text": "go"},
+            {"role": "assistant", "text": "done"},
+        ],
+    )
+    meta = _scan_codex_session(p)
+    assert meta is not None
+    assert meta.status == "idle"
+
+
+def test_scan_codex_user_after_completed_turn_reopens_busy(tmp_path):
+    """A new user record may be flushed just before its task_started event."""
+    p = tmp_path / "rollout.jsonl"
+    _write_codex_session(
+        p, "sid-next-user", "/tmp/proj", originator="codex-tui",
+        messages=[
+            {"role": "user", "text": "first"},
+            {"role": "assistant", "text": "done"},
+        ],
+        extra_lines=[
+            _event("task_started"),
+            _event("task_complete"),
+            _message("user", "follow up"),
+        ],
+    )
     meta = _scan_codex_session(p)
     assert meta is not None
     assert meta.status == "busy"
@@ -822,7 +926,7 @@ def test_codex_index_pending_tool_ages_to_blocked_without_reparse(
         lambda _path: pytest.fail("unchanged tool rollout was reopened"),
     )
     monkeypatch.setattr(index_module.time, "time",
-                        lambda: meta.last_mtime + 60)
+                        lambda: meta.last_mtime + _TOOL_BLOCK_AGE_S + 1)
     assert idx.get("sid-tool").status == "blocked"
 
 

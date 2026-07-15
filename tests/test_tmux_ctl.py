@@ -437,6 +437,7 @@ def test_new_detached_session_hides_inner_status_bar():
     with patch("subprocess.check_call") as call, \
             patch("subprocess.run") as run:
         # Health check: pane is alive (stdout "0").
+        run.return_value.returncode = 0
         run.return_value.stdout = "0"
         assert new_detached_session("cc-abc", "claude --resume") == (True, None)
 
@@ -464,6 +465,7 @@ def test_new_detached_session_passes_env_via_tmux_e_flag():
             patch("subprocess.check_call") as call, \
             patch("subprocess.run") as run:
         # Health check: pane is alive.
+        run.return_value.returncode = 0
         run.return_value.stdout = "0"
         assert new_detached_session(
             "cx-abc", "exec codex",
@@ -490,6 +492,7 @@ def test_new_detached_session_drops_env_on_old_tmux():
     with patch("railmux.tmux_ctl.tmux_version", return_value=(3, 1)), \
             patch("subprocess.check_call", side_effect=fake_check_call), \
             patch("subprocess.run") as run:
+        run.return_value.returncode = 0
         run.return_value.stdout = "0"
         assert new_detached_session("cx-abc", "exec codex",
                                     env={"K": "v"}) == (True, None)
@@ -499,7 +502,7 @@ def test_new_detached_session_drops_env_on_old_tmux():
 
 
 def test_new_detached_session_does_not_retry_on_real_failure():
-    """A genuine new-session failure on a capable tmux (>= 3.0) is surfaced as
+    """A genuine new-session failure on a capable tmux (>= 3.2) is surfaced as
     False, NOT masked by a broad env-dropping retry (the previous behavior)."""
     from railmux.tmux_ctl import new_detached_session
     calls = []
@@ -520,3 +523,57 @@ def test_new_detached_session_does_not_retry_on_real_failure():
     # Attempted exactly once (with -e); no second env-less retry.
     assert len(new_sessions) == 1
     assert "-e" in new_sessions[0]
+
+
+def test_new_detached_session_detects_disappeared_session():
+    """Default tmux removes a pane/session when its command exits.  A failed
+    list-panes probe plus a missing target is therefore a launch failure, not a
+    healthy session with no dead-pane marker."""
+    from railmux.tmux_ctl import new_detached_session
+    probe = subprocess.CompletedProcess(
+        ["tmux", "list-panes"], 1, stdout="", stderr="can't find session")
+    with patch("subprocess.check_call"), \
+            patch("subprocess.run", return_value=probe), \
+            patch("railmux.tmux_ctl.session_exists", return_value=False):
+        ok, err = new_detached_session("cc-gone", "missing-agent")
+
+    assert ok is False
+    assert err is not None
+    assert "exited immediately" in err
+
+
+def test_new_detached_session_keeps_live_session_on_probe_error():
+    """A health-probe hiccup is best-effort when tmux still has the session."""
+    from railmux.tmux_ctl import new_detached_session
+    probe = subprocess.CompletedProcess(
+        ["tmux", "list-panes"], 1, stdout="", stderr="server busy")
+    with patch("subprocess.check_call"), \
+            patch("subprocess.run", return_value=probe), \
+            patch("railmux.tmux_ctl.session_exists", return_value=True):
+        assert new_detached_session(
+            "cc-live", "claude") == (True, None)
+
+
+def test_new_detached_session_health_timeout_is_best_effort():
+    from railmux.tmux_ctl import new_detached_session
+    with patch("subprocess.check_call"), \
+            patch("subprocess.run", side_effect=subprocess.TimeoutExpired(
+                ["tmux", "list-panes"], 2)):
+        assert new_detached_session(
+            "cc-slow-probe", "claude") == (True, None)
+
+
+def test_new_detached_session_sanitizes_tmux_error():
+    from railmux.tmux_ctl import new_detached_session
+    failure = subprocess.CalledProcessError(
+        1, ["tmux", "new-session"],
+        stderr=b"\x1b[31mfailed\x1b[0m\nsecond line",
+    )
+    with patch("subprocess.check_call", side_effect=failure):
+        ok, err = new_detached_session("cc-bad", "claude")
+
+    assert ok is False
+    assert err is not None
+    assert "\x1b" not in err
+    assert "\n" not in err
+    assert "failed" in err and "second line" in err

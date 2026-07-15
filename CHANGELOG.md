@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Stopped-session preview remains a zero-extra-dependency `less` viewer, but
+  now identifies itself as read-only, documents its recent-record window,
+  shows abbreviated Claude tool results and plaintext Codex reasoning
+  summaries, and filters Codex-injected system context from user turns.
+- History preview now sanitizes terminal control sequences, quotes the Python
+  executable, disables `less` shell/editor/log/history features, and treats an
+  early pager exit as a normal broken pipe instead of showing a traceback.
 - Status-bar messages are levelled (info / warn / error) with distinct colours,
   and one-shot messages ("→ opened X", "Renamed to: …", "Killed: …") now persist
   for a level-dependent time (errors are sticky) instead of being overwritten by
@@ -59,6 +66,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep Codex turns busy until an explicit lifecycle end event. Intermediate
+  assistant messages, completed tools, and continued reasoning no longer make
+  a still-running turn flash green; legacy rollouts retain last-role fallback.
+- Do not apply Claude's child-process status heuristic to Codex, whose wrapper,
+  native client, and MCP/code-mode children are permanent and cannot identify
+  an approval wait.
+- Delay Codex's stale pending-tool red indicator from 10 seconds to two minutes,
+  so ordinary builds, SSH commands, and other long tools do not demand user
+  attention prematurely.
+- Hide the optional in-pane launch-error row completely while empty, detect an
+  immediately vanished tmux agent session as a launch failure, and sanitize
+  captured subprocess errors before displaying them.
+- Start the idle-tip cadence when the first post-message tip is rendered, so a
+  following refresh tick cannot replace it before a full rotation interval.
 - Keep Claude project counts synchronized when a startup stub becomes a real
   conversation or the last JSONL is deleted; empty projects are hidden by
   default and can be shown with `[projects] show_empty_projects = true`.

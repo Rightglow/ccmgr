@@ -8,6 +8,7 @@ Codex lookup).
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -486,14 +487,26 @@ def _transcript_app(monkeypatch):
 def test_show_transcript_codex_passes_explicit_format(monkeypatch):
     app, captured = _transcript_app(monkeypatch)
     assert app._show_transcript(Path("/tmp/r.jsonl"), session_type="codex")
-    assert "railmux.transcript --format codex -" in captured["cmd"]
+    assert "railmux.transcript --format codex --preview-limit 2000 -" in captured["cmd"]
 
 
-def test_show_transcript_claude_has_no_format_flag(monkeypatch):
+def test_show_transcript_claude_passes_explicit_format(monkeypatch):
     app, captured = _transcript_app(monkeypatch)
     assert app._show_transcript(Path("/tmp/r.jsonl"), session_type="claude")
-    assert "--format" not in captured["cmd"]
-    assert "railmux.transcript - " in captured["cmd"]
+    assert "railmux.transcript --format claude" in captured["cmd"]
+
+
+def test_show_transcript_uses_secure_read_only_pager_and_quotes_python(monkeypatch):
+    app, captured = _transcript_app(monkeypatch)
+    monkeypatch.setattr(sys, "executable", "/tmp/Python Dir/python")
+    assert app._show_transcript(Path("/tmp/a file.jsonl"), session_type="codex")
+    cmd = captured["cmd"]
+    assert "'/tmp/Python Dir/python' -m railmux.transcript" in cmd
+    assert "tail -n 2000 '/tmp/a file.jsonl'" in cmd
+    assert "--preview-limit 2000" in cmd
+    assert "LESSSECURE=1" in cmd
+    assert "LESSHISTFILE=-" in cmd
+    assert "LESSOPEN= LESSCLOSE=" in cmd
 
 
 # ── #9: cross-mode selection re-maps by real_path, never leaks synthetic ─
@@ -552,7 +565,7 @@ def test_codex_session_status_matches_running_pane(monkeypatch):
     meta = SessionMeta(
         project=proj, session_id=UUID, jsonl_path=Path("/tmp/rollout.jsonl"),
         title="Codex chat", message_count=1, token_total=1, last_mtime=1.0,
-        status="idle", pending_tool=True, session_type="codex",
+        status="blocked", pending_tool=True, session_type="codex",
     )
     app = App.__new__(App)
     app._codex_mode = True
@@ -560,13 +573,17 @@ def test_codex_session_status_matches_running_pane(monkeypatch):
                                    project=proj, session_type="codex")}
     app._codex_index = MagicMock()
     app._codex_index.sessions_for_cwd.return_value = [meta]
-    # A live child ⇒ a tool is actively running ⇒ "busy" (not raw "idle").
-    monkeypatch.setattr(app_mod.tmux_ctl, "session_has_child", lambda name: True)
+    # Codex keeps its JSONL-derived state; its permanent child processes are
+    # not a valid liveness signal. Both panes must still agree.
+    monkeypatch.setattr(
+        app_mod.tmux_ctl, "session_has_child",
+        lambda _name: pytest.fail("Codex used the Claude process heuristic"),
+    )
 
     sessions_status = app._pane_sessions(proj, refresh=False)[0].status
     running_status = app._effective_status(meta)
 
-    assert sessions_status == "busy"          # refined, not raw "idle"
+    assert sessions_status == "blocked"
     assert sessions_status == running_status   # both panes agree
 
 

@@ -143,9 +143,42 @@ def test_first_tip_after_expiry_lasts_one_interval(app, clock, shown):
     clock["t"] += app._STATUS_TTL["info"] + 0.1  # expire → first idle tip
     app._update_status()
     first = shown[-1]
-    clock["t"] += app._TIP_INTERVAL + 0.01      # exactly one interval later
+    clock["t"] += app._TIP_INTERVAL - 0.1
+    app._update_status()
+    assert shown[-1] == first                    # keep it for the full interval
+    clock["t"] += 0.2                           # exactly one interval later
     app._update_status()
     assert shown[-1] != first                    # advanced, not stuck at 2×
+
+
+# ── optional in-pane error row ───────────────────────────────────────────
+
+def _error_row_visible(app) -> bool:
+    return any(widget is app._error_bar
+               for widget, _options in app._footer.contents)
+
+
+def test_error_row_uses_no_space_until_needed(app):
+    rows_without_error = app._footer.rows((100,))
+    assert not _error_row_visible(app)
+
+    app._show_error("Launch failed")
+    assert _error_row_visible(app)
+    assert app._footer.rows((100,)) == rows_without_error + 1
+
+    app._clear_error()
+    assert not _error_row_visible(app)
+    assert app._footer.rows((100,)) == rows_without_error
+
+
+def test_error_row_timeout_removes_optional_footer_row(app):
+    app._show_error("Launch failed")
+    assert _error_row_visible(app)
+
+    app._on_error_timeout(None, None)
+
+    assert app._error_text.text == ""
+    assert not _error_row_visible(app)
 
 
 # ── idle tip rotation ────────────────────────────────────────────────────

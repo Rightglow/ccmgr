@@ -284,7 +284,6 @@ class App:
     _status_since: float = 0.0
     _tip_index: int = 0
     _tip_since: float = 0.0
-    _status_just_expired: bool = False
     # railmux's status line is rendered into the OUTER tmux status bar (full
     # terminal width) — there is no in-pane status widget. Off until run() wires
     # it up; session-scoped so it never touches the user's global tmux config.
@@ -332,7 +331,6 @@ class App:
         self._status_since: float = 0.0
         self._tip_index: int = 0
         self._tip_since: float = 0.0
-        self._status_just_expired: bool = False
         # Outer tmux status-bar rendering; run() enables it once tmux is up.
         self._tmux_status_enabled: bool = False
         self._tmux_status_session: str | None = None
@@ -454,12 +452,15 @@ class App:
         self._error_text = urwid.Text("", align="left", wrap="clip")
         self._error_bar = urwid.AttrMap(self._error_text, "status_error")
         self._error_timer: object | None = None
-        footer = urwid.Pile([
+        # Do not add the error widget until there is an error.  An empty
+        # urwid.Text still occupies one row, so leaving it in the Pile would
+        # permanently steal terminal space despite the bar looking blank.
+        self._footer = urwid.Pile([
             ("pack", self._hint_bar),
-            ("pack", self._error_bar),
             ("pack", self._button_bar),
         ])
-        self._frame = _FocusAwareFrame(body=self._sidebar_body, footer=footer)
+        self._frame = _FocusAwareFrame(
+            body=self._sidebar_body, footer=self._footer)
         # Recover sessions left alive from a previous soft-quit.
         self._discover_orphans()
         # Restore the view from a previous soft-quit, or auto-select the
@@ -781,7 +782,7 @@ class App:
         ok = self._attach_in_right_pane(entry.tmux_name, steal_focus=steal_focus)
         if not ok:
             msg = "Re-attach failed: could not connect to agent pane"
-            self._set_status(msg)
+            self._set_status(msg, "error")
             self._show_error(msg)
             return
         r = self._by_tmux(entry.tmux_name)
@@ -875,11 +876,18 @@ class App:
         # would otherwise be auto-detected as Claude and render blank. Pass the
         # format explicitly from SessionMeta.session_type so the parser doesn't
         # have to guess from the first tailed record (#5).
-        fmt = " --format codex" if session_type == "codex" else ""
+        fmt = "codex" if session_type == "codex" else "claude"
         path = shlex.quote(str(jsonl_path))
+        python = shlex.quote(_sys.executable)
+        # LESSSECURE turns the pager into a viewer: no shell, pipe, editor,
+        # alternate-file, tag, or logfile commands. Do not persist searches,
+        # and suppress any user-configured input pre/postprocessors.
+        less_env = ("LESSSECURE=1 LESSHISTFILE=- "
+                    "LESSOPEN= LESSCLOSE=")
         cmd = (f"tail -n 2000 {path} | "
-               f"{_sys.executable} -m railmux.transcript{fmt} - | "
-               f"less -R +G {mouse}")
+               f"{python} -m railmux.transcript --format {fmt} "
+               f"--preview-limit 2000 - | "
+               f"{less_env} less -R +G {mouse}").rstrip()
         if self._right_pane_id and tmux_ctl.pane_alive(self._right_pane_id):
             if not tmux_ctl.respawn_pane(self._right_pane_id, cmd):
                 self._set_status("failed to respawn right pane for transcript")
@@ -1107,7 +1115,7 @@ class App:
         ok, err = self._ensure_detached_claude(tmux_name, shell_cmd, env=env)
         if not ok:
             msg = f"Launch failed: {err or 'could not create agent session'}"
-            self._set_status(msg)
+            self._set_status(msg, "error")
             self._show_error(msg)
             return False
         self._running[key] = _Running(
@@ -1119,7 +1127,7 @@ class App:
         )
         if not self._attach_in_right_pane(tmux_name, steal_focus=steal_focus):
             msg = "Launch failed: could not attach to agent pane"
-            self._set_status(msg)
+            self._set_status(msg, "error")
             self._show_error(msg)
             return False
         self._clear_error()
@@ -1192,8 +1200,9 @@ class App:
             path.mkdir(parents=True, exist_ok=True)
             path = path.resolve()
         except OSError as e:
-            self._set_status(str(e))
-            self._show_error(str(e))
+            msg = str(e)
+            self._set_status(msg, "error")
+            self._show_error(msg)
             return
         placeholder = self._new_placeholder_key()
         project: Project | None = None
@@ -1470,8 +1479,12 @@ class App:
             if tmux_name and tmux_ctl.session_exists(tmux_name):
                 ok = self._attach_in_right_pane(tmux_name, steal_focus=False)
                 if not ok:
-                    self._show_error(
-                        "Restore failed: could not re-attach to previous agent session")
+                    msg = (
+                        "Restore failed: could not re-attach to previous "
+                        "agent session"
+                    )
+                    self._set_status(msg, "error")
+                    self._show_error(msg)
         elif kind == "preview":
             sess_id = state.get("right_session")
             if sess_id and self._selected_project is not None:
@@ -2208,13 +2221,16 @@ class App:
     ) -> str:
         """Displayed status, refined by the live process when we own the session.
 
-        For a session railmux has opened, a pending ``tool_use`` with a live
-        child process means a tool is actively running (busy); no child means
-        Claude is waiting for approval (blocked). Probe failures fall back to
-        ``meta.status`` (the JSONL time heuristic). Used by both panes so the
-        same session never shows two different dots.
+        For a Claude session railmux has opened, a pending ``tool_use`` with a
+        live child process means a tool is actively running (busy); no child
+        means Claude is waiting for approval (blocked).  Codex is deliberately
+        excluded: its pane has permanent wrapper/native/MCP children, so the
+        same probe would report busy even while Codex is waiting for approval.
+        Codex therefore keeps its JSONL age heuristic. Probe failures fall back
+        to ``meta.status``. Used by both panes so the same session never shows
+        two different dots.
         """
-        if meta.pending_tool:
+        if meta.pending_tool and meta.session_type != "codex":
             r = self._running.get(meta.session_id)
             if r is not None and not r.is_placeholder:
                 if child_probes is not None and r.tmux_name in child_probes:
@@ -3171,6 +3187,21 @@ class App:
 
     _ERROR_BAR_TTL: float = 8.0  # seconds before auto-clear
 
+    def _set_error_bar_visible(self, visible: bool) -> None:
+        """Insert/remove the optional footer row without leaving blank space."""
+        if not hasattr(self, "_footer") or not hasattr(self, "_error_bar"):
+            return
+        current = next(
+            (i for i, (widget, _options) in enumerate(self._footer.contents)
+             if widget is self._error_bar),
+            None,
+        )
+        if visible and current is None:
+            self._footer.contents.insert(
+                1, (self._error_bar, self._footer.options("pack")))
+        elif not visible and current is not None:
+            del self._footer.contents[current]
+
     def _show_error(self, msg: str) -> None:
         """Display an error in the in-pane bottom bar (red, between hints and
         buttons).  Auto-clears after ``_ERROR_BAR_TTL`` seconds or on next
@@ -3182,6 +3213,7 @@ class App:
             return
         self._error_bar.set_attr_map({None: "status_error"})
         self._error_text.set_text(msg)
+        self._set_error_bar_visible(True)
         self._cancel_error_timer()
         if hasattr(self, "_loop") and self._loop is not None:
             self._error_timer = self._loop.set_alarm_in(
@@ -3192,6 +3224,7 @@ class App:
         if not hasattr(self, "_error_text"):
             return
         self._error_text.set_text("")
+        self._set_error_bar_visible(False)
         self._cancel_error_timer()
 
     def _cancel_error_timer(self) -> None:
@@ -3205,6 +3238,7 @@ class App:
     def _on_error_timeout(self, _loop, _user_data) -> None:
         self._error_timer = None
         self._error_text.set_text("")
+        self._set_error_bar_visible(False)
 
     def _update_status(self) -> None:
         """Advance the status-bar state machine once per tick.
@@ -3218,26 +3252,35 @@ class App:
             ttl = self._STATUS_TTL.get(self._status_level, 6.0)
             if ttl is None or now - self._status_since < ttl:
                 return
-            # Expired → clear and fall through so the idle branch shows the next
-            # tip on this same tick (and advances the index uniformly, avoiding
-            # the first post-message tip lingering for two intervals).
+            # Expired → clear immediately so a tip replaces the stale message
+            # on the bar.  Use refresh=False when railmux doesn't have focus
+            # (the user is typing in the right agent pane) so refresh-client -S
+            # doesn't jitter the CJK preedit box — set-option alone is enough
+            # to clear the old text; tmux will paint the new value on its next
+            # status-interval cycle or another focus-driven redraw.
             self._status_text = None
-            self._tip_since = 0.0
-            self._status_just_expired = True
+            if TIPS:
+                refresh = self._railmux_has_focus
+                self._render_status_to_tmux(
+                    TIPS[self._tip_index], "tip", refresh=refresh)
+                self._tip_index = (self._tip_index + 1) % len(TIPS)
+                # The tip was rendered above; start its full cadence now so the
+                # next poll does not immediately replace it with a second tip.
+                self._tip_since = now
+            else:
+                self._tip_since = 0.0
+            return
         # Idle: rotate tips on their own cadence.
         if not TIPS:
             return
         if self._tip_since == 0.0 or now - self._tip_since >= self._TIP_INTERVAL:
-            # When a status just expired we MUST clear the stale message, even
-            # without focus — the right agent pane may have focus (#CJK).
-            # Only skip refresh-client -S in that case to avoid IME jitter.
-            just_expired = self._status_just_expired
-            self._status_just_expired = False
+            # Only repaint the shared tmux status bar when railmux has focus.
+            # When the user is typing in the right agent pane, refresh-client -S
+            # inside _render_status_to_tmux makes the CJK preedit box jump.
+            # The counter still advances so tips don't stall during long typing
+            # sessions — the next tip appears as soon as focus returns.
             if self._railmux_has_focus:
                 self._render_status_to_tmux(TIPS[self._tip_index], "tip")
-            elif just_expired:
-                self._render_status_to_tmux(
-                    TIPS[self._tip_index], "tip", refresh=False)
             self._tip_index = (self._tip_index + 1) % len(TIPS)
             self._tip_since = now
 
