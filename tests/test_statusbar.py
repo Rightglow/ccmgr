@@ -13,8 +13,17 @@ def app(tmp_path, monkeypatch):
     ch = tmp_path / ".claude"
     (ch / "projects").mkdir(parents=True)
     # App startup normally re-adopts real detached tmux sessions. Status tests
-    # must not inherit the developer machine's external tmux/Codex state.
+    # must not inherit the developer machine's external tmux/Codex state or
+    # depend on which optional command-line tools the test runner installed.
     monkeypatch.setattr(app_mod.App, "_discover_orphans", lambda self: None)
+    monkeypatch.setattr(app_mod.tmux_ctl, "has_tmux", lambda: True)
+    real_which = app_mod.shutil.which
+    monkeypatch.setattr(
+        app_mod.shutil,
+        "which",
+        lambda command: "/test/bin/claude"
+        if command == "claude" else real_which(command),
+    )
     return app_mod.App(claude_home=ch, config=Config(), auto_launched=False)
 
 
