@@ -3224,12 +3224,14 @@ class App:
             # status-interval cycle (or on the first railmux-focus re-entry,
             # which calls refresh-client -S as usual).
             self._status_text = None
-            self._tip_since = 0.0
             if TIPS:
                 refresh = self._railmux_has_focus
                 self._render_status_to_tmux(
                     TIPS[self._tip_index], "tip", refresh=refresh)
                 self._tip_index = (self._tip_index + 1) % len(TIPS)
+            # Pretend a tip just rotated so the idle section below doesn't
+            # fire on the next tick (the expiry path already showed one).
+            self._tip_since = time.monotonic()
             return
         # Idle: rotate tips on their own cadence.
         if not TIPS:
