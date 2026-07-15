@@ -1791,16 +1791,13 @@ class App:
             if not self._codex_project_filter:
                 if self._mode_refresh_pending():
                     self._set_status("Codex mode — loading sessions…  (m to exit)")
-                    self._show_error("Codex mode — loading sessions…", level="info")
                 else:
                     self._set_status("Codex mode — no Codex sessions found  (m to exit)")
-                    self._show_error("Codex mode — no Codex sessions found", level="info")
                 self._sessions_pane.set_sessions(None, [],
                     running_ids=set(self._running),
                     favorite_ids=self._favorites.get_ids())
                 return
             self._set_status("Codex mode  (m to exit)")
-            self._show_error("Switched to Codex mode", level="info")
             # Switch to a project that has Codex sessions, if available.
             if self._selected_project is not None and self._selected_project.real_path in self._codex_project_filter:
                 self._on_project_select(self._selected_project)
@@ -1816,7 +1813,6 @@ class App:
             visible = self._visible_projects(allow_stale=True)
             self._projects_pane.set_projects(visible)
             self._set_status("Claude mode  (m for Codex)")
-            self._show_error("Switched to Claude Code mode", level="info")
             # Re-map the selection into the TARGET (Claude) mode by resolved
             # real_path. The current selection may be a synthetic Codex project
             # (empty claude_dir) which must never be handed to the Claude
@@ -3162,25 +3158,25 @@ class App:
         self._status_since = time.monotonic()
         self._render_status_to_tmux(msg, level)
 
-    # ── in-pane notification bar ──────────────────────────────────────────
+    # ── in-pane error bar ──────────────────────────────────────────────────
 
-    _NOTIFY_TTL: float = 8.0    # seconds before auto-clear (error)
-    _NOTIFY_INFO_TTL: float = 3.0  # shorter for info (mode switch etc.)
+    _ERROR_BAR_TTL: float = 8.0  # seconds before auto-clear
 
-    def _show_error(self, msg: str, level: str = "error") -> None:
-        """Display a notification in the in-pane bottom bar.  Red for errors
-        (default), green for info.  Auto-clears after a level-dependent TTL or
-        on next successful launch."""
+    def _show_error(self, msg: str) -> None:
+        """Display an error in the in-pane bottom bar (red, between hints and
+        buttons).  Auto-clears after ``_ERROR_BAR_TTL`` seconds or on next
+        successful launch.
+
+        Info/warn messages use the outer tmux status bar (``_set_status``) —
+        this bar is reserved for hard failures the user must not miss."""
         if not hasattr(self, "_error_text"):
             return
-        style = "status_error" if level == "error" else "status_info"
-        self._error_bar.set_attr_map({None: style})
+        self._error_bar.set_attr_map({None: "status_error"})
         self._error_text.set_text(msg)
         self._cancel_error_timer()
-        ttl = self._NOTIFY_TTL if level == "error" else self._NOTIFY_INFO_TTL
         if hasattr(self, "_loop") and self._loop is not None:
             self._error_timer = self._loop.set_alarm_in(
-                ttl, self._on_error_timeout)
+                self._ERROR_BAR_TTL, self._on_error_timeout)
 
     def _clear_error(self) -> None:
         """Clear the in-pane error bar and cancel its auto-clear timer."""
