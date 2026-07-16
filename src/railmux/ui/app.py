@@ -1081,6 +1081,23 @@ class App:
         press may briefly preview before the second press opens the session;
         both operations reuse the same right pane.
         """
+        # Rows bind their click callback from a periodically-refreshed snapshot.
+        # The registry can become live between render and click (or a click can
+        # land on an old row instance preserved across a rebuild). Revalidate
+        # the tmux identity at action time so a stale "preview" callback never
+        # replaces a live agent display with transcript history.
+        running = getattr(self, "_running", {}).get(session.session_id)
+        if (running is not None
+                and self._agent_session_alive(running.tmux_name)):
+            self._on_running_select(
+                RunningEntry(
+                    tmux_name=running.tmux_name,
+                    label=running.label,
+                    status=running.status,
+                ),
+                steal_focus=False,
+            )
+            return
         self._cancel_pending_double_focus()
         if not self._has_less:
             self._set_status("'less' not installed — cannot preview history")
@@ -1323,6 +1340,26 @@ class App:
             if r.tmux_name == tmux_name:
                 return r
         return None
+
+    def _agent_session_alive(
+        self,
+        tmux_name: str,
+        server: tmux_ctl.ServerSnapshot | None = None,
+    ) -> bool:
+        """Whether an owned agent still has a live process-bearing pane.
+
+        In swap mode the home session contains only the placeholder, so its
+        existence is not proof that the agent survived. In nested mode the
+        agent remains in its own session and the session identity is enough.
+        """
+        real_pane = self._display_transport().displayed_real_pane(tmux_name)
+        if real_pane is not None:
+            if server is not None:
+                return real_pane in server.panes
+            return tmux_ctl.pane_alive(real_pane)
+        if server is not None:
+            return tmux_name in server.sessions
+        return tmux_ctl.session_exists(tmux_name)
 
     def _existing_session_ids(self, cwd: Path, project: Project | None,
                               session_type: str) -> frozenset[str]:
@@ -2454,14 +2491,7 @@ class App:
         child_probes: dict[str, bool | None] = {}
 
         def session_is_alive(name: str) -> bool:
-            real_pane = transport.displayed_real_pane(name)
-            if real_pane is not None:
-                if server is not None:
-                    return real_pane in server.panes
-                return tmux_ctl.pane_alive(real_pane)
-            if server is not None:
-                return name in server.sessions
-            return tmux_ctl.session_exists(name)
+            return self._agent_session_alive(name, server)
 
         def pane_is_alive(pane_id: str) -> bool:
             if server is not None:

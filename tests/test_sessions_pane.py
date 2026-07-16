@@ -127,6 +127,124 @@ def test_running_sessions_get_click_and_double_click():
     assert completed == [True]
 
 
+def test_stale_preview_callback_rechecks_live_running_session(monkeypatch):
+    """A row rendered just before the running registry changed must not open
+    history for an agent whose tmux session is live at click time."""
+    from railmux import tmux_ctl
+    from railmux.config import Config
+    from railmux.ui.app import App, _Running
+    from railmux.ui.workspace import AgentWorkspace
+
+    project = _project()
+    session = _session(project)
+    app = App.__new__(App)
+    app._workspace = AgentWorkspace()
+    app._config = Config()
+    app._auto_launched = False
+    app._railmux_pane_id = None
+    app._running = {}
+    app._has_less = True
+    attached = []
+    previewed = []
+    monkeypatch.setattr(tmux_ctl, "session_exists", lambda _name: True)
+    monkeypatch.setattr(
+        app, "_on_running_select",
+        lambda entry, **kwargs: attached.append((entry.tmux_name, kwargs)),
+    )
+    monkeypatch.setattr(app, "_cancel_pending_double_focus", lambda: None)
+    monkeypatch.setattr(
+        app, "_show_transcript",
+        lambda *_args, **_kwargs: previewed.append(True) or True,
+    )
+    monkeypatch.setattr(app, "_set_active_target", lambda *_args: None)
+    monkeypatch.setattr(app, "_set_status", lambda *_args: None)
+
+    pane = SessionsPane(
+        on_select=lambda *_args, **_kwargs: None,
+        on_preview=app._on_session_preview,
+    )
+    pane.set_sessions(project, [session], running_ids=set(), favorite_ids=set())
+    row = next(w for w in pane._walker if isinstance(w, _SessionRow))
+    app._running[session.session_id] = _Running(
+        key=session.session_id,
+        tmux_name="cx-live",
+        label="test-proj/Test Session",
+        project=project,
+        session_type="codex",
+    )
+
+    assert row._on_click is not None
+    row._on_click()
+
+    assert attached == [("cx-live", {"steal_focus": False})]
+    assert previewed == []
+
+
+def test_stale_running_registry_does_not_hide_stopped_preview(monkeypatch):
+    """A dead tmux entry is not enough to turn a stopped row into an attach."""
+    from railmux import tmux_ctl
+    from railmux.config import Config
+    from railmux.ui.app import App, _Running
+    from railmux.ui.workspace import AgentWorkspace
+
+    project = _project()
+    session = _session(project)
+    app = App.__new__(App)
+    app._workspace = AgentWorkspace()
+    app._config = Config()
+    app._auto_launched = False
+    app._railmux_pane_id = None
+    app._running = {
+        session.session_id: _Running(
+            key=session.session_id,
+            tmux_name="cx-dead",
+            label="test-proj/Test Session",
+            project=project,
+            session_type="codex",
+        ),
+    }
+    app._has_less = True
+    app._primary_slot.in_history_mode = False
+    attached = []
+    previewed = []
+    monkeypatch.setattr(tmux_ctl, "session_exists", lambda _name: False)
+    monkeypatch.setattr(
+        app, "_on_running_select",
+        lambda *_args, **_kwargs: attached.append(True),
+    )
+    monkeypatch.setattr(app, "_cancel_pending_double_focus", lambda: None)
+    monkeypatch.setattr(app, "_save_restore_state", lambda: None)
+    monkeypatch.setattr(
+        app, "_show_transcript",
+        lambda *_args, **_kwargs: previewed.append(True) or True,
+    )
+    monkeypatch.setattr(app, "_set_active_target", lambda *_args: None)
+    monkeypatch.setattr(app, "_set_status", lambda *_args: None)
+
+    app._on_session_preview(session)
+
+    assert attached == []
+    assert previewed == [True]
+
+
+def test_agent_session_liveness_uses_displayed_swap_pane(monkeypatch):
+    """A swap placeholder session must not mask death of the real pane."""
+    from types import SimpleNamespace
+
+    from railmux import tmux_ctl
+    from railmux.ui.app import App
+
+    app = App.__new__(App)
+    transport = SimpleNamespace(
+        displayed_real_pane=lambda _name: "%real",
+    )
+    monkeypatch.setattr(app, "_display_transport", lambda: transport)
+    monkeypatch.setattr(tmux_ctl, "pane_alive", lambda _pane: False)
+    monkeypatch.setattr(tmux_ctl, "session_exists", lambda _name: True)
+
+    assert not app._agent_session_alive("cx-placeholder-home")
+
+
 def test_non_running_no_preview_callback():
     """When on_preview is None, non-running sessions have no on_click."""
     pane = SessionsPane(on_select=lambda s: None, on_preview=None)
