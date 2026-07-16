@@ -17,7 +17,9 @@ import time
 import tty
 
 
-FRAME_SECONDS = 0.5  # 2 FPS aggressively avoids queuing frames over SSH.
+FRAME_SECONDS = 0.5  # Keep sustained redraws conservative on slow SSH links.
+
+
 class ScrollAccumulator:
     """Accumulate signed wheel deltas between render frames."""
 
@@ -42,9 +44,16 @@ class ScrollInput:
         self.target_pane = target_pane
         self.accumulator = ScrollAccumulator(lines_per_event)
         self.next_flush: float | None = None
+        self._last_flush: float | None = None
         self._target_buffer: bytearray | None = None
 
-    def feed(self, data: bytes, now: float, frame_seconds: float) -> None:
+    def feed(self, data: bytes, now: float, frame_seconds: float) -> int:
+        """Consume input and return a delta that should render immediately.
+
+        The first wheel input when no frame cooldown is active is a leading-edge
+        update. Further input inside the same frame remains accumulated until
+        ``next_flush`` so a burst produces at most one redraw per frame.
+        """
         for byte in data:
             if self._target_buffer is not None:
                 if byte in (10, 13):
@@ -55,19 +64,41 @@ class ScrollInput:
                 else:
                     self._target_buffer.append(byte)
             elif byte == ord("T"):
-                # Never carry wheel intent across session switches. At 2 FPS
-                # the old pane may have up to 500 ms pending.
+                # Never carry wheel intent or a frame deadline across session
+                # switches. The new target's first wheel event should render
+                # immediately instead of inheriting the old target's cooldown.
                 self.accumulator.drain()
                 self.next_flush = None
+                self._last_flush = None
                 self._target_buffer = bytearray()
             elif byte in (ord("U"), ord("D")):
                 self.accumulator.feed(bytes((byte,)))
-                if self.next_flush is None:
-                    self.next_flush = now + frame_seconds
+
+        if not self.accumulator.pending:
+            self.next_flush = None
+            return 0
+
+        deadline = (
+            None if self._last_flush is None
+            else self._last_flush + frame_seconds
+        )
+        if deadline is None or now >= deadline:
+            return self.flush(now)
+
+        self.next_flush = deadline
+        return 0
 
     def drain(self) -> int:
+        """Drain pending distance without changing the frame clock."""
         delta = self.accumulator.drain()
         self.next_flush = None
+        return delta
+
+    def flush(self, now: float) -> int:
+        """Drain pending distance and start a new bounded-render frame."""
+        delta = self.drain()
+        if delta:
+            self._last_flush = now
         return delta
 
 
@@ -113,11 +144,13 @@ def run(target_pane: str, frame_seconds: float = FRAME_SECONDS,
                     if delta:
                         apply_scroll(state.target_pane, delta)
                     return
-                state.feed(data, time.monotonic(), frame_seconds)
+                delta = state.feed(data, time.monotonic(), frame_seconds)
+                if delta:
+                    apply_scroll(state.target_pane, delta)
 
-            if (state.next_flush is not None
-                    and time.monotonic() >= state.next_flush):
-                delta = state.drain()
+            now = time.monotonic()
+            if state.next_flush is not None and now >= state.next_flush:
+                delta = state.flush(now)
                 if delta:
                     apply_scroll(state.target_pane, delta)
     finally:
