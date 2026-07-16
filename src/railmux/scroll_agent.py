@@ -17,7 +17,7 @@ import time
 import tty
 
 
-FRAME_SECONDS = 0.5  # Keep sustained redraws conservative on slow SSH links.
+FRAME_SECONDS = 0.1  # 10 FPS balances smooth wheel motion and SSH redraw volume.
 
 
 class ScrollAccumulator:

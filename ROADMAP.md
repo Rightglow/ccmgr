@@ -41,9 +41,9 @@ direct Codex baseline at the same pane size and SSH link before choosing the
 default frame budget.
 
 The low-risk scheduling step remains independent of pane migration:
-copy-mode now renders the leading wheel update immediately while retaining the
-existing conservative 500 ms frame for the remainder of a burst. A faster
-adaptive or user-configurable frame still requires real-provider measurements.
+copy-mode now renders the leading wheel update immediately and coalesces the
+remainder of a burst on a 100 ms frame (10 FPS). A faster adaptive or
+user-configurable frame still requires real-provider measurements.
 
 Lifecycle invariants for the prototype:
 
@@ -59,7 +59,7 @@ Lifecycle invariants for the prototype:
   independent attached client or its pane topology is not the supported
   single-agent shape.
 - Keep scroll routing scoped to marked agent panes. Evolve the current fixed
-  500 ms frame toward a configurable/adaptive 33--50 ms interval only after
+  100 ms frame toward a configurable/adaptive 33--50 ms interval only after
   measurements justify it; disabling coalescing remains a diagnostic fallback,
   not the intended performance solution.
 

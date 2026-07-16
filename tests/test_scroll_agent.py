@@ -53,8 +53,8 @@ def test_apply_scroll_zero_does_not_spawn_tmux():
     run.assert_not_called()
 
 
-def test_default_frame_budget_remains_conservative():
-    assert FRAME_SECONDS == 0.5
+def test_default_frame_budget_is_ten_fps():
+    assert FRAME_SECONDS == 0.1
 
 
 def test_first_wheel_input_flushes_immediately():

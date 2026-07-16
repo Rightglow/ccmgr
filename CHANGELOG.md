@@ -39,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Raise copy-mode wheel coalescing from 2 FPS to 10 FPS over SSH while keeping
+  the immediate leading update, native scroll distance, and both nested and
+  experimental swap transport lifecycles unchanged.
 - Use one grass-green focus system (`#5FAF00`): bright pane chrome and tmux
   status bar, a deep-green cursor row, a neutral slate persistent target, and
   grass-green live-session titles. Red/yellow/green status dots retain their
