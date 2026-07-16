@@ -132,14 +132,16 @@ class ScrollManager:
         return tmux_ctl.wait_window_user_option(
             self._agent_session, "@railmux_scroll_ready", "1")
 
-    def configure(self, claude_tmux_name: str) -> bool:
+    def configure(
+        self, claude_tmux_name: str, *, target_pane: str | None = None,
+    ) -> bool:
         """Enable or retarget coalescing for a detached agent session."""
         if not self.enabled or not self._acquire():
             return False
         if self._bindings_backup is None:
             self._load_state()
 
-        target_pane = tmux_ctl.session_pane_id(claude_tmux_name)
+        target_pane = target_pane or tmux_ctl.session_pane_id(claude_tmux_name)
         if not target_pane:
             return False
 

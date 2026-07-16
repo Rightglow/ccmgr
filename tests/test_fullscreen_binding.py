@@ -99,6 +99,7 @@ def test_reinstall_updates_pane_id(monkeypatch):
 def test_fast_path_still_rebinds(monkeypatch):
     """Fast path in _attach_in_right_pane also re-installs the binding."""
     app = _bare_app(_right_pane_id="%5", _right_pane_claude="cc-test")
+    app._check_agent_slot_size = MagicMock()
     bind_calls = []
 
     def capture(cmd, **kw):
@@ -175,7 +176,8 @@ def test_first_attach_creates_detached_pane_then_fits_and_respawns(monkeypatch):
 
     assert app._attach_in_right_pane("cc-new") is True
     assert events == [
-        ("split", "sleep 10", {"size_percent": 70, "detached": True}),
+        ("split", "while :; do sleep 3600; done",
+         {"size_percent": 70, "detached": True}),
         ("fit", "cc-new", "%8"),
         ("respawn", "%8"),
         ("select", "%8"),

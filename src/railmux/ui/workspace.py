@@ -16,6 +16,30 @@ class WorkspaceLayout(str, Enum):
     SIDE_BY_SIDE = "side-by-side"
 
 
+class DisplayTransportKind(str, Enum):
+    NESTED = "nested"
+    SWAP = "swap"
+
+
+@dataclass
+class SwapState:
+    """Durable identities for one displayed real agent pane."""
+
+    transaction_id: str
+    agent_tmux_name: str
+    agent_pane_id: str
+    agent_pane_pid: int
+    home_window_id: str
+    placeholder_pane_id: str
+    display_window_id: str
+    keeper_session: str
+    keeper_session_id: str
+    outer_session_name: str
+    outer_session_id: str
+    owner_pane_id: str
+    phase: str = "displayed"
+
+
 @dataclass
 class SlotRestoreState:
     """Content to restore after a read-only transcript preview exits."""
@@ -37,6 +61,8 @@ class AgentSlot:
     mode_key: str | None = None
     last_size: tuple[int, int] | None = None
     last_size_class: str | None = None
+    transport_kind: DisplayTransportKind = DisplayTransportKind.NESTED
+    swap_state: SwapState | None = None
 
     @property
     def is_open(self) -> bool:
@@ -51,6 +77,8 @@ class AgentSlot:
         self.mode_key = None
         self.last_size = None
         self.last_size_class = None
+        self.transport_kind = DisplayTransportKind.NESTED
+        self.swap_state = None
 
 
 class AgentWorkspace:

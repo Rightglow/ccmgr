@@ -51,6 +51,18 @@ def main(argv: list[str] | None = None) -> int:
     if not ensure_tmux_available():
         return 2
 
+    # A swap transaction survives a killed Railmux Python process in tmux
+    # metadata. Repair it before ``new-session -A``: otherwise that command
+    # would merely attach to the stranded display window and never start App.
+    from railmux.display_transport import recover_interrupted_swaps
+    recovery = recover_interrupted_swaps()
+    if recovery.unresolved:
+        print(
+            "warning: an interrupted agent display could not be repaired; "
+            "the marked pane was left untouched",
+            file=sys.stderr,
+        )
+
     # If we're not in tmux and not told we're already inside, re-exec ourselves under tmux.
     if not args.inside_tmux and not tmux_ctl.in_tmux():
         # Find this railmux binary to re-exec.

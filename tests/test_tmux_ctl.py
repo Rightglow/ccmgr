@@ -140,6 +140,46 @@ def test_session_pane_id_handles_empty_session():
         assert session_pane_id("cc-example") is None
 
 
+def test_pane_identity_parses_stable_location_outside_tmux():
+    output = "%7\t4242\tagent\t$2\t@3\t0\t91\t31\n"
+    with _mock_check_output(output) as call:
+        pane = tmux_ctl.pane_identity("%7")
+    assert pane == tmux_ctl.PaneIdentity(
+        "%7", 4242, "agent", "$2", "@3", False, 91, 31)
+    assert call.call_args.args[0][:5] == [
+        "tmux", "display-message", "-p", "-t", "%7"]
+
+
+def test_session_topology_requires_exact_server_results(monkeypatch):
+    outputs = iter((
+        b"$2\n",
+        b"0\n",
+        b"@3\n",
+        b"%7\t4242\tagent\t$2\t@3\t0\t91\t31\n",
+    ))
+    monkeypatch.setattr(subprocess, "check_output", lambda *_a, **_k: next(outputs))
+    topology = tmux_ctl.session_topology("agent")
+    assert topology is not None
+    assert topology.single_live_pane.pane_id == "%7"
+    assert topology.attached_clients == 0
+
+
+def test_swap_and_grouped_session_commands_are_tmux_27_compatible():
+    with _mock_check_call() as call:
+        assert tmux_ctl.swap_panes("%2", "%1")
+        assert tmux_ctl.create_grouped_session("keeper", "railmux")
+    assert call.call_args_list[0].args[0] == [
+        "tmux", "swap-pane", "-s", "%2", "-t", "%1"]
+    assert call.call_args_list[1].args[0] == [
+        "tmux", "new-session", "-d", "-t", "railmux", "-s", "keeper"]
+
+
+def test_list_window_user_options_preserves_empty_trailing_field():
+    with _mock_check_output("@1\tvalue\t\n"):
+        rows = tmux_ctl.list_window_user_options(("@one", "@two"))
+    assert rows == [("@1", "value", "")]
+
+
 # ── #12: exact child→rollout correlation via /proc ───────────────────────
 
 _UUID_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"

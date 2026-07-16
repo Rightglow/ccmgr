@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 import pytest
+import urwid
 
 from railmux import tmux_ctl
 from railmux.config import Config
@@ -197,6 +198,25 @@ def test_effective_status_uses_snapshot_pane_pid(app, monkeypatch):
     assert calls == [4321]
 
 
+def test_effective_status_uses_displayed_swap_pane_pid(app, monkeypatch):
+    a, _Running = app
+    a._running[_UID] = _Running(key=_UID, tmux_name="cc-x", label="l")
+    transport = a._display_transport()
+    monkeypatch.setattr(transport, "displayed_real_pid", lambda _name: 9876)
+    calls = []
+    monkeypatch.setattr(
+        tmux_ctl, "process_has_child",
+        lambda pid: calls.append(pid) or True,
+    )
+    server = tmux_ctl.ServerSnapshot(
+        sessions=frozenset({"cc-x"}), panes=frozenset({"%9"}),
+        session_pids=(("cc-x", 4321),),
+    )
+
+    assert a._effective_status(_meta(pending=True), {}, server) == "busy"
+    assert calls == [9876]
+
+
 def test_effective_status_not_opened_falls_back_to_time(app, monkeypatch):
     a, _Running = app
     # Not in _running → no live process → use meta.status, never call pgrep.
@@ -238,6 +258,21 @@ def test_refresh_clears_visual_selection_for_missing_project(app):
 
     assert a._selected_project is None
     assert a._projects_pane._selected_encoded_name is None
+
+
+def test_refresh_outer_session_loss_uses_soft_exit(app, monkeypatch):
+    a, _Running = app
+    transport = a._display_transport()
+    monkeypatch.setattr(transport, "outer_session_lost", lambda: True)
+    closed = []
+    monkeypatch.setattr(
+        transport, "close_all", lambda: closed.append(True) or True)
+
+    with pytest.raises(urwid.ExitMainLoop):
+        a._refresh()
+
+    assert a._soft_quit_flag is True
+    assert closed == [True]
 
 
 def test_refresh_skips_server_snapshot_without_liveness_targets(

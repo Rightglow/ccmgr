@@ -257,6 +257,30 @@ def test_cleanup_aborts_if_tmux_writer_cannot_be_stopped(monkeypatch, tmp_path):
     assert statuses[-1][1] == "error"
 
 
+def test_cleanup_aborts_if_displayed_real_pane_cannot_return_home(
+        monkeypatch, tmp_path):
+    jsonl = tmp_path / f"{UUID}.jsonl"
+    jsonl.write_text("{}\n")
+    running = {UUID: _Running(key=UUID, tmux_name="cc-abc", label="x")}
+    app, statuses, refreshed = _cleanup_app(monkeypatch, running)
+    transport = MagicMock()
+    transport.prepare_kill.return_value = False
+    app._display_transport_manager = transport
+    monkeypatch.setattr(app_mod.tmux_ctl, "session_exists", lambda _n: True)
+    killed = []
+    monkeypatch.setattr(
+        app_mod.tmux_ctl, "kill_session", lambda name: killed.append(name) or True)
+
+    app._cleanup_session(
+        session_id=UUID, jsonl_path=jsonl,
+        tmux_name="cc-abc", label="x")
+
+    assert jsonl.exists()
+    assert killed == []
+    assert refreshed == []
+    assert statuses[-1][1] == "error"
+
+
 def test_cleanup_waits_for_writer_exit_before_deleting(monkeypatch, tmp_path):
     jsonl = tmp_path / f"{UUID}.jsonl"
     jsonl.write_text("{}\n")
@@ -478,6 +502,10 @@ def _transcript_app(monkeypatch):
     app._set_status = lambda *a, **k: None
     app._install_fullscreen_binding = lambda: None
     captured: dict = {}
+    transport = MagicMock()
+    transport.prepare_preview.side_effect = (
+        lambda _slot: captured.__setitem__("prepared", True) or True)
+    app._display_transport_manager = transport
     monkeypatch.setattr(app_mod.tmux_ctl, "pane_alive", lambda pid: True)
     monkeypatch.setattr(app_mod.tmux_ctl, "respawn_pane",
                         lambda pid, cmd: captured.__setitem__("cmd", cmd) or True)
@@ -487,6 +515,7 @@ def _transcript_app(monkeypatch):
 def test_show_transcript_codex_passes_explicit_format(monkeypatch):
     app, captured = _transcript_app(monkeypatch)
     assert app._show_transcript(Path("/tmp/r.jsonl"), session_type="codex")
+    assert captured["prepared"] is True
     assert "railmux.transcript --format codex --preview-limit 2000 -" in captured["cmd"]
 
 

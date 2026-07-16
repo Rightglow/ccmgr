@@ -348,7 +348,8 @@ def test_teardown_soft_quit_skips_session_kill():
         "abc123": _Running(key="abc123", tmux_name="cc-abc123", label="test", project=None),
     }
 
-    with patch("railmux.ui.app.tmux_ctl") as tmux:
+    with patch("railmux.ui.app.tmux_ctl") as tmux, \
+         patch("railmux.display_transport.tmux_ctl", tmux):
         app._teardown_tmux()
 
     # Right-pane cleanup still happens.
@@ -372,6 +373,26 @@ def test_teardown_hard_quit_kills_sessions():
         app._teardown_tmux()
 
     tmux.kill_session.assert_any_call("cc-abc123")
+
+
+def test_teardown_failed_swap_return_degrades_to_soft_quit():
+    app = _minimal_app()
+    app._soft_quit_flag = False
+    app._auto_launched = True
+    app._scroll_manager = MagicMock()
+    app._running = {
+        "abc123": _Running(
+            key="abc123", tmux_name="cc-abc123", label="test", project=None),
+    }
+    transport = MagicMock()
+    transport.close_all.return_value = False
+    app._display_transport_manager = transport
+
+    with patch("railmux.ui.app.tmux_ctl") as tmux:
+        app._teardown_tmux()
+
+    assert app._soft_quit_flag is True
+    tmux.kill_session.assert_not_called()
 
 
 def test_teardown_reverts_every_bar_option(monkeypatch):

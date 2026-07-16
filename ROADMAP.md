@@ -22,13 +22,14 @@ Open questions:
 
 ### De-nested agent pane rendering
 
-Prototype replacing the right-side nested `tmux attach-session` client with the
-real agent pane. The likely mechanism is a tracked placeholder plus
-`swap-pane`: move the selected agent pane from its detached background session
-into the Railmux display slot, then swap it back before displaying another
-agent. This should remove one PTY, terminal parser, and tmux composition pass
-from every agent update while keeping the agent process owned by tmux rather
-than by the Railmux Python process.
+An experimental, default-off transport now replaces the right-side nested
+`tmux attach-session` client with the real agent pane. It uses a tracked
+placeholder plus cross-session `swap-pane`, durable tmux metadata, and a
+zero-extra-pane session-group keeper. The keeper preserves a displayed agent
+even if the original outer session is directly killed; startup repair returns
+only exact marked panes. Nested attach remains the default and the fallback for
+unsupported topology, an external client, an unmanaged outer session, or any
+unproven operation. See `docs/DENESTED_AGENT_PANE.md` for evidence.
 
 This is primarily a responsiveness project, not just an internal refactor.
 Codex over the same SSH connection should feel close to a directly launched
@@ -39,11 +40,10 @@ intermediate frames. Benchmark the current nested path, the prototype, and a
 direct Codex baseline at the same pane size and SSH link before choosing the
 default frame budget.
 
-The low-risk scheduling step is implemented independently of pane migration:
+The low-risk scheduling step remains independent of pane migration:
 copy-mode now renders the leading wheel update immediately while retaining the
-existing conservative 500 ms frame for the remainder of a burst. De-nesting
-and a faster adaptive or user-configurable frame remain prototype work and
-require measurements plus the lifecycle safeguards below.
+existing conservative 500 ms frame for the remainder of a burst. A faster
+adaptive or user-configurable frame still requires real-provider measurements.
 
 Lifecycle invariants for the prototype:
 
@@ -63,16 +63,26 @@ Lifecycle invariants for the prototype:
   measurements justify it; disabling coalescing remains a diagnostic fallback,
   not the intended performance solution.
 
-Open questions:
+Proven implementation facts:
 
-- Whether `swap-pane` preserves acceptable agent geometry across every switch,
-  especially for long inline Codex transcripts.
-- How placeholder ownership composes with two simultaneously visible agent
-  slots without allowing one pane to appear in two places.
-- Which tmux versions have sufficiently reliable cross-session pane swaps and
-  which versions must retain the nested-client fallback.
+- Cross-session swap and direct-outer-kill recovery pass on Linux with tmux 2.7
+  and 3.4. The CI smoke runs the same private-socket path on Linux and macOS.
+- Primary and secondary ownership records are separate, and one real pane
+  cannot be claimed by both slots; the public UI still exposes only primary.
+- Total PTY count does not fall because the hidden home placeholder replaces
+  the visible nested-client PTY. The visible update path does remove the nested
+  client/parser/composition hop.
+
+Remaining gates before considering a default change:
+
+- Acceptable real-provider geometry/reflow, especially on tmux 2.7/2.8 where
+  `resize-window` is unavailable and with long inline Codex transcripts.
+- Confirmed macOS CI evidence after an approved push.
 - How much Claude Code improves when de-nested, since its alternate-screen,
   application-owned mouse path cannot use Codex's copy-mode batching unchanged.
+- Same-link SSH measurements for first wheel paint, burst drain, sustained
+  output, clipboard/mouse behavior, and CPU. Local synthetic output did not
+  demonstrate a useful overall responsiveness gain, so nested remains default.
 
 ### Codex interrupt transcript replay
 

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add an experimental, default-off de-nested agent display transport using
+  transactional cross-session pane swaps, durable tmux recovery markers, and a
+  zero-extra-pane session-group keeper. It returns real panes before preview,
+  close, quit, or delete; repairs interrupted swaps; preserves agents across a
+  direct outer-session kill; and falls back to nested attach for independent
+  clients, unsupported topology, unmanaged sessions, or failed validation.
+- Extend isolated real-tmux smoke coverage with swap/home, A/B switching,
+  direct outer-session kill recovery, and independent-client fallback. The
+  implementation path is verified on Linux with tmux 2.7 and 3.4 and remains in
+  the existing Linux/macOS CI matrix.
 - Added provider-neutral mode and at-most-two-slot agent-workspace foundations,
   plus internal architecture/roadmap guidance for future providers and dual
   agent panes. Current releases still expose the original single-agent layout.

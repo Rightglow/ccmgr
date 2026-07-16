@@ -20,6 +20,10 @@ from railmux import tmux_ctl
 from railmux.atomic_file import atomic_write_text
 from railmux.codex_index import CodexIndex
 from railmux.config import Config
+from railmux.display_transport import (
+    AgentDisplayTransport,
+    recover_interrupted_swaps,
+)
 from railmux.discovery import invalidate_session, list_projects
 from railmux.favorites import Favorites
 from railmux.settings import Settings
@@ -56,7 +60,11 @@ from railmux.ui.projects_pane import ProjectsPane
 from railmux.ui.running_pane import RunningEntry, RunningSessionsPane
 from railmux.ui.sessions_pane import SessionsPane
 from railmux.ui.statusbar import ButtonBar, HintBar, TIPS
-from railmux.ui.workspace import AgentSlot, AgentWorkspace, SlotRestoreState
+from railmux.ui.workspace import (
+    AgentSlot,
+    AgentWorkspace,
+    SlotRestoreState,
+)
 
 
 _GRASS_GREEN = "#5faf00"
@@ -371,6 +379,26 @@ class App:
             self._workspace = workspace
         return workspace
 
+    def _display_transport(self) -> AgentDisplayTransport:
+        manager = getattr(self, "_display_transport_manager", None)
+        if manager is None:
+            config = getattr(self, "_config", Config())
+            wants_swap = config.agent_transport == "swap"
+            manager = AgentDisplayTransport(
+                self._agent_workspace(),
+                config.agent_transport,
+                auto_launched=getattr(self, "_auto_launched", False),
+                outer_session_name=(
+                    tmux_ctl.current_session_name() if wants_swap else None),
+                outer_session_id=(
+                    tmux_ctl.current_session_id() if wants_swap else None),
+                owner_pane_id=(
+                    getattr(self, "_railmux_pane_id", None)
+                    if wants_swap else None),
+            )
+            self._display_transport_manager = manager
+        return manager
+
     @property
     def _primary_slot(self) -> AgentSlot:
         return self._agent_workspace().primary
@@ -490,6 +518,7 @@ class App:
         # bounded secondary slot is deliberately present so dual-agent support
         # does not grow a second set of scalar fields throughout App.
         self._workspace = AgentWorkspace()
+        self._display_transport_manager: AgentDisplayTransport | None = None
         self._loop: urwid.MainLoop | None = None
         self._pending_restore_state: dict | None = None
         self._pending_project: Project | None = None
@@ -593,6 +622,11 @@ class App:
         ])
         self._frame = _FocusAwareFrame(
             body=self._sidebar_body, footer=self._footer)
+        # Backstop for direct ``--inside-tmux`` starts. The normal CLI also
+        # audits before ``new-session -A`` so a stale outer session cannot
+        # prevent a new App process from launching.
+        if tmux_ctl.in_tmux():
+            recover_interrupted_swaps()
         # Recover sessions left alive from a previous soft-quit.
         self._discover_orphans()
         # Restore the view from a previous soft-quit, or auto-select the
@@ -1115,6 +1149,15 @@ class App:
                f"--preview-limit 2000 - | "
                f"{less_env} less -R +G {mouse}").rstrip()
         slot = self._primary_slot
+        # In swap mode ``slot.pane_id`` is the real provider pane. Return it
+        # home before the destructive ``respawn-pane -k`` below; only the
+        # display placeholder may be replaced by the transcript viewer.
+        if not self._display_transport().prepare_preview(slot):
+            self._set_status(
+                "failed to return the agent home before transcript preview",
+                "error",
+            )
+            return False
         if slot.pane_id and tmux_ctl.pane_alive(slot.pane_id):
             if not tmux_ctl.respawn_pane(slot.pane_id, cmd):
                 self._set_status("failed to respawn right pane for transcript")
@@ -1205,87 +1248,49 @@ class App:
         return self._ensure_detached_agent(name, shell_cmd, env)
 
     def _configure_scroll_acceleration(self, claude_tmux_name: str) -> None:
-        """Configure coalescing for the inner pane of the nested tmux client."""
-        self._scroll_manager.configure(claude_tmux_name)
+        """Configure coalescing for the pane currently showing the provider."""
+        target = self._display_transport().displayed_real_pane(claude_tmux_name)
+        if target is None:
+            self._scroll_manager.configure(claude_tmux_name)
+        else:
+            self._scroll_manager.configure(
+                claude_tmux_name, target_pane=target)
 
     def _teardown_scroll_acceleration(self) -> None:
         self._scroll_manager.close()
 
     def _attach_agent_slot(self, slot: AgentSlot, agent_tmux_name: str, *,
                            steal_focus: bool = True) -> bool:
-        """Make *slot* display the named detached agent tmux session.
-
-        Either creates the display split or respawns the slot's existing outer
-        pane. The previously displayed agent session stays alive and detached.
-
-        When *steal_focus* is False the right pane content is updated but tmux
-        focus stays on the railmux pane so the user can keep browsing the sidebar.
-
-        TMUX= prefix clears the env var so the nested ``tmux attach`` works; tmux
-        otherwise refuses to attach from within another tmux session.
-        """
-        import shlex
+        """Make *slot* display an agent through the selected safe transport."""
         if not self._agent_workspace().can_display(slot, agent_tmux_name):
             self._set_status(
                 "That agent session is already displayed in another pane.",
                 "warn",
             )
             return False
-        # Fast path: the right pane is already showing this session.  Skip the
-        # expensive respawn and just optionally move focus.  This also prevents
-        # focus flicker on double-click (the first click's respawn kills and
-        # restarts tmux attach, which briefly shifts focus).
-        if (slot.pane_id is not None
-                and slot.agent_tmux_name == agent_tmux_name
-                and tmux_ctl.pane_alive(slot.pane_id)):
-            if steal_focus:
-                tmux_ctl.select_pane(slot.pane_id)
-                self._set_railmux_focus(False)
-            self._set_active_tmux_target(agent_tmux_name, slot)
-            # Re-assert the F9 fullscreen binding: it's server-global and may
-            # have been overwritten by another pane's attach since we last set
-            # it, even though this pane's id is unchanged.
-            self._install_fullscreen_binding()
-            return True
-
-        attach_cmd = (
-            f"TMUX= exec tmux attach-session -t {shlex.quote(agent_tmux_name)}")
-        created_pane = False
-        if not slot.pane_id or not tmux_ctl.pane_alive(slot.pane_id):
-            # Create the outer display pane detached with a short holding command.
-            # This lets us read its exact dimensions and pre-size the inner agent
-            # session before nested tmux attaches, avoiding Codex history reflow;
-            # it also avoids starting the user's interactive shell just to kill it.
-            new_id = tmux_ctl.split_window_h(
-                "sleep 10", size_percent=70, detached=True)
-            if not new_id:
-                return False
-            slot.pane_id = new_id
-            created_pane = True
-
-        # Best effort: old tmux versions or unusual window policies may reject
-        # manual sizing, in which case attach still works with its old behaviour.
-        tmux_ctl.fit_session_to_pane(agent_tmux_name, slot.pane_id)
+        outcome = self._display_transport().attach(slot, agent_tmux_name)
+        if not outcome.ok:
+            return False
+        if slot.pane_id is None:
+            return False
         self._check_agent_slot_size(slot)
-        ok = tmux_ctl.respawn_pane(slot.pane_id, attach_cmd)
-        if not ok and created_pane:
-            tmux_ctl.kill_pane(slot.pane_id)
-            slot.pane_id = None
-        if ok and slot.pane_id and steal_focus:
+        if steal_focus:
             tmux_ctl.select_pane(slot.pane_id)
-        if ok:
-            slot.agent_tmux_name = agent_tmux_name
-            mode = self._modes().for_tmux_name(agent_tmux_name)
-            slot.mode_key = mode.key if mode is not None else None
-            self._set_active_tmux_target(agent_tmux_name, slot)
-            self._set_railmux_focus(
-                not steal_focus and not self._double_focus_visual_pending,
-                force_border=True,
-            )
-            if slot.key == self._agent_workspace().active_slot_key:
-                self._schedule_scroll_acceleration(agent_tmux_name)
-            self._install_fullscreen_binding()
-        return ok
+        slot.agent_tmux_name = agent_tmux_name
+        mode = self._modes().for_tmux_name(agent_tmux_name)
+        slot.mode_key = mode.key if mode is not None else None
+        self._set_active_tmux_target(agent_tmux_name, slot)
+        self._set_railmux_focus(
+            not steal_focus and not self._double_focus_visual_pending,
+            force_border=True,
+        )
+        if outcome.fell_back and outcome.reason:
+            self._set_status(
+                f"Using nested agent display: {outcome.reason}", "warn")
+        if slot.key == self._agent_workspace().active_slot_key:
+            self._schedule_scroll_acceleration(agent_tmux_name)
+        self._install_fullscreen_binding()
+        return True
 
     def _attach_in_right_pane(self, claude_tmux_name: str, *,
                                steal_focus: bool = True) -> bool:
@@ -2337,13 +2342,15 @@ class App:
                     stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
         except Exception:
             pass
-        for slot in self._agent_workspace().slots:
-            if slot.pane_id:
-                try:
-                    tmux_ctl.kill_pane(slot.pane_id)
-                except Exception:
-                    pass
-                slot.clear_display()
+        # The coordinator first swaps every real pane home, then removes only
+        # nested clients/placeholders. If a return cannot be proven, preserve
+        # the marked keeper state and degrade this exit to soft semantics.
+        try:
+            display_closed = self._display_transport().close_all()
+        except Exception:
+            display_closed = False
+        if not display_closed:
+            self._soft_quit_flag = True
         if self._soft_quit_flag:
             return  # <-- soft quit: leave cc-* and outer tmux session alive
         for r in list(self._running.values()):
@@ -2398,6 +2405,44 @@ class App:
 
     def _refresh(self) -> None:
         self._scroll_manager.maintain()
+        transport = self._display_transport()
+        if transport.outer_session_lost():
+            # A grouped keeper may still own the window after an external
+            # ``kill-session railmux``. Return every real pane, use soft-exit
+            # semantics, then let teardown remove only safe placeholders.
+            self._soft_quit_flag = True
+            transport.close_all()
+            raise urwid.ExitMainLoop()
+        rebound_for_client = False
+        for slot in self._agent_workspace().slots:
+            outcome = transport.fallback_for_external_client(slot)
+            if outcome is None:
+                continue
+            if outcome.ok:
+                rebound_for_client = True
+                self._set_status(
+                    "Using nested agent display: an external client attached",
+                    "warn",
+                )
+            else:
+                self._set_status(
+                    outcome.reason or "could not handle an external tmux client",
+                    "error",
+                )
+        if rebound_for_client:
+            self._install_fullscreen_binding()
+        dead_display_agents = {
+            agent
+            for slot in self._agent_workspace().slots
+            if (agent := transport.reap_dead_display(slot)) is not None
+        }
+        if dead_display_agents:
+            for key in [
+                key for key, running in self._running.items()
+                if running.tmux_name in dead_display_agents
+            ]:
+                del self._running[key]
+            self._set_active_target(None, None)
         background_refreshed = self._consume_mode_refresh()
         mode_refresh_pending = self._mode_refresh_pending()
         mode = self._active_mode()
@@ -2409,6 +2454,11 @@ class App:
         child_probes: dict[str, bool | None] = {}
 
         def session_is_alive(name: str) -> bool:
+            real_pane = transport.displayed_real_pane(name)
+            if real_pane is not None:
+                if server is not None:
+                    return real_pane in server.panes
+                return tmux_ctl.pane_alive(real_pane)
             if server is not None:
                 return name in server.sessions
             return tmux_ctl.session_exists(name)
@@ -2545,9 +2595,10 @@ class App:
                 if child_probes is not None and r.tmux_name in child_probes:
                     has_child = child_probes[r.tmux_name]
                 else:
-                    pane_pid = (
-                        server.pane_pid_for(r.tmux_name)
-                        if server is not None else None)
+                    pane_pid = self._display_transport().displayed_real_pid(
+                        r.tmux_name)
+                    if pane_pid is None and server is not None:
+                        pane_pid = server.pane_pid_for(r.tmux_name)
                     if pane_pid is not None:
                         has_child = tmux_ctl.process_has_child(pane_pid)
                     else:
@@ -2796,6 +2847,16 @@ class App:
 
     # --- kill / delete session ---
 
+    def _return_agent_before_kill(self, tmux_name: str) -> bool:
+        """Prove a displayed real pane is home before killing its session."""
+        if self._display_transport().prepare_kill(tmux_name):
+            return True
+        self._set_status(
+            f"could not safely return {tmux_name} home; nothing was killed",
+            "error",
+        )
+        return False
+
     def _on_kill_session(self) -> None:
         """Kill the running Claude process without deleting the JSONL file.
 
@@ -2819,6 +2880,8 @@ class App:
             if not tmux_ctl.session_exists(r.tmux_name):
                 self._set_status(f"tmux session already gone: {r.tmux_name}")
                 return
+            if not self._return_agent_before_kill(r.tmux_name):
+                return
             tmux_ctl.kill_session(r.tmux_name)
             del self._running[r.key]
             self._set_status(f"Killed: {r.label}  (file kept)")
@@ -2835,6 +2898,8 @@ class App:
             return
         if not tmux_ctl.session_exists(r.tmux_name):
             self._set_status(f"tmux session already gone: {r.tmux_name}")
+            return
+        if not self._return_agent_before_kill(r.tmux_name):
             return
         tmux_ctl.kill_session(r.tmux_name)
         del self._running[session.session_id]
@@ -2956,6 +3021,8 @@ class App:
             tmux_name = r.tmux_name if r else None
         writer_pids: tuple[int, ...] = ()
         if tmux_name and tmux_ctl.session_exists(tmux_name):
+            if not self._return_agent_before_kill(tmux_name):
+                return
             writer_pids = tmux_ctl.session_process_ids(tmux_name)
             killed = tmux_ctl.kill_session(tmux_name)
             # Never remove a rollout while its writer may still be alive. A

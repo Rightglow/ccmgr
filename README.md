@@ -151,7 +151,7 @@ red, reducing false alerts from normal long-running commands.
 
 ## How it works
 
-`railmux` reads agent session files from `~/.claude/projects/*` (Claude Code) or `~/.codex/sessions/*` (Codex) and lists everything. Pressing `Enter` on a session does two things: (1) if a detached tmux session for that session doesn't already exist, railmux creates one with `tmux new-session -d`; (2) railmux's right pane attaches to it so you see and interact with the agent. Switching sessions just respawns the right pane — the detached sessions keep running with all their state intact.
+`railmux` reads agent session files from `~/.claude/projects/*` (Claude Code) or `~/.codex/sessions/*` (Codex) and lists everything. Pressing `Enter` on a session does two things: (1) if a detached tmux session for that session doesn't already exist, railmux creates one with `tmux new-session -d`; (2) railmux's right pane displays it so you see and interact with the agent. By default the display is a nested tmux client. Switching the display never transfers process ownership away from the detached agent session.
 
 ## Configuration
 
@@ -174,7 +174,17 @@ show_empty_projects = false
 [live]
 # How often to refresh the session list (ms)
 poll_interval_ms = 1000
+
+# Experimental: show the real agent pane through transactional tmux swaps.
+# Default: "nested". Unsafe/unsupported situations fall back to nested.
+agent_transport = "nested" # or "swap"
 ```
+
+The experimental `swap` transport currently requires tmux 2.7 or newer and the
+auto-launched `railmux` tmux session. It remains opt-in while real-provider SSH,
+long-transcript reflow, and macOS measurements are completed. See
+[`docs/DENESTED_AGENT_PANE.md`](docs/DENESTED_AGENT_PANE.md) for tested
+lifecycle behavior, fallbacks, performance observations, and limitations.
 
 ## Diagnostics
 

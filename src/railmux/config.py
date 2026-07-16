@@ -20,6 +20,7 @@ class Config:
     codex_binary: str = "codex"
     codex_home: str = "~/.codex"
     poll_interval_ms: int = 1000
+    agent_transport: str = "nested"
     show_empty_projects: bool = False
 
     def resolved_codex_home(self) -> Path:
@@ -86,11 +87,17 @@ def load_config(config_path: Path | None = None) -> Config:
     if poll_interval_ms <= 0:
         raise ConfigError("live.poll_interval_ms must be a positive integer")
 
+    agent_transport = live.get("agent_transport", "nested")
+    if agent_transport not in ("nested", "swap"):
+        raise ConfigError(
+            'live.agent_transport must be either "nested" or "swap"')
+
     return Config(
         claude_binary=_string(
             claude, "binary", "claude", "claude.binary"),
         codex_binary=_string(codex, "binary", "codex", "codex.binary"),
         codex_home=_string(codex, "home", "~/.codex", "codex.home"),
         poll_interval_ms=poll_interval_ms,
+        agent_transport=agent_transport,
         show_empty_projects=projects.get("show_empty_projects") is True,
     )

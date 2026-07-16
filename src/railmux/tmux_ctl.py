@@ -34,6 +34,38 @@ class ServerSnapshot:
         return None
 
 
+@dataclass(frozen=True)
+class PaneIdentity:
+    """Stable identity and current location of one tmux pane."""
+
+    pane_id: str
+    pane_pid: int
+    session_name: str
+    session_id: str
+    window_id: str
+    dead: bool
+    width: int
+    height: int
+
+
+@dataclass(frozen=True)
+class SessionTopology:
+    """Exact session shape used by the de-nested display safety gate."""
+
+    session_name: str
+    session_id: str
+    attached_clients: int
+    window_ids: tuple[str, ...]
+    panes: tuple[PaneIdentity, ...]
+
+    @property
+    def single_live_pane(self) -> PaneIdentity | None:
+        if (len(self.window_ids) == 1 and len(self.panes) == 1
+                and not self.panes[0].dead):
+            return self.panes[0]
+        return None
+
+
 def has_tmux() -> bool:
     """True if tmux is installed and on PATH."""
     return shutil.which("tmux") is not None
@@ -382,6 +414,123 @@ def current_session_name() -> str | None:
         return None
 
 
+def current_session_id() -> str | None:
+    """Return the immutable tmux session ID for the current pane."""
+    try:
+        out = subprocess.check_output(
+            ["tmux", "display-message", "-p", "#{session_id}"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    return out or None
+
+
+def pane_identity(pane_id: str) -> PaneIdentity | None:
+    """Return identity and current location for *pane_id*.
+
+    Unlike UI-only helpers this intentionally works outside tmux. Startup
+    recovery runs before the CLI attaches to (or creates) its outer session.
+    """
+    fmt = (
+        "#{pane_id}\t#{pane_pid}\t#{session_name}\t#{session_id}\t"
+        "#{window_id}\t#{pane_dead}\t#{pane_width}\t#{pane_height}"
+    )
+    try:
+        raw = subprocess.check_output(
+            ["tmux", "display-message", "-p", "-t", pane_id, fmt],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        fields = raw.split("\t")
+        if len(fields) != 8:
+            return None
+        return PaneIdentity(
+            pane_id=fields[0],
+            pane_pid=int(fields[1]),
+            session_name=fields[2],
+            session_id=fields[3],
+            window_id=fields[4],
+            dead=fields[5] == "1",
+            width=int(fields[6]),
+            height=int(fields[7]),
+        )
+    except (OSError, subprocess.CalledProcessError, UnicodeError, ValueError):
+        return None
+
+
+def session_topology(session_name: str) -> SessionTopology | None:
+    """Return the exact window/pane topology for one session."""
+    pane_fmt = (
+        "#{pane_id}\t#{pane_pid}\t#{session_name}\t#{session_id}\t"
+        "#{window_id}\t#{pane_dead}\t#{pane_width}\t#{pane_height}"
+    )
+    try:
+        session_id = subprocess.check_output(
+            ["tmux", "display-message", "-p", "-t", session_name,
+             "#{session_id}"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        attached = session_attached_count(session_name)
+        windows_text = subprocess.check_output(
+            ["tmux", "list-windows", "-t", session_name, "-F", "#{window_id}"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        panes_text = subprocess.check_output(
+            ["tmux", "list-panes", "-s", "-t", session_name, "-F", pane_fmt],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        if not session_id or attached is None:
+            return None
+        windows = tuple(line for line in windows_text.splitlines() if line)
+        panes: list[PaneIdentity] = []
+        for raw in panes_text.splitlines():
+            fields = raw.split("\t")
+            if len(fields) != 8:
+                return None
+            panes.append(PaneIdentity(
+                pane_id=fields[0],
+                pane_pid=int(fields[1]),
+                session_name=fields[2],
+                session_id=fields[3],
+                window_id=fields[4],
+                dead=fields[5] == "1",
+                width=int(fields[6]),
+                height=int(fields[7]),
+            ))
+        return SessionTopology(
+            session_name=session_name,
+            session_id=session_id,
+            attached_clients=attached,
+            window_ids=windows,
+            panes=tuple(panes),
+        )
+    except (OSError, subprocess.CalledProcessError, UnicodeError, ValueError):
+        return None
+
+
+def session_ids() -> frozenset[str] | None:
+    """Return all immutable tmux session IDs, including outside tmux."""
+    try:
+        text = subprocess.check_output(
+            ["tmux", "list-sessions", "-F", "#{session_id}"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except (OSError, subprocess.CalledProcessError, UnicodeError):
+        return None
+    return frozenset(line for line in text.splitlines() if line)
+
+
+def session_has_window(session_name: str, window_id: str) -> bool:
+    try:
+        text = subprocess.check_output(
+            ["tmux", "list-windows", "-t", session_name, "-F", "#{window_id}"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except (OSError, subprocess.CalledProcessError, UnicodeError):
+        return False
+    return window_id in text.splitlines()
+
+
 def list_panes() -> list[str]:
     """Return list of pane ids in the current window."""
     if not in_tmux():
@@ -479,6 +628,73 @@ def session_attached_count(session_name: str) -> int | None:
         return count if count >= 0 else None
     except (OSError, subprocess.CalledProcessError, UnicodeError, ValueError):
         return None
+
+
+def wait_session_detached(session_name: str, timeout: float = 1.0) -> bool:
+    """Wait for all clients to detach from *session_name*."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if session_attached_count(session_name) == 0:
+            return True
+        time.sleep(0.02)
+    return session_attached_count(session_name) == 0
+
+
+def swap_panes(source_pane: str, target_pane: str) -> bool:
+    """Swap two panes, including across sessions/windows."""
+    try:
+        subprocess.check_call(
+            ["tmux", "swap-pane", "-s", source_pane, "-t", target_pane],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except (OSError, subprocess.CalledProcessError):
+        return False
+
+
+def create_grouped_session(name: str, target_session: str) -> bool:
+    """Create a detached session sharing *target_session*'s windows.
+
+    A grouped session adds no pane or PTY. It is the second owner that keeps a
+    display window alive if the original outer session is killed directly.
+    """
+    try:
+        subprocess.check_call(
+            ["tmux", "new-session", "-d", "-t", target_session, "-s", name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except (OSError, subprocess.CalledProcessError):
+        return False
+
+
+def set_session_user_option(
+    target_session: str, name: str, value: str | None,
+) -> bool:
+    args = ["tmux", "set-option", "-t", target_session]
+    if value is None:
+        args.extend(["-u", name])
+    else:
+        args.extend([name, value])
+    try:
+        subprocess.check_call(
+            args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except (OSError, subprocess.CalledProcessError):
+        return False
+
+
+def show_session_user_option(target_session: str, name: str) -> str | None:
+    try:
+        value = subprocess.check_output(
+            ["tmux", "show-options", "-v", "-t", target_session, name],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except (OSError, subprocess.CalledProcessError, UnicodeError):
+        return None
+    return value or None
 
 
 def fit_session_to_pane(session_name: str, pane_id: str) -> bool:
@@ -714,6 +930,42 @@ def set_window_user_option(target_window: str, name: str, value: str | None) -> 
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
+
+
+def show_window_user_option(target_window: str, name: str) -> str | None:
+    try:
+        value = subprocess.check_output(
+            ["tmux", "show-window-options", "-v", "-t", target_window, name],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except (OSError, subprocess.CalledProcessError, UnicodeError):
+        return None
+    return value or None
+
+
+def list_window_user_options(names: tuple[str, ...]) -> list[tuple[str, ...]] | None:
+    """Return window IDs plus selected user-option values server-wide.
+
+    Linked windows may be listed once per owning session; callers should dedupe
+    identical records by window/transaction identity.
+    """
+    if not names:
+        return []
+    fmt = "\t".join(("#{window_id}", *(f"#{{{name}}}" for name in names)))
+    try:
+        text = subprocess.check_output(
+            ["tmux", "list-windows", "-a", "-F", fmt],
+            stderr=subprocess.DEVNULL,
+        ).decode().rstrip("\n")
+    except (OSError, subprocess.CalledProcessError, UnicodeError):
+        return None
+    rows: list[tuple[str, ...]] = []
+    for line in text.splitlines():
+        fields = tuple(line.split("\t"))
+        if len(fields) != len(names) + 1:
+            return None
+        rows.append(fields)
+    return rows
 
 
 def wait_window_user_option(target_window: str, name: str, value: str,

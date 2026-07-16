@@ -44,6 +44,42 @@ properties exist only as compatibility shims backed by the primary slot.
 Current releases intentionally expose only the primary slot. Code should keep
 that behavior until the dual-agent interaction below is approved and tested.
 
+## Agent display transports preserve one ownership model
+
+The default `nested` transport runs a tmux client in the outer display pane and
+attaches it to the persistent agent session. The experimental `swap` transport
+moves the real pane into the display window. Both are provider-neutral and are
+selected behind `AgentDisplayTransport`; attach, preview, close, delete,
+liveness, and teardown must not bypass that boundary with a destructive
+`respawn-pane`, `kill-pane`, or `kill-session`.
+
+In swap mode `AgentSlot.pane_id` is the pane physically visible in that slot.
+It is the placeholder while idle/previewing and the real provider pane while
+displayed. `SwapState` owns the immutable real-pane/PID, home window,
+placeholder, display window, outer session, keeper, slot, and transaction phase.
+The same real pane may be owned by only one slot.
+
+Before a real pane moves, a detached tmux session group shares the outer window.
+This keeper adds no pane or PTY and prevents a direct kill of the original outer
+session from destroying a displayed agent. Versioned, slot-specific tmux window
+user options record every transaction. Startup recovery may move only exact
+marked identities; it must never infer ownership from a `cc-*`, `cx-*`, pane
+title, or session-name resemblance.
+
+Every swap is validate -> mark prepared -> move -> verify -> mark displayed.
+Return is mark returning -> move home -> verify -> clear. A failed post-move
+rollback retains its marker and keeper and forbids destructive fallback. An
+external attached client, unsupported topology, incomplete identity, old tmux,
+or unowned outer session uses nested display. Controlled preview, close, soft
+quit, hard quit, and delete return the real pane before replacing a display
+placeholder or killing its home session.
+
+The experimental floor is tmux 2.7. tmux 2.7 and 2.8 lack `resize-window`, so
+their native swap geometry may reflow a long inline transcript. This is a
+performance/visual limitation, not permission to alter provider history or
+alternate-screen behavior. Full evidence and remaining gates are in
+`docs/DENESTED_AGENT_PANE.md`.
+
 ## Dual-agent interaction target
 
 The first version should remain bounded to two slots and preserve all existing
