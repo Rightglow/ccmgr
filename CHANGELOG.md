@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add in-memory Running-pane filtering with plain fuzzy search, an optional
+  `project:<name>` restriction, provider-aware empty states, per-mode queries,
+  and exact tmux-identity focus retention across refreshes and sorting.
 - Add an experimental, default-off de-nested agent display transport using
   transactional cross-session pane swaps, durable tmux recovery markers, and a
   zero-extra-pane session-group keeper. It returns real panes before preview,
@@ -43,6 +46,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Group blocked Running sessions ahead of other activity states during the
+  existing throttled recency sort, without changing status-dot semantics or
+  causing per-poll row movement.
 - Raise copy-mode wheel coalescing from 2 FPS to 10 FPS over SSH while keeping
   the immediate leading update, native scroll distance, and both nested and
   experimental swap transport lifecycles unchanged.

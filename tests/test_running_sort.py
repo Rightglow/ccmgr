@@ -18,9 +18,10 @@ def _app(running: dict, sort_ts: float) -> App:
     return app
 
 
-def _r(key: str, mtime: float = 0.0, created: float = 0.0) -> _Running:
+def _r(key: str, mtime: float = 0.0, created: float = 0.0,
+       status: str = "idle") -> _Running:
     return _Running(key=key, tmux_name=f"cc-{key}", label=key,
-                    last_mtime=mtime, created_at=created)
+                    last_mtime=mtime, created_at=created, status=status)
 
 
 def test_resort_orders_by_recency_desc():
@@ -71,3 +72,28 @@ def test_placeholder_sorts_by_created_at():
     app._maybe_resort_running()
 
     assert list(app._running) == ["__new__-1", "real"]
+
+
+def test_blocked_groups_first_then_recency():
+    app = _app({
+        "new-idle": _r("new-idle", mtime=400.0),
+        "old-blocked": _r("old-blocked", mtime=100.0, status="blocked"),
+        "new-blocked": _r("new-blocked", mtime=300.0, status="blocked"),
+        "old-idle": _r("old-idle", mtime=200.0),
+    }, sort_ts=0.0)
+
+    app._maybe_resort_running()
+
+    assert list(app._running) == [
+        "new-blocked", "old-blocked", "new-idle", "old-idle"]
+
+
+def test_newly_blocked_does_not_jump_inside_throttle_window():
+    app = _app({
+        "idle": _r("idle", mtime=100.0),
+        "blocked": _r("blocked", mtime=50.0, status="blocked"),
+    }, sort_ts=time.time())
+
+    app._maybe_resort_running()
+
+    assert list(app._running) == ["idle", "blocked"]

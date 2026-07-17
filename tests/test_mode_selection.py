@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from railmux.config import Config
-from railmux.modes import CLAUDE_MODE
+from railmux.modes import CLAUDE_MODE, CODEX_MODE
 from railmux.models import Project
 from railmux.ui.app import App
 
@@ -43,6 +43,7 @@ def _mode_app(monkeypatch, claude_projects: list[Project],
     app._mode_refresh_result = None
     app._projects_pane = MagicMock()
     app._sessions_pane = MagicMock()
+    app._running_pane = MagicMock()
     app._favorites = MagicMock()
     app._favorites.get_ids.return_value = set()
     app._codex_index = MagicMock()
@@ -134,6 +135,25 @@ def test_each_mode_restores_its_own_project(monkeypatch):
 
     app._toggle_codex_mode()
     assert app._selected_project is codex_b
+
+
+def test_each_mode_applies_its_own_running_filter(monkeypatch):
+    claude = _project("claude")
+    codex = _project("codex", codex_only=True)
+    app = _mode_app(monkeypatch, [claude], [codex])
+    app._mode_view_states[CLAUDE_MODE.key] = app._current_mode_view_state()
+    app._mode_view_states[CLAUDE_MODE.key].running_filter = "project:claude"
+    app._mode_view_states[CODEX_MODE.key] = type(
+        app._mode_view_states[CLAUDE_MODE.key])(
+            running_filter="project:codex")
+
+    app._toggle_codex_mode()
+    app._running_pane.set_filter.assert_called_with(
+        "project:codex", capture_focus=False)
+
+    app._toggle_codex_mode()
+    app._running_pane.set_filter.assert_called_with(
+        "project:claude", capture_focus=False)
 
 
 def test_deleted_remembered_project_falls_back_to_visible_project(monkeypatch):

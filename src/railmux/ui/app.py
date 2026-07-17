@@ -315,6 +315,7 @@ class _ModeViewState:
     """
 
     selected_project_path: Path | None = None
+    running_filter: str = ""
 
 
 class App:
@@ -602,6 +603,7 @@ class App:
             on_select=self._on_running_select,
             on_context=self._on_running_context_menu,
             on_double_detected=self._schedule_right_pane_focus_after_double,
+            provider_label=initial_mode.label,
         )
         # Warn early if dependencies are missing so the user doesn't
         # discover it by getting a cryptic error in the right pane.
@@ -2402,10 +2404,6 @@ class App:
             self._rotate_focus(reverse=(key == "shift tab"))
             return
         if key == "/":
-            # Running pane doesn't support filtering — skip.
-            if self._sidebar.focus_position == 2:
-                self._set_status("No filter on Running pane.")
-                return
             self._enter_filter_mode()
             return
         if key in ("[", "]"):
@@ -2528,10 +2526,17 @@ class App:
         """Update provider-aware pane copy without coupling panes to mode keys."""
         projects_pane = getattr(self, "_projects_pane", None)
         sessions_pane = getattr(self, "_sessions_pane", None)
+        running_pane = getattr(self, "_running_pane", None)
         if projects_pane is not None:
             projects_pane.set_provider_label(mode.label)
         if sessions_pane is not None:
             sessions_pane.set_provider_label(mode.label)
+        if running_pane is not None:
+            running_pane.set_provider_label(mode.label)
+            running_pane.set_filter(
+                self._current_mode_view_state().running_filter,
+                capture_focus=False,
+            )
 
     def _configured_mode_binary(self, mode: AgentMode) -> str:
         config = getattr(self, "_config", Config())
@@ -2562,6 +2567,11 @@ class App:
             self._remember_project_selection(outgoing_project)
         self._active_mode_key = target.key
         self._set_mode_pane_context(target)
+        # Running holds sessions from every mode in one registry; repaint the
+        # provider-scoped view immediately instead of showing the outgoing
+        # mode until the next periodic tick.
+        if getattr(self, "_running_pane", None) is not None:
+            self._render_running_pane()
         # Repaint the tmux brand while retaining the current error/normal colour.
         self._apply_tmux_bar(self._tmux_error_bar)
         next_label = self._modes().get(
@@ -2822,7 +2832,11 @@ class App:
     def _enter_filter_mode(self) -> None:
         # Borrow the button row (footer index 1) for a filter Edit — both are a
         # single line, so the sidebar height doesn't jump. Restored on enter/esc.
-        edit = urwid.Edit(caption="filter: ")
+        initial_text = (
+            self._running_pane.filter_text
+            if self._sidebar.focus_position == 2 else ""
+        )
+        edit = urwid.Edit(caption="filter: ", edit_text=initial_text)
         footer_pile = self._frame.contents["footer"][0]
         footer_pile.contents[1] = (edit, footer_pile.options("pack"))
         footer_pile.focus_position = 1
@@ -2834,7 +2848,9 @@ class App:
                 self._projects_pane.set_filter(new_text)
             elif current_idx == 1:
                 self._sessions_pane.set_filter(new_text)
-            # No filter for the Running pane (small list, not worth filtering).
+            elif current_idx == 2:
+                self._running_pane.set_filter(new_text)
+                self._current_mode_view_state().running_filter = new_text
 
         urwid.connect_signal(edit, "change", on_change)
 
@@ -3142,7 +3158,10 @@ class App:
         self._running_sort_ts = now
         self._running = dict(sorted(
             self._running.items(),
-            key=lambda kv: kv[1].last_mtime or kv[1].created_at,
+            key=lambda kv: (
+                kv[1].status == "blocked",
+                kv[1].last_mtime or kv[1].created_at,
+            ),
             reverse=True,
         ))
 
@@ -3153,11 +3172,20 @@ class App:
         ``cx-*`` sessions are shown.  The other type's sessions still run,
         but they don't belong in the current view.
         """
-        prefix = self._active_mode().tmux_prefix
+        mode = self._active_mode()
+        prefix = mode.tmux_prefix
         entries = [
             RunningEntry(
                 tmux_name=r.tmux_name,
                 label=r.label,
+                project_label=(
+                    r.project.display_name
+                    if r.project is not None
+                    else r.placeholder_path.name
+                    if r.placeholder_path is not None
+                    else ""
+                ),
+                provider_label=mode.label,
                 status=r.status,
                 attention=r.attention,
             )

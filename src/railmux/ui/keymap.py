@@ -43,9 +43,9 @@ BINDINGS: list[Binding] = [
     # Projects & Sessions — creating a new session needs a project.
     Binding(("n", "N"), "n", "new", "_launch_new_session",
             contexts=(CTX_PROJECTS, CTX_SESSIONS)),
-    # Projects & Sessions — Running pane doesn't support filtering.
+    # All sidebar lists support in-pane filtering.
     Binding(("/",), "/", "filter",
-            contexts=(CTX_PROJECTS, CTX_SESSIONS)),
+            contexts=_ALL_CTX),
     # All three — _open_info_modal adapts to the focused pane.
     Binding(("i", "I"), "i", "info", "_open_info_modal",
             contexts=_ALL_CTX),

@@ -153,3 +153,9 @@ must be short and sanitized. Never classify an error from user prompts,
 assistant messages, tool output, or titles. A newer turn start and a newer
 successful turn clear stale attention. User interrupts and explicit rollbacks
 are not provider failures.
+
+Running-pane filtering is a view over the live registry, never a mutation of
+that registry. The pane retains the complete provider-scoped entry snapshot,
+keys focus and callbacks by exact tmux session name, and performs fuzzy/project
+matching only against indexed display metadata. Filter edits therefore cannot
+hide a session from liveness management or trigger transcript I/O.

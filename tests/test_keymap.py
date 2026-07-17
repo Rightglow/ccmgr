@@ -1,5 +1,7 @@
 """Tests for context-aware hint text generation."""
 
+from unittest.mock import MagicMock
+
 from railmux.ui.app import App
 from railmux.ui.keymap import (
     CTX_AGENT,
@@ -66,7 +68,7 @@ def test_hint_text_for_sessions_shows_all_actions():
 def test_hint_text_for_running_hides_creation_and_editing():
     text = hint_text_for(CTX_RUNNING)
     assert "new" not in text
-    assert "filter" not in text
+    assert "filter" in text
     assert "rename" not in text
     assert "star" not in text
     assert "del" in text
@@ -76,6 +78,17 @@ def test_hint_text_for_running_hides_creation_and_editing():
     assert "kill" in text
     assert "info" in text
     assert "term" in text
+
+
+def test_running_slash_routes_to_filter_editor():
+    app = App.__new__(App)
+    app._loop = None
+    app._sidebar = type("Sidebar", (), {"focus_position": 2})()
+    app._enter_filter_mode = MagicMock()
+
+    app._on_input("/")
+
+    app._enter_filter_mode.assert_called_once_with()
 
 
 def test_hint_text_legacy_returns_all_keys():

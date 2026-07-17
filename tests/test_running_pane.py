@@ -1,7 +1,7 @@
 """Tests for railmux.ui.running_pane — callback dispatch (click vs double-click)."""
 
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import urwid
 
@@ -9,8 +9,12 @@ from railmux.models import AttentionCategory, AttentionState
 from railmux.ui.running_pane import RunningEntry, RunningSessionsPane, _RunningRow
 
 
-def _entry(name: str = "cc-abc123", label: str = "proj/Test") -> RunningEntry:
-    return RunningEntry(tmux_name=name, label=label)
+def _entry(name: str = "cc-abc123", label: str = "proj/Test",
+           project: str = "proj", provider: str = "Claude Code",
+           status: str = "idle") -> RunningEntry:
+    return RunningEntry(
+        tmux_name=name, label=label, project_label=project,
+        provider_label=provider, status=status)
 
 
 # ── callback dispatch ────────────────────────────────────────────────────
@@ -108,6 +112,167 @@ def test_set_running_unchanged_preserves_rows():
 
     assert list(pane._walker) == rows
     assert all(current is prior for current, prior in zip(pane._walker, rows))
+
+
+# ── filtering ───────────────────────────────────────────────────────────
+
+def _running_names(pane: RunningSessionsPane) -> list[str]:
+    return [row.entry.tmux_name for row in pane._walker
+            if isinstance(row, _RunningRow)]
+
+
+def test_filter_fuzzy_matches_visible_label_and_provider():
+    pane = RunningSessionsPane(on_select=lambda e: None)
+    pane.set_running([
+        _entry("cc-a", "alpha/Fix mobile login", "alpha"),
+        _entry("cx-b", "beta/Parser", "beta", "Codex"),
+    ])
+
+    pane.set_filter("mobile fix")
+    assert _running_names(pane) == ["cc-a"]
+
+    pane.set_filter("codex")
+    assert _running_names(pane) == ["cx-b"]
+
+
+def test_project_token_matches_explicit_project_only():
+    pane = RunningSessionsPane(on_select=lambda e: None)
+    pane.set_running([
+        _entry("cc-a", "alpha/Work on beta", "alpha"),
+        _entry("cc-b", "beta/Unrelated", "beta"),
+    ])
+
+    pane.set_filter("project:beta")
+
+    assert _running_names(pane) == ["cc-b"]
+
+
+def test_half_typed_project_token_is_non_destructive():
+    pane = RunningSessionsPane(on_select=lambda e: None)
+    pane.set_running([_entry("cc-a"), _entry("cc-b")])
+
+    pane.set_filter("project:")
+
+    assert _running_names(pane) == ["cc-a", "cc-b"]
+
+
+def test_unknown_key_value_remains_ordinary_search_text():
+    pane = RunningSessionsPane(on_select=lambda e: None)
+    pane.set_running([
+        _entry("cc-a", "proj/fix:login", "proj"),
+        _entry("cc-b", "proj/other", "proj"),
+    ])
+
+    pane.set_filter("fix:login")
+
+    assert _running_names(pane) == ["cc-a"]
+
+
+def test_filter_empty_copy_is_provider_aware_and_keeps_snapshot():
+    pane = RunningSessionsPane(
+        on_select=lambda e: None, provider_label="Codex")
+    pane.set_running([_entry("cx-a", provider="Codex")])
+
+    pane.set_filter("missing")
+
+    assert "matching Codex" in pane._walker[0].text
+    assert pane._entries[0].tmux_name == "cx-a"
+    assert pane._linebox.title_widget.text.strip() == "Running (0/1)"
+
+
+def test_filter_clear_restores_pre_filter_focus():
+    pane = RunningSessionsPane(on_select=lambda e: None)
+    pane.set_running([
+        _entry("cc-a", "alpha/One", "alpha"),
+        _entry("cc-b", "beta/Two", "beta"),
+        _entry("cc-c", "gamma/Three", "gamma"),
+    ])
+    pane._walker.set_focus(1)
+
+    pane.set_filter("alpha")
+    assert _running_names(pane) == ["cc-a"]
+    pane.set_filter("")
+
+    focus_w, _ = pane._walker.get_focus()
+    assert isinstance(focus_w, _RunningRow)
+    assert focus_w.entry.tmux_name == "cc-b"
+
+
+def test_noninteractive_mode_filter_drops_foreign_focus_anchor():
+    pane = RunningSessionsPane(on_select=lambda e: None)
+    pane.set_running([
+        _entry("cc-a", "alpha/One", "alpha"),
+        _entry("cc-b", "beta/Two", "beta"),
+    ])
+    pane._walker.set_focus(1)
+    pane.set_filter("project:alpha")
+    assert pane._pre_filter_focus == "cc-b"
+
+    pane.set_filter("project:codex", capture_focus=False)
+
+    assert pane._pre_filter_focus is None
+
+
+def test_filter_refresh_preserves_visible_focus_by_tmux_identity():
+    pane = RunningSessionsPane(on_select=lambda e: None)
+    a = _entry("cc-a", "proj/Alpha")
+    b = _entry("cc-b", "proj/Beta")
+    pane.set_running([a, b])
+    pane.set_filter("proj")
+    pane._walker.set_focus(1)
+
+    pane.set_running([b, a])
+
+    focus_w, _ = pane._walker.get_focus()
+    assert isinstance(focus_w, _RunningRow)
+    assert focus_w.entry.tmux_name == "cc-b"
+
+
+def test_active_and_context_highlights_do_not_discard_hidden_entries():
+    pane = RunningSessionsPane(on_select=lambda e: None)
+    pane.set_running([
+        _entry("cc-a", "alpha/One", "alpha"),
+        _entry("cc-b", "beta/Two", "beta"),
+    ])
+    pane.set_filter("alpha")
+
+    pane.set_active("cc-a")
+    pane.set_selected("cc-a")
+
+    assert [entry.tmux_name for entry in pane._entries] == ["cc-a", "cc-b"]
+    pane.set_filter("")
+    assert _running_names(pane) == ["cc-a", "cc-b"]
+
+
+def test_filtered_click_and_enter_target_only_visible_identity():
+    calls: list[str] = []
+    pane = RunningSessionsPane(
+        on_select=lambda entry, **_kw: calls.append(entry.tmux_name))
+    pane.set_running([
+        _entry("cc-hidden", "alpha/One", "alpha"),
+        _entry("cc-visible", "beta/Two", "beta"),
+    ])
+    pane.set_filter("project:beta")
+    row = next(row for row in pane._walker if isinstance(row, _RunningRow))
+
+    row._on_click()
+    pane.keypress((40, 10), "enter")
+
+    assert calls == ["cc-visible", "cc-visible"]
+
+
+def test_filter_large_snapshot_performs_no_file_io():
+    pane = RunningSessionsPane(on_select=lambda e: None)
+    pane.set_running([
+        _entry(f"cc-{i}", f"project-{i % 20}/Session {i}",
+               f"project-{i % 20}")
+        for i in range(2000)
+    ])
+
+    with patch("builtins.open", side_effect=AssertionError("filter did file IO")):
+        pane.set_filter("project:project-7 session")
+
+    assert _running_names(pane)
 
 
 # ── status dots ─────────────────────────────────────────────────────────

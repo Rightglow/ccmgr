@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import urwid
 
+from railmux.fuzzy import fuzzy_match
 from railmux.models import AttentionState
 from railmux.ui._widgets import ClickableRow, remember_focus, restore_focus
 # Reuse the status-dot glyphs and the focus/selected attribute maps so the
@@ -25,6 +26,8 @@ class RunningEntry:
     label: str      # display label, e.g. "ger-lang/Refactor X" or "claude-chat/(new)"
     status: str = "idle"  # "idle" | "busy" | "blocked"
     attention: AttentionState | None = None
+    project_label: str = ""
+    provider_label: str = "Agent"
 
 
 class _RunningRow(ClickableRow):
@@ -57,10 +60,15 @@ class RunningSessionsPane(urwid.WidgetWrap):
 
     def __init__(self, on_select: Callable[[RunningEntry], None],
                  on_context: "Callable[[RunningEntry], None] | None" = None,
-                 on_double_detected: "Callable[[], None] | None" = None) -> None:
+                 on_double_detected: "Callable[[], None] | None" = None,
+                 provider_label: str = "Agent") -> None:
         self._on_select = on_select
         self._on_context = on_context
         self._on_double_detected = on_double_detected
+        self._provider_label = provider_label
+        self._entries: list[RunningEntry] = []
+        self._filter = ""
+        self._pre_filter_focus: str | None = None
         self._active_tmux_name: str | None = None
         self._selected_tmux_name: str | None = None
         self._rendered_data: tuple | None = None
@@ -89,10 +97,71 @@ class RunningSessionsPane(urwid.WidgetWrap):
         self._rerender()
 
     def _rerender(self) -> None:
-        entries = [w.entry for w in self._walker
-                   if isinstance(w, _RunningRow)]
-        if entries:
-            self.set_running(entries)
+        self._rendered_data = None
+        self.set_running(self._entries)
+
+    @property
+    def filter_text(self) -> str:
+        return self._filter
+
+    def set_provider_label(self, label: str) -> None:
+        if self._provider_label == label:
+            return
+        self._provider_label = label
+        self._rerender()
+
+    def set_filter(self, needle: str, *, capture_focus: bool = True) -> None:
+        # Loading another provider's saved query is not an interactive filter
+        # transition. Drop the outgoing provider's anchor even when both query
+        # strings happen to be equal, so clearing cannot target a foreign row.
+        if not capture_focus:
+            self._pre_filter_focus = None
+        if self._filter == needle:
+            return
+        previous = self._filter
+        if capture_focus and not previous and needle:
+            self._pre_filter_focus = self._remember_focus()
+        prior = self._remember_focus()
+        self._filter = needle
+        restore_key = (
+            self._pre_filter_focus if previous and not needle else prior
+        )
+        self._rendered_data = None
+        self.set_running(self._entries)
+        if previous and not needle:
+            self._restore_focus(restore_key)
+            self._pre_filter_focus = None
+
+    def _visible_entries(self) -> list[RunningEntry]:
+        """Return an in-memory filtered view without touching provider data."""
+        tokens = self._filter.split()
+        if not tokens:
+            return list(self._entries)
+        project_terms: list[str] = []
+        text_terms: list[str] = []
+        for token in tokens:
+            key, separator, value = token.partition(":")
+            if separator and key.lower() == "project":
+                # A half-typed ``project:`` must not blank the pane while the
+                # user is still entering its value.
+                if value:
+                    project_terms.append(value)
+            else:
+                # Unknown key:value tokens deliberately remain ordinary text.
+                text_terms.append(token)
+
+        visible: list[RunningEntry] = []
+        text_needle = " ".join(text_terms)
+        for entry in self._entries:
+            if any(not fuzzy_match(term, entry.project_label)
+                   for term in project_terms):
+                continue
+            searchable = " ".join((
+                entry.label, entry.project_label, entry.provider_label,
+                self._provider_label))
+            if fuzzy_match(text_needle, searchable):
+                visible.append(entry)
+        return visible
 
     def _on_double_select(self, entry: RunningEntry) -> None:
         # Paint right focus before attach; the real select-pane stays delayed.
@@ -102,15 +171,24 @@ class RunningSessionsPane(urwid.WidgetWrap):
 
     def set_running(self, entries: list[RunningEntry]) -> None:
         rendered_data = (
-            tuple(entries), self._active_tmux_name, self._selected_tmux_name)
+            tuple(entries), self._active_tmux_name, self._selected_tmux_name,
+            self._filter, self._provider_label)
         if self._rendered_data == rendered_data:
             return
         self._rendered_data = rendered_data
 
         prior = self._remember_focus()
-        if not entries:
-            self._walker[:] = [urwid.Text(("dim", "  (no running sessions)"), align="left")]
-            self._linebox.set_title("Running")
+        self._entries = list(entries)
+        visible = self._visible_entries()
+        if not visible:
+            if self._filter:
+                text = f"  (no matching {self._provider_label} sessions)"
+                title = f"Running (0/{len(entries)})"
+            else:
+                text = f"  (no running {self._provider_label} sessions)"
+                title = "Running"
+            self._walker[:] = [urwid.Text(("dim", text), align="left")]
+            self._linebox.set_title(title)
             return
         self._walker[:] = [
             _RunningRow(
@@ -122,9 +200,12 @@ class RunningSessionsPane(urwid.WidgetWrap):
                 on_right_click=(lambda e=e: self._on_context(e))
                                if self._on_context else None,
             )
-            for e in entries
+            for e in visible
         ]
-        self._linebox.set_title(f"Running ({len(entries)})")
+        count = (
+            f"{len(visible)}/{len(entries)}" if self._filter else str(len(entries))
+        )
+        self._linebox.set_title(f"Running ({count})")
         self._restore_focus(prior)
 
     @staticmethod

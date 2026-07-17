@@ -307,9 +307,10 @@ def test_hintbar_context_switch_changes_keys():
     running = "".join(_hint_rows(bar, 120))
     bar.set_context(keymap.CTX_SESSIONS)
     sessions = "".join(_hint_rows(bar, 120))
-    # Running hides rename/star/filter; Sessions shows them.
+    # Running hides rename/star but supports the same filter entry point.
     assert "rename" not in running
     assert "rename" in sessions
+    assert "filter" in running
 
 
 def test_hintbar_always_two_lines_even_when_short():

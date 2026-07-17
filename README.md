@@ -70,7 +70,7 @@ setup does not behave as expected.
 | `↑` / `↓` | Move selection within the focused pane |
 | `Tab` / `Shift-Tab` | Cycle focus through Projects, Sessions, Running panes |
 | `Esc` | Move focus up: Running → Sessions → Projects |
-| `/` | Filter the focused pane by name |
+| `/` | Filter the focused Projects, Sessions, or Running pane by name |
 
 ### Session actions
 
@@ -98,6 +98,13 @@ railmux creates the directory before starting the agent.
 When a mode has no projects or sessions, its empty state names the active
 provider and points to `+ New project` or `n`, so an unavailable provider never
 looks like data from the previous mode.
+
+Running-pane filtering is in-memory and never reads transcript bodies. Plain
+text matches the visible session label, project, and provider; add
+`project:<name>` to restrict a search to one project. Claude Code and Codex keep
+independent Running filters. Blocked sessions move ahead of other Running rows
+on the existing throttled recency sort, while their red status dots still
+update immediately.
 
 ### Mouse
 
