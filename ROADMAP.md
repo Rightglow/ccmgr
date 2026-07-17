@@ -131,6 +131,14 @@ whose discovery/launch/delete model differs from both existing backends.
 
 ## Completed foundations
 
+### Multi-instance restart state
+
+Soft-restart persistence is split between exact-owner runtime recovery and a
+portable per-mode view. Runtime files are keyed by tmux server lifetime and
+immutable pane ID, so same-named sessions on private servers and multiple
+windows on one server cannot restore one another. Legacy ownerless files
+migrate view fields only; process recovery remains fail-closed.
+
 ### Focus and status colour semantics
 
 Railmux now uses distinct meanings for grass-green pane chrome and live-session

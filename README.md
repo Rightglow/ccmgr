@@ -171,6 +171,12 @@ generically instead of guessing from message content.
 
 `railmux` reads agent session files from `~/.claude/projects/*` (Claude Code) or `~/.codex/sessions/*` (Codex) and lists everything. Pressing `Enter` on a session does two things: (1) if a detached tmux session for that session doesn't already exist, railmux creates one with `tmux new-session -d`; (2) railmux's right pane displays it so you see and interact with the agent. By default the display is a nested tmux client. Switching the display never transfers process ownership away from the detached agent session.
 
+Soft quit keeps detached agents alive. On restart, process-bearing recovery
+state is isolated to the exact outer tmux pane, so separate Railmux windows or
+private tmux servers cannot restore one another's display. Mode, project, and
+sidebar filters are also saved as non-process view preferences for use on a
+later login; those portable preferences never authorize an attach or kill.
+
 ## Configuration
 
 Optional config at `~/.config/railmux/config.toml`:

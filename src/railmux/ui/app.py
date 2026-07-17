@@ -43,6 +43,7 @@ from railmux.modes import (
 )
 from railmux.models import AttentionState, Project, SessionMeta
 from railmux.renames import Renames
+from railmux import restart_state
 from railmux.session_cache import SessionCache
 from railmux.scroll_manager import ScrollManager
 from railmux.ui import keymap
@@ -492,6 +493,10 @@ class App:
     def __init__(self, claude_home: Path, config: Config,
                  auto_launched: bool = False,
                  scroll_coalescing: bool = True) -> None:
+        # Capture before any pane may be split or moved. The server-lifetime
+        # digest plus immutable pane id namespaces local recovery state across
+        # windows, sessions, and private tmux servers.
+        self._restart_identity = restart_state.capture_outer_identity()
         self._claude_home = claude_home
         self._config = config
         self._auto_launched = auto_launched
@@ -666,6 +671,9 @@ class App:
         if restored_mode != self._modes().default_key:
             self._enter_mode_on_restore(restored_mode)
         self._warn_missing_mode_binary(self._active_mode())
+        if state:
+            self._projects_pane.set_filter(state.get("project_filter", ""))
+            self._sessions_pane.set_filter(state.get("session_filter", ""))
         # Apply the mode-specific project view immediately. In Claude mode this
         # also enforces the configured empty-project policy on the first frame.
         visible = self._visible_projects()
@@ -923,8 +931,11 @@ class App:
         restored = self._restore_right_pane(state)
         if not restored or not getattr(self, "_running_recovery_ok", True):
             return
+        path = self._state_path()
+        if path is None:
+            return
         try:
-            self._state_path().unlink(missing_ok=True)
+            path.unlink(missing_ok=True)
         except OSError:
             pass
 
@@ -1816,31 +1827,34 @@ class App:
 
     # --- state file (for restart-after-soft-quit) --------------------------
 
-    @staticmethod
-    def _state_path() -> Path:
-        # TODO(review #17): this state file is node-local ($XDG_RUNTIME_DIR) and
-        # a single fixed name, so view state doesn't follow the user across nodes
-        # and multiple railmux instances on one node clobber each other; needs a
-        # per-outer-tmux namespace + node-local vs. portable split (design).
-        import os as _os
-        run_dir = _os.environ.get("XDG_RUNTIME_DIR", f"/tmp/railmux-{_os.getuid()}")
-        return Path(run_dir) / "railmux-state.json"
+    def _state_path(self) -> Path | None:
+        identity = getattr(self, "_restart_identity", None)
+        return (
+            restart_state.instance_state_path(identity)
+            if identity is not None else None
+        )
 
-    def _save_state(self) -> None:
-        """Persist enough state to restore the current view after a restart."""
-        data: dict = {}
-        # Stable registry key supports any future mode. Keep the legacy boolean
-        # for one-way downgrade compatibility; new Railmux always prefers mode.
-        data["mode"] = self._current_mode_key()
-        data["codex_mode"] = (
-            self._active_mode().project_source == ProjectSource.CODEX)
+    @staticmethod
+    def _portable_state_path() -> Path:
+        return restart_state.portable_state_path()
+
+    def _view_state_data(self) -> dict:
+        data = {"mode": self._current_mode_key()}
         if self._selected_project is not None:
             data["project"] = self._selected_project.encoded_name
-        # Focused session in the sidebar.
         session = self._currently_focused_session_meta()
         if session is not None:
             data["session"] = session.session_id
-        # What's in the right pane — so we can re-open the same thing.
+        projects_pane = getattr(self, "_projects_pane", None)
+        sessions_pane = getattr(self, "_sessions_pane", None)
+        if projects_pane is not None and projects_pane.filter_text:
+            data["project_filter"] = projects_pane.filter_text
+        if sessions_pane is not None and sessions_pane.filter_text:
+            data["session_filter"] = sessions_pane.filter_text
+        return data
+
+    def _recovery_state_data(self) -> dict:
+        data: dict = {}
         slot = self._primary_slot
         if slot.in_history_mode:
             data["right_kind"] = "preview"
@@ -1851,11 +1865,7 @@ class App:
             data["right_tmux"] = slot.agent_tmux_name
         else:
             data["right_kind"] = "empty"
-        # Persist the registry binding, not just the right-pane target.  A
-        # placeholder tmux name is deliberately process-unique and is retained
-        # even after ``_Running.key`` becomes the real UUID; without this map a
-        # restart cannot recover that UUID safely on macOS (no /proc), and the
-        # Sessions row appears non-running despite a live agent.
+
         bindings: list[dict] = []
         for running in self._running.values():
             cwd = (
@@ -1880,23 +1890,78 @@ class App:
         if bindings:
             data["running_bindings_version"] = 1
             data["running_bindings"] = bindings
-        import json
+        return data
+
+    def _save_state(self) -> None:
+        """Persist portable view state and exact-owner recovery independently."""
+        view = restart_state.build_view(self._view_state_data())
+        portable = {
+            "schema_version": restart_state.SCHEMA_VERSION,
+            "kind": "portable",
+            "view": view,
+        }
+        if getattr(self, "_portable_state_writable", True):
+            restart_state.write_portable(portable, self._portable_state_path())
+
+        identity = getattr(self, "_restart_identity", None)
         path = self._state_path()
-        try:
-            atomic_write_text(
-                path, json.dumps(data), encoding="utf-8")
-        except OSError:
-            pass
+        if identity is None or path is None:
+            return
+        local = {
+            "schema_version": restart_state.SCHEMA_VERSION,
+            "kind": "instance",
+            "owner": identity.to_json(),
+            # Local view takes precedence over shared portable defaults, so two
+            # simultaneous windows each restore their own display and focus.
+            "view": view,
+            "recovery": self._recovery_state_data(),
+        }
+        if getattr(self, "_local_state_writable", True):
+            restart_state.write_instance(identity, local, path)
+        restart_state.cleanup_stale_instances(identity)
 
     def _load_state(self) -> dict | None:
-        """Return persisted state dict, or None if unavailable / stale."""
-        import json
+        """Merge portable defaults with this exact tmux pane's local state."""
+        portable_path = self._portable_state_path()
+        portable_raw = restart_state.read_json_object(portable_path)
+        portable = restart_state.decode_portable(portable_raw)
+        self._portable_state_writable = not (
+            isinstance(portable_raw, dict)
+            and isinstance(portable_raw.get("schema_version"), int)
+            and not isinstance(portable_raw.get("schema_version"), bool)
+            and portable_raw["schema_version"] > restart_state.SCHEMA_VERSION
+        )
+        if portable is None and not portable_path.exists():
+            # The legacy fixed file has no owner identity. Migrate only stable
+            # view data; never import right-pane or running-binding authority.
+            portable = restart_state.legacy_portable_view(
+                restart_state.read_json_object(restart_state.legacy_state_path()))
+            if portable is not None:
+                restart_state.write_portable({
+                    "schema_version": restart_state.SCHEMA_VERSION,
+                    "kind": "portable",
+                    "view": restart_state.build_view(portable),
+                }, portable_path)
+
+        local = None
+        identity = getattr(self, "_restart_identity", None)
         path = self._state_path()
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        if identity is not None and path is not None:
+            local_raw = restart_state.read_json_object(path)
+            local = restart_state.decode_instance(local_raw, identity)
+            self._local_state_writable = not (
+                isinstance(local_raw, dict)
+                and isinstance(local_raw.get("schema_version"), int)
+                and not isinstance(local_raw.get("schema_version"), bool)
+                and local_raw["schema_version"] > restart_state.SCHEMA_VERSION
+            )
+            restart_state.cleanup_stale_instances(identity)
+        if portable is None and local is None:
             return None
-        return data if isinstance(data, dict) else None
+        # Local carries a complete view snapshot. Prefer it wholesale: a
+        # missing optional key must mean "unset for this instance", not inherit
+        # the last portable value written by another Railmux window.
+        return local if local is not None else portable
 
     def _mode_key_from_state(self, state: dict | None) -> str:
         """Resolve new registry state, then the <=0.1.1 Codex boolean."""

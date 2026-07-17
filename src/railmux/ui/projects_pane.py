@@ -123,6 +123,10 @@ class ProjectsPane(urwid.WidgetWrap):
         self._filter = needle
         self._refresh_rows()
 
+    @property
+    def filter_text(self) -> str:
+        return self._filter
+
     def _refresh_rows(self) -> None:
         # Remember the currently-focused row's identity (project encoded_name).
         prior_focus = self._remember_focus()

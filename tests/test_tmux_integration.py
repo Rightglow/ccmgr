@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from railmux import tmux_ctl
+from railmux import restart_state, tmux_ctl
 from railmux.display_transport import (
     AgentDisplayTransport,
     recover_interrupted_swaps,
@@ -89,6 +89,97 @@ def _wait_until(predicate, timeout: float = 3.0) -> bool:
             return True
         time.sleep(0.05)
     return False
+
+
+def test_real_restart_identity_isolates_windows_sessions_and_servers(
+    isolated_tmux, monkeypatch, tmp_path,
+):
+    """Exact state paths cannot collide across the supported tmux topologies."""
+    session_name, first_pane, first_socket = isolated_tmux
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    first = restart_state.capture_outer_identity()
+    assert first is not None and first.pane_id == first_pane
+
+    subprocess.run(
+        ["tmux", "-S", first_socket, "new-window", "-d", "-t", session_name,
+         "-n", "second", "sleep 60"],
+        check=True,
+    )
+    second_pane = subprocess.check_output(
+        ["tmux", "-S", first_socket, "display-message", "-p", "-t",
+         f"{session_name}:second", "#{pane_id}"],
+        text=True,
+    ).strip()
+    monkeypatch.setenv("TMUX_PANE", second_pane)
+    second_window = restart_state.capture_outer_identity()
+    assert second_window is not None
+    assert second_window.server_digest == first.server_digest
+    assert second_window.session_id == first.session_id
+    assert second_window.window_id != first.window_id
+    assert second_window.storage_key != first.storage_key
+
+    subprocess.run(
+        ["tmux", "-S", first_socket, "new-session", "-d", "-s", "other",
+         "sleep 60"],
+        check=True,
+    )
+    other_pane = subprocess.check_output(
+        ["tmux", "-S", first_socket, "display-message", "-p", "-t", "other",
+         "#{pane_id}"],
+        text=True,
+    ).strip()
+    monkeypatch.setenv("TMUX_PANE", other_pane)
+    other_session = restart_state.capture_outer_identity()
+    assert other_session is not None
+    assert other_session.server_digest == first.server_digest
+    assert other_session.session_id != first.session_id
+    assert other_session.storage_key not in {
+        first.storage_key, second_window.storage_key}
+
+    second_root = Path(tempfile.mkdtemp(prefix="rx2-", dir="/tmp"))
+    second_root.chmod(0o700)
+    second_socket = str(second_root / "s")
+    try:
+        subprocess.run(
+            ["tmux", "-S", second_socket, "-f", "/dev/null", "new-session",
+             "-d", "-s", session_name, "sleep 60"],
+            check=True,
+        )
+        second_pid = subprocess.check_output(
+            ["tmux", "-S", second_socket, "display-message", "-p", "-t",
+             session_name, "#{pid}"], text=True).strip()
+        private_pane = subprocess.check_output(
+            ["tmux", "-S", second_socket, "display-message", "-p", "-t",
+             session_name, "#{pane_id}"], text=True).strip()
+        monkeypatch.setenv("TMUX", f"{second_socket},{second_pid},0")
+        monkeypatch.setenv("TMUX_PANE", private_pane)
+        private = restart_state.capture_outer_identity()
+        assert private is not None
+        assert private.server_digest != first.server_digest
+        assert private.storage_key != first.storage_key
+
+        identities = (first, second_window, other_session, private)
+        paths = [restart_state.instance_state_path(item) for item in identities]
+        assert len(set(paths)) == len(paths)
+        for identity, path in zip(identities, paths):
+            payload = {
+                "schema_version": 1,
+                "kind": "instance",
+                "owner": identity.to_json(),
+                "view": restart_state.build_view({"mode": "claude"}),
+                "recovery": {"right_kind": "empty"},
+            }
+            assert restart_state.write_instance(identity, payload, path)
+            assert restart_state.decode_instance(
+                restart_state.read_json_object(path), identity) is not None
+    finally:
+        subprocess.run(
+            ["tmux", "-S", second_socket, "kill-server"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        shutil.rmtree(second_root, ignore_errors=True)
 
 
 def test_real_tmux_session_split_attach_persistence_and_styles(isolated_tmux):

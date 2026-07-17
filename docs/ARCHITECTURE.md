@@ -24,9 +24,39 @@ the assumption that exactly Claude and Codex exist. Adding a truly new backend
 will require a backend adapter, but must not require redesigning mode cycling or
 per-mode state.
 
-Soft-restart state writes the stable `mode` key. The legacy `codex_mode` boolean
-is also written temporarily for downgrade compatibility and must remain a
-read fallback while state files from Railmux 0.1.x may exist.
+Portable soft-restart state writes the stable active `mode` key inside a
+per-mode view map. The ownerless `codex_mode` boolean remains a read-only
+migration fallback for Railmux 0.1.x files; it is never copied into new state.
+
+## Restart state has two authorities
+
+Instance-local recovery state lives under `XDG_RUNTIME_DIR` (or the existing
+macOS-compatible `/tmp/railmux-UID` fallback). Its filename is derived from a
+privacy-safe tmux server-lifetime digest plus the immutable outer pane ID. The
+payload repeats that owner identity and is rejected unless it matches the live
+instance. Session/window IDs are recorded as context but a move of the same
+pane does not change ownership. Different panes, windows, sessions, and private
+tmux servers therefore cannot overwrite or restore one another's local state.
+
+The local schema may contain the right-pane target and validated running
+bindings. It duplicates the current sidebar view so a shared portable
+last-writer never changes an exact instance restart. Files are atomically
+replaced as 0600 inside a verified user-owned 0700 runtime directory. Cleanup
+is bounded and removes only recognized owners proven dead; unknown/newer state
+and old but possibly-live private servers are retained.
+
+Portable state lives beside `config.toml` and contains only an active mode plus
+per-mode project/session selections and filters. It contains no tmux names,
+pane/process IDs, commands, environment values, transcripts, or recovery
+authority. A second node may use it as a view default but must ignore every
+node-local pane identity. The old fixed `railmux-state.json` has no owner proof,
+so migration may extract only validated portable view fields; right-pane and
+running-binding fields remain ignored and the legacy file is left for manual
+cleanup.
+
+Detached-session tmux stamps and swap-transport markers retain their own exact
+lifetimes and validation. Runtime JSON is a cache and must not become a
+competing authority for adopting, killing, or replacing an agent pane.
 
 ## The agent workspace is independent of the sidebar mode
 

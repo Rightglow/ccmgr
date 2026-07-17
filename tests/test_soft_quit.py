@@ -12,6 +12,8 @@ import pytest
 import urwid
 
 from railmux.models import Project, SessionMeta
+from railmux import restart_state
+from railmux.restart_state import OuterTmuxIdentity
 from railmux.ui.app import App, _Running
 from railmux.ui.modals import QuitConfirmModal
 
@@ -19,11 +21,22 @@ from railmux.ui.modals import QuitConfirmModal
 # ── helpers ──────────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
-def _isolate_tmux_identity_stamps(monkeypatch):
+def _isolate_tmux_identity_stamps(monkeypatch, tmp_path):
     """Unit tests never write options into the developer's real tmux server."""
     monkeypatch.setattr(
         "railmux.ui.app.tmux_ctl.set_session_user_option",
         lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        App, "_portable_state_path",
+        staticmethod(lambda: tmp_path / "portable.json"),
+    )
+    monkeypatch.setattr(
+        restart_state, "legacy_state_path",
+        lambda: tmp_path / "legacy.json",
+    )
+    monkeypatch.setattr(
+        restart_state, "cleanup_stale_instances", lambda *_args, **_kwargs: 0,
     )
 
 def _project(name: str = "test-proj", claude_dir: Path | None = None) -> Project:
@@ -40,6 +53,13 @@ def _minimal_app(*, selected_project=None):
     """Return a bare App instance with just enough attrs for the method under test."""
     app = App.__new__(App)
     app._selected_project = selected_project
+    app._restart_identity = OuterTmuxIdentity(
+        server_digest="a" * 64,
+        server_pid=123,
+        pane_id="%1",
+        session_id="$1",
+        window_id="@1",
+    )
     app._running = {}
     app._codex_mode = False
     app._claude_home = Path.home() / ".claude"
@@ -107,15 +127,15 @@ def test_safe_name_strips_leading_dashes():
 
 def test_state_path_uses_xdg_runtime_dir(monkeypatch):
     monkeypatch.setitem(os.environ, "XDG_RUNTIME_DIR", "/run/user/1000")
-    path = App._state_path()
-    assert path == Path("/run/user/1000/railmux-state.json")
+    assert restart_state.instances_dir() == Path(
+        "/run/user/1000/railmux/instances")
 
 
 def test_state_path_falls_back_to_tmp(monkeypatch):
     monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
     monkeypatch.setattr(os, "getuid", lambda: 1000)
-    path = App._state_path()
-    assert path == Path("/tmp/railmux-1000/railmux-state.json")
+    assert restart_state.instances_dir() == Path(
+        "/tmp/railmux-1000/railmux/instances")
 
 
 def test_save_and_load_state_round_trip(tmp_path, monkeypatch):
@@ -131,6 +151,79 @@ def test_save_and_load_state_round_trip(tmp_path, monkeypatch):
     assert data["right_kind"] == "empty"
 
 
+def test_local_view_wins_over_shared_portable_view(tmp_path, monkeypatch):
+    local_path = tmp_path / "local.json"
+    portable_path = tmp_path / "portable-shared.json"
+    monkeypatch.setattr(App, "_state_path", staticmethod(lambda: local_path))
+    monkeypatch.setattr(
+        App, "_portable_state_path", staticmethod(lambda: portable_path))
+    app = _minimal_app(selected_project=_project("one"))
+    app._projects_pane = MagicMock(filter_text="mine")
+    app._sessions_pane = MagicMock(filter_text="")
+    app._save_state()
+    restart_state.write_portable({
+        "schema_version": 1,
+        "kind": "portable",
+        "view": restart_state.build_view(
+            {"mode": "codex", "project": "-tmp-other",
+             "session_filter": "foreign-filter"}),
+    }, portable_path)
+
+    data = app._load_state()
+
+    assert data["mode"] == "claude"
+    assert data["project"] == "-tmp-one"
+    assert data["project_filter"] == "mine"
+    assert "session_filter" not in data
+
+
+def test_foreign_local_owner_is_ignored_without_process_restore(
+        tmp_path, monkeypatch):
+    local_path = tmp_path / "foreign.json"
+    portable_path = tmp_path / "portable.json"
+    monkeypatch.setattr(App, "_state_path", staticmethod(lambda: local_path))
+    monkeypatch.setattr(
+        App, "_portable_state_path", staticmethod(lambda: portable_path))
+    app = _minimal_app()
+    foreign = OuterTmuxIdentity(
+        "b" * 64, 456, "%9", "$9", "@9")
+    restart_state.write_instance(foreign, {
+        "schema_version": 1,
+        "kind": "instance",
+        "owner": foreign.to_json(),
+        "view": restart_state.build_view({"mode": "codex"}),
+        "recovery": {
+            "right_kind": "agent",
+            "right_tmux": "cx-foreign",
+        },
+    }, local_path)
+    restart_state.write_portable({
+        "schema_version": 1,
+        "kind": "portable",
+        "view": restart_state.build_view({"mode": "claude"}),
+    }, portable_path)
+
+    data = app._load_state()
+
+    assert data == {"mode": "claude"}
+    assert "right_tmux" not in data
+
+
+def test_state_saves_are_independent_when_one_destination_fails(
+        tmp_path, monkeypatch):
+    local_path = tmp_path / "local.json"
+    portable_path = tmp_path / "portable.json"
+    monkeypatch.setattr(App, "_state_path", staticmethod(lambda: local_path))
+    monkeypatch.setattr(
+        App, "_portable_state_path", staticmethod(lambda: portable_path))
+    app = _minimal_app()
+    monkeypatch.setattr(restart_state, "write_portable", lambda *_a, **_k: False)
+
+    app._save_state()
+
+    assert local_path.exists()
+
+
 def test_save_state_always_writes_right_kind(tmp_path, monkeypatch):
     """Even without a selected project, _save_state records the right-pane state."""
     monkeypatch.setattr(App, "_state_path", staticmethod(lambda: tmp_path / "state.json"))
@@ -138,8 +231,7 @@ def test_save_state_always_writes_right_kind(tmp_path, monkeypatch):
     app._save_state()
     assert (tmp_path / "state.json").is_file()
     data = app._load_state()
-    assert data == {
-        "right_kind": "empty", "mode": "claude", "codex_mode": False}
+    assert data == {"right_kind": "empty", "mode": "claude"}
 
 
 def test_save_state_with_claude_in_right_pane(tmp_path, monkeypatch):
@@ -166,14 +258,13 @@ def test_save_state_with_preview_in_right_pane(tmp_path, monkeypatch):
 
 
 def test_save_state_persists_codex_mode(tmp_path, monkeypatch):
-    """Restart records the stable mode key plus the downgrade boolean."""
+    """Restart records the stable provider registry key."""
     monkeypatch.setattr(App, "_state_path", staticmethod(lambda: tmp_path / "state.json"))
     app = _minimal_app(selected_project=_project("myproj"))
     app._codex_mode = True
     app._save_state()
     data = app._load_state()
     assert data["mode"] == "codex"
-    assert data["codex_mode"] is True
 
 
 def test_save_state_persists_real_binding_with_placeholder_tmux_name(
@@ -235,13 +326,16 @@ def test_save_state_persists_unresolved_placeholder_context(
 
 
 def test_load_state_without_codex_mode_defaults_falsy(tmp_path, monkeypatch):
-    """Backward-compat: an old state file lacking codex_mode restores as Claude."""
+    """Ownerless legacy state migrates view-only and defaults to Claude."""
     p = tmp_path / "state.json"
     p.write_text(json.dumps({"project": "-tmp-myproj", "right_kind": "empty"}))
     app = _minimal_app()
-    with patch.object(App, "_state_path", return_value=p):
-        data = app._load_state()
-    assert not data.get("codex_mode")
+    monkeypatch.setattr(restart_state, "legacy_state_path", lambda: p)
+
+    data = app._load_state()
+
+    assert data == {"mode": "claude", "project": "-tmp-myproj"}
+    assert p.exists()  # ownerless source remains available for manual cleanup
 
 
 def test_enter_codex_mode_on_restore_applies_filter(monkeypatch):
@@ -320,6 +414,26 @@ def test_load_state_rejects_non_object_json(tmp_path):
     app = _minimal_app()
     with patch.object(App, "_state_path", return_value=p):
         assert app._load_state() is None
+
+
+def test_newer_state_schemas_are_ignored_and_never_overwritten(
+        tmp_path, monkeypatch):
+    local = tmp_path / "local.json"
+    portable = tmp_path / "portable.json"
+    newer_portable = {"schema_version": 2, "kind": "portable"}
+    newer_local = {"schema_version": 2, "kind": "instance"}
+    portable.write_text(json.dumps(newer_portable))
+    local.write_text(json.dumps(newer_local))
+    monkeypatch.setattr(App, "_state_path", staticmethod(lambda: local))
+    monkeypatch.setattr(
+        App, "_portable_state_path", staticmethod(lambda: portable))
+    app = _minimal_app()
+
+    assert app._load_state() is None
+    app._save_state()
+
+    assert json.loads(portable.read_text()) == newer_portable
+    assert json.loads(local.read_text()) == newer_local
 
 
 # ── _discover_orphans parsing ────────────────────────────────────────────

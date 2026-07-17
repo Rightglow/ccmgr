@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add in-memory Running-pane filtering with plain fuzzy search, an optional
   `project:<name>` restriction, provider-aware empty states, per-mode queries,
   and exact tmux-identity focus retention across refreshes and sorting.
+- Split soft-restart persistence into a portable per-mode sidebar view and
+  exact-owner runtime recovery files, including isolated real-tmux coverage for
+  multiple windows, sessions, and same-named sessions on private servers.
+  On the one-time upgrade from the ownerless legacy file, only view preferences
+  migrate; recovery bindings remain untouched and are not treated as authority.
 - Add an experimental, default-off de-nested agent display transport using
   transactional cross-session pane swaps, durable tmux recovery markers, and a
   zero-extra-pane session-group keeper. It returns real panes before preview,
@@ -63,6 +68,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reserved demo-GIF slot.
 
 ### Fixed
+
+- Prevent simultaneous Railmux instances from overwriting or restoring one
+  another's right pane and running bindings. Local state is namespaced by the
+  tmux server lifetime and immutable outer pane, atomically written with
+  restrictive permissions, and stale cleanup removes only owners proven dead.
 
 - Read the containing tmux window rather than the narrow Urwid sidebar when
   evaluating workspace dimensions, so a restored split no longer reports a

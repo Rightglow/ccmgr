@@ -254,6 +254,10 @@ class SessionsPane(urwid.WidgetWrap):
         if self._project is not None:
             self._render(self._visible_sessions())
 
+    @property
+    def filter_text(self) -> str:
+        return self._filter
+
     def _visible_sessions(self) -> list[SessionMeta]:
         """Sessions after applying the current filter, sorted favorites-first
         then most-recent. Shared by set_sessions and set_filter so both views
