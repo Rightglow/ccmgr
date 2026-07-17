@@ -230,7 +230,8 @@ def test_real_marked_holder_persists_identity_before_provider_runs(
     ok, reason = tmux_ctl.start_detached_holder(
         holder, f"sh -c {shlex.quote(script)}")
     assert ok, reason
-    assert _wait_until(observed.exists)
+    assert _wait_until(
+        lambda: observed.exists() and observed.read_text().strip() == raw)
     assert observed.read_text().strip() == raw
     current = tmux_ctl.pane_identity(holder.pane_id)
     assert current is not None
