@@ -645,10 +645,16 @@ def wait_session_detached(session_name: str, timeout: float = 1.0) -> bool:
 
 
 def swap_panes(source_pane: str, target_pane: str) -> bool:
-    """Swap two panes, including across sessions/windows."""
+    """Swap two panes without changing either window's active pane.
+
+    ``swap-pane`` normally follows one of the moved panes and can therefore
+    undo a mouse click that just focused the Railmux sidebar.  Display focus is
+    owned by the caller's explicit ``select-pane`` path, so every transport
+    swap uses ``-d`` to preserve the current active panes.
+    """
     try:
         subprocess.check_call(
-            ["tmux", "swap-pane", "-s", source_pane, "-t", target_pane],
+            ["tmux", "swap-pane", "-d", "-s", source_pane, "-t", target_pane],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )

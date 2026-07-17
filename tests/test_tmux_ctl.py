@@ -171,7 +171,7 @@ def test_swap_and_grouped_session_commands_are_tmux_27_compatible():
         assert tmux_ctl.swap_panes("%2", "%1")
         assert tmux_ctl.create_grouped_session("keeper", "railmux")
     assert call.call_args_list[0].args[0] == [
-        "tmux", "swap-pane", "-s", "%2", "-t", "%1"]
+        "tmux", "swap-pane", "-d", "-s", "%2", "-t", "%1"]
     assert call.call_args_list[1].args[0] == [
         "tmux", "new-session", "-d", "-t", "railmux", "-s", "keeper"]
 

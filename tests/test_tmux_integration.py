@@ -91,6 +91,37 @@ def _wait_until(predicate, timeout: float = 3.0) -> bool:
     return False
 
 
+def test_real_swap_preserves_sidebar_focus(isolated_tmux):
+    """A transport swap must not undo the mouse-selected sidebar pane."""
+    display_session, sidebar_pane, _socket_path = isolated_tmux
+    display_pane = subprocess.check_output(
+        [
+            "tmux", "split-window", "-d", "-h", "-t", display_session,
+            "-P", "-F", "#{pane_id}", "sleep 60",
+        ],
+        text=True,
+    ).strip()
+    agent_pane = subprocess.check_output(
+        [
+            "tmux", "new-session", "-d", "-s", "focus-agent",
+            "-P", "-F", "#{pane_id}", "sleep 60",
+        ],
+        text=True,
+    ).strip()
+    subprocess.run(
+        ["tmux", "select-pane", "-t", sidebar_pane], check=True)
+
+    assert tmux_ctl.swap_panes(agent_pane, display_pane)
+    active_pane = subprocess.check_output(
+        [
+            "tmux", "display-message", "-p", "-t", display_session,
+            "#{pane_id}",
+        ],
+        text=True,
+    ).strip()
+    assert active_pane == sidebar_pane
+
+
 def test_real_restart_identity_isolates_windows_sessions_and_servers(
     isolated_tmux, monkeypatch, tmp_path,
 ):

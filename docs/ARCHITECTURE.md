@@ -202,6 +202,11 @@ or unowned outer session uses nested display. Controlled preview, close, soft
 quit, hard quit, and delete return the real pane before replacing a display
 placeholder or killing its home session.
 
+Pane movement preserves each window's active pane (`swap-pane -d`). Only an
+explicit user-intent path may select the agent display, so a single-click
+preview or attach cannot undo the mouse-selected sidebar focus as a side effect
+of returning or displaying a real pane.
+
 Soft quit may release UI-only resources and return displayed panes home, but it
 must branch before the detached-session kill loop. Hard-quit destruction must
 remain below that explicit decision so adding teardown work cannot silently

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve the active tmux pane during swap-transport moves, so a single click
+  on a Sessions row no longer returns keyboard focus to the agent pane while
+  previewing or attaching the selected session.
+
 ## [0.1.2] - 2026-07-17
 
 ### Added
