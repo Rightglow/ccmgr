@@ -86,7 +86,6 @@ PALETTE = [
     # warn/error escalate so failures stand out from routine feedback.
     ("status_info", "light green", "default", "", _GRASS_GREEN, "default"),
     ("status_warn", "yellow,bold", "default", "", f"{_STATUS_YELLOW},bold", "default"),
-    ("status_error", "light red,bold", "default", "", f"{_STATUS_RED},bold", "default"),
     ("status_tip", "dark gray", "default"),
     # Explicit body colour prevents the outer pane-focus AttrMap from leaking
     # into ordinary rows. Grass green is reserved for navigation focus:
@@ -661,16 +660,8 @@ class App:
             on_detach=self._on_detach,
             on_mode_toggle=self._cycle_mode,
         )
-        # Footer: context key hints, optional error bar, then the constant
-        # button row. Status/tips are shown in the outer tmux status bar; the
-        # error bar is the in-pane surface for agent-launch failures so the user
-        # sees what went wrong without having to check the tmux bar.
-        self._error_text = urwid.Text("", align="left", wrap="clip")
-        self._error_bar = urwid.AttrMap(self._error_text, "status_error")
-        self._error_timer: object | None = None
-        # Do not add the error widget until there is an error.  An empty
-        # urwid.Text still occupies one row, so leaving it in the Pile would
-        # permanently steal terminal space despite the bar looking blank.
+        # Footer contains only stable controls. Status, warnings, and errors all
+        # use the full-width outer tmux bar, Railmux's single status surface.
         self._footer = urwid.Pile([
             ("pack", self._hint_bar),
             ("pack", self._button_bar),
@@ -766,9 +757,40 @@ class App:
             )
         elif session_id is None:
             slot.project_key = None
+        self._paint_slot_active_target(slot, session_id, tmux_name)
+
+    def _paint_slot_active_target(
+        self,
+        slot: AgentSlot,
+        session_id: str | None,
+        tmux_name: str | None,
+    ) -> None:
+        """Paint one slot's target without committing its workspace state.
+
+        Attach operations are synchronous, while tmux can expose a pane swap
+        partway through the transaction. Keeping this display-only operation
+        separate lets a click acknowledge its intended target immediately and
+        still leaves the prior :class:`AgentSlot` state available for rollback.
+        """
         if slot.key == self._agent_workspace().active_slot_key:
             self._sessions_pane.set_active_session(session_id)
             self._running_pane.set_active(tmux_name)
+
+    def _session_id_for_tmux_target(self, tmux_name: str) -> str | None:
+        running = self._by_tmux(tmux_name)
+        if running is None or running.is_placeholder:
+            return None
+        return running.key
+
+    def _paint_slot_active_tmux_target(
+        self, slot: AgentSlot, tmux_name: str,
+    ) -> None:
+        """Optimistically paint a tmux target without changing *slot*."""
+        self._paint_slot_active_target(
+            slot,
+            self._session_id_for_tmux_target(tmux_name),
+            tmux_name,
+        )
 
     def _set_active_target(self, session_id: str | None,
                            tmux_name: str | None, *,
@@ -787,11 +809,11 @@ class App:
         self, tmux_name: str, slot: AgentSlot | None = None,
     ) -> None:
         slot = slot or self._primary_slot
-        running = self._by_tmux(tmux_name)
-        session_id = None
-        if running is not None and not running.is_placeholder:
-            session_id = running.key
-        self._set_slot_active_target(slot, session_id, tmux_name)
+        self._set_slot_active_target(
+            slot,
+            self._session_id_for_tmux_target(tmux_name),
+            tmux_name,
+        )
 
     def _set_divider_active(self, active: bool, *, force: bool = False) -> None:
         """Highlight the whole shared divider when an agent pane has focus.
@@ -1192,7 +1214,6 @@ class App:
                     selected, entry.identity_token)):
             msg = "Open refused: the unresolved tmux identity changed"
             self._set_status(msg, "error")
-            self._show_error(msg)
             return
         # Re-attach the agent pane to this already-running session AND
         # sync the Projects/Sessions panes to that session's project, so the
@@ -1203,7 +1224,6 @@ class App:
         if not ok:
             msg = "Re-attach failed: could not connect to agent pane"
             self._set_status(msg, "error")
-            self._show_error(msg)
             return
         r = self._by_tmux(entry.tmux_name)
         project = r.project if r else None
@@ -1231,7 +1251,6 @@ class App:
                     running_ids=set(self._running),
                     favorite_ids=self._favorites.get_ids(),
                 )
-        self._clear_error()
         if not self._show_attention_status(entry.attention):
             self._set_status(f"→ {entry.label}")
 
@@ -1461,10 +1480,31 @@ class App:
                 "warn",
             )
             return False
+        previous_session_id = slot.active_session_id
+        previous_tmux_name = slot.agent_tmux_name
+        # A swap becomes visible to tmux in the middle of this synchronous
+        # transaction. Paint the intended active target before entering tmux
+        # so the old row does not remain as a second, grey selection while the
+        # new row already has the green list cursor. This deliberately does not
+        # mutate ``slot``: its confirmed state remains available if attach
+        # fails. Double-click needs this flush too because its earlier draw only
+        # painted the right-pane focus transition.
+        self._paint_slot_active_tmux_target(slot, agent_tmux_name)
+        self._redraw_focus_state_now()
         outcome = self._display_transport().attach(slot, agent_tmux_name)
         if not outcome.ok:
+            self._reconcile_failed_attach_target(
+                slot,
+                previous_session_id=previous_session_id,
+                previous_tmux_name=previous_tmux_name,
+            )
             return False
         if slot.pane_id is None:
+            self._reconcile_failed_attach_target(
+                slot,
+                previous_session_id=previous_session_id,
+                previous_tmux_name=previous_tmux_name,
+            )
             return False
         self._check_agent_slot_size(slot)
         if steal_focus:
@@ -1484,6 +1524,33 @@ class App:
             self._schedule_scroll_acceleration(agent_tmux_name)
         self._install_fullscreen_binding()
         return True
+
+    def _reconcile_failed_attach_target(
+        self,
+        slot: AgentSlot,
+        *,
+        previous_session_id: str | None,
+        previous_tmux_name: str | None,
+    ) -> None:
+        """Restore optimistic highlights after a failed attach.
+
+        Most failures leave the old display intact, so its visual state is
+        restored without touching the confirmed slot model. A swap can also
+        fail after it safely returned the old pane home, or after it retained
+        recovery metadata for the new pane. In those cases the transport has
+        updated ``slot.agent_tmux_name`` to describe what remains on screen;
+        commit that truthful final target instead of claiming the old one is
+        still displayed.
+        """
+        displayed_tmux_name = slot.agent_tmux_name
+        if displayed_tmux_name == previous_tmux_name:
+            self._paint_slot_active_target(
+                slot, previous_session_id, previous_tmux_name)
+        elif displayed_tmux_name is not None:
+            self._set_active_tmux_target(displayed_tmux_name, slot)
+        else:
+            self._set_slot_active_target(slot, None, None)
+        self._redraw_focus_state_now()
 
     def _attach_in_right_pane(self, claude_tmux_name: str, *,
                                steal_focus: bool = True) -> bool:
@@ -1590,7 +1657,6 @@ class App:
                 f"Launch refused: untracked live tmux session '{tmux_name}'"
             )
             self._set_status(msg, "error")
-            self._show_error(msg)
             return False
         # #12: snapshot the session ids already present in the launch cwd BEFORE
         # starting the child, so placeholder resolution only ever binds a NEWLY
@@ -1645,7 +1711,6 @@ class App:
         if not ok:
             msg = f"Launch failed: {err or 'could not create agent session'}"
             self._set_status(msg, "error")
-            self._show_error(msg)
             return False
         self._running[key] = _Running(
             key=key, tmux_name=tmux_name, label=label, project=project,
@@ -1661,9 +1726,7 @@ class App:
         if not self._attach_in_right_pane(tmux_name, steal_focus=steal_focus):
             msg = "Launch failed: could not attach to agent pane"
             self._set_status(msg, "error")
-            self._show_error(msg)
             return False
-        self._clear_error()
         return True
 
     def _launch_resume(self, session_meta: SessionMeta,
@@ -1715,7 +1778,6 @@ class App:
                     "project could own this session"
                 )
                 self._set_status(msg, "error")
-                self._show_error(msg)
                 return
 
         cwd = session_meta.project.real_path
@@ -1786,7 +1848,6 @@ class App:
         except OSError as e:
             msg = str(e)
             self._set_status(msg, "error")
-            self._show_error(msg)
             return
         placeholder = self._new_placeholder_key()
         project: Project | None = None
@@ -2315,7 +2376,6 @@ class App:
                         "validated"
                     )
                     self._set_status(msg, "error")
-                    self._show_error(msg)
                     return False
                 actual_mode = self._modes().for_tmux_name(running.tmux_name)
                 expected_mode = (
@@ -2326,13 +2386,11 @@ class App:
                         or expected_mode.key != actual_mode.key):
                     msg = "Restore deferred: previous provider identity changed"
                     self._set_status(msg, "error")
-                    self._show_error(msg)
                     return False
                 if (running.orphan is not None
                         and not self._running_action_valid(running)):
                     msg = "Restore deferred: marked tmux identity changed"
                     self._set_status(msg, "error")
-                    self._show_error(msg)
                     return False
                 ok = self._attach_in_right_pane(tmux_name, steal_focus=False)
                 if not ok:
@@ -2341,7 +2399,6 @@ class App:
                         "agent session"
                     )
                     self._set_status(msg, "error")
-                    self._show_error(msg)
                     return False
                 return True
             # A portable restart wish never authorizes process adoption. If its
@@ -2730,18 +2787,28 @@ class App:
             if not orphan_marker.same_live_tmux(marker, pane):
                 continue
             if (current_owner is not None
-                    and marker.owner.server_digest
-                    == current_owner.server_digest
+                    and (marker.owner.server_digest
+                         == current_owner.server_digest
+                         or marker.owner.server_pid
+                         == current_owner.server_pid)
                     and marker.owner.pane_id != current_owner.pane_id
                     and not owner_snapshot_loaded):
                 server = tmux_ctl.server_snapshot()
                 live_panes = server.panes if server is not None else None
                 owner_snapshot_loaded = True
             if not orphan_marker.owner_available(
-                    marker, current_owner, live_panes):
+                    marker, current_owner, live_panes,
+                    # Reaching this point already proved that the v2 marker is
+                    # stored on its exact live tmux session and pane.  Permit a
+                    # one-time claim from the <=0.1.1 ctime-based digest when
+                    # the tmux server PID is unchanged; the claim immediately
+                    # persists the new stable digest.
+                    allow_legacy_server_digest=True):
                 continue
             if (current_owner is not None
-                    and marker.owner.pane_id != current_owner.pane_id):
+                    and (marker.owner.pane_id != current_owner.pane_id
+                         or marker.owner.server_digest
+                         != current_owner.server_digest)):
                 claimed = orphan_marker.claim_owner(
                     marker,
                     current_owner,
@@ -5076,63 +5143,6 @@ class App:
         self._status_level = level
         self._status_since = time.monotonic()
         self._render_status_to_tmux(msg, level)
-
-    # ── in-pane error bar ──────────────────────────────────────────────────
-
-    _ERROR_BAR_TTL: float = 8.0  # seconds before auto-clear
-
-    def _set_error_bar_visible(self, visible: bool) -> None:
-        """Insert/remove the optional footer row without leaving blank space."""
-        if not hasattr(self, "_footer") or not hasattr(self, "_error_bar"):
-            return
-        current = next(
-            (i for i, (widget, _options) in enumerate(self._footer.contents)
-             if widget is self._error_bar),
-            None,
-        )
-        if visible and current is None:
-            self._footer.contents.insert(
-                1, (self._error_bar, self._footer.options("pack")))
-        elif not visible and current is not None:
-            del self._footer.contents[current]
-
-    def _show_error(self, msg: str) -> None:
-        """Display an error in the in-pane bottom bar (red, between hints and
-        buttons).  Auto-clears after ``_ERROR_BAR_TTL`` seconds or on next
-        successful launch.
-
-        Info/warn messages use the outer tmux status bar (``_set_status``) —
-        this bar is reserved for hard failures the user must not miss."""
-        if not hasattr(self, "_error_text"):
-            return
-        self._error_bar.set_attr_map({None: "status_error"})
-        self._error_text.set_text(msg)
-        self._set_error_bar_visible(True)
-        self._cancel_error_timer()
-        if hasattr(self, "_loop") and self._loop is not None:
-            self._error_timer = self._loop.set_alarm_in(
-                self._ERROR_BAR_TTL, self._on_error_timeout)
-
-    def _clear_error(self) -> None:
-        """Clear the in-pane error bar and cancel its auto-clear timer."""
-        if not hasattr(self, "_error_text"):
-            return
-        self._error_text.set_text("")
-        self._set_error_bar_visible(False)
-        self._cancel_error_timer()
-
-    def _cancel_error_timer(self) -> None:
-        if self._error_timer is not None and hasattr(self, "_loop") and self._loop is not None:
-            try:
-                self._loop.remove_alarm(self._error_timer)
-            except Exception:
-                pass
-        self._error_timer = None
-
-    def _on_error_timeout(self, _loop, _user_data) -> None:
-        self._error_timer = None
-        self._error_text.set_text("")
-        self._set_error_bar_visible(False)
 
     def _update_status(self) -> None:
         """Advance the status-bar state machine once per tick.

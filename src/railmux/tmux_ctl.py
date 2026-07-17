@@ -459,17 +459,21 @@ def pane_identity(pane_id: str) -> PaneIdentity | None:
 
 
 def session_topology(session_name: str) -> SessionTopology | None:
-    """Return the exact window/pane topology for one session."""
+    """Return the exact window/pane topology for one session name or ID."""
     pane_fmt = (
         "#{pane_id}\t#{pane_pid}\t#{session_name}\t#{session_id}\t"
         "#{window_id}\t#{pane_dead}\t#{pane_width}\t#{pane_height}"
     )
     try:
-        session_id = subprocess.check_output(
+        session_raw = subprocess.check_output(
             ["tmux", "display-message", "-p", "-t", session_name,
-             "#{session_id}"],
+             "#{session_name}\t#{session_id}"],
             stderr=subprocess.DEVNULL,
         ).decode().strip()
+        session_fields = session_raw.split("\t")
+        if len(session_fields) != 2:
+            return None
+        actual_name, session_id = session_fields
         attached = session_attached_count(session_name)
         windows_text = subprocess.check_output(
             ["tmux", "list-windows", "-t", session_name, "-F", "#{window_id}"],
@@ -479,7 +483,7 @@ def session_topology(session_name: str) -> SessionTopology | None:
             ["tmux", "list-panes", "-s", "-t", session_name, "-F", pane_fmt],
             stderr=subprocess.DEVNULL,
         ).decode().strip()
-        if not session_id or attached is None:
+        if not actual_name or not session_id or attached is None:
             return None
         windows = tuple(line for line in windows_text.splitlines() if line)
         panes: list[PaneIdentity] = []
@@ -498,7 +502,7 @@ def session_topology(session_name: str) -> SessionTopology | None:
                 height=int(fields[7]),
             ))
         return SessionTopology(
-            session_name=session_name,
+            session_name=actual_name,
             session_id=session_id,
             attached_clients=attached,
             window_ids=windows,

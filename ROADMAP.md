@@ -35,16 +35,17 @@ Open questions:
 - Whether swapping primary/secondary belongs in the first public iteration.
 - Exact minimum per-agent width/height for choosing stacked vs side-by-side.
 
-### De-nested agent pane rendering
+### Default swap transport follow-up
 
-An experimental, default-off transport now replaces the right-side nested
-`tmux attach-session` client with the real agent pane. It uses a tracked
-placeholder plus cross-session `swap-pane`, durable tmux metadata, and a
-zero-extra-pane session-group keeper. The keeper preserves a displayed agent
-even if the original outer session is directly killed; startup repair returns
-only exact marked panes. Nested attach remains the default and the fallback for
-unsupported topology, an external client, an unmanaged outer session, or any
-unproven operation. See `docs/DENESTED_AGENT_PANE.md` for evidence.
+The default transport replaces the right-side nested `tmux attach-session`
+client with the real agent pane. It uses a tracked placeholder plus
+cross-session `swap-pane`, durable tmux metadata, and a zero-extra-pane
+session-group keeper. The keeper preserves a displayed agent even if the
+original outer session is directly killed; startup repair returns only exact
+marked panes. Nested attach remains an explicit compatibility choice and the
+automatic fallback for unsupported topology, an external client, an unmanaged
+outer session, old tmux, or any unproven operation. See
+`docs/DENESTED_AGENT_PANE.md` for evidence.
 
 This is primarily a responsiveness project, not just an internal refactor.
 Codex over the same SSH connection should feel close to a directly launched
@@ -90,20 +91,19 @@ Proven implementation facts:
   the visible nested-client PTY. The visible update path does remove the nested
   client/parser/composition hop.
 
-Remaining gates before considering a default change:
+Follow-up evidence and compatibility work:
 
 - Acceptable real-provider geometry/reflow, especially on tmux 2.7/2.8 where
   `resize-window` is unavailable and with long inline Codex transcripts.
-- Confirmed macOS CI evidence after an approved push.
 - How much Claude Code improves when de-nested, since its alternate-screen,
   application-owned mouse path cannot use Codex's copy-mode batching unchanged.
 - Same-link SSH measurements for first wheel paint, burst drain, sustained
   output, clipboard/mouse behavior, and CPU. A reproducible local synthetic
   server benchmark now places swap close to direct and consistently ahead of
-  nested marker observation, supporting continued opt-in testing. It cannot
-  observe client terminal paint or real providers, so nested remains default.
-  If same-link client-paint results show parity or regression for both Codex
-  and Claude, remove swap rather than carry its lifecycle complexity forever.
+  nested marker observation. It cannot observe client terminal paint or real
+  providers, so it must not be cited as proof of perceived latency. If same-link
+  client-paint results show a material regression for both Codex and Claude,
+  reconsider the default rather than carry transport complexity by inertia.
 
 ### Codex interrupt transcript replay
 

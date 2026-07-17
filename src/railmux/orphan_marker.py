@@ -183,9 +183,26 @@ def owner_available(
     marker: Marker,
     current: restart_state.OuterTmuxIdentity | None,
     live_panes: frozenset[str] | None,
+    *,
+    allow_legacy_server_digest: bool = False,
 ) -> bool:
-    """Permit same owner, or takeover after a full snapshot proves absence."""
-    if current is None or marker.owner.server_digest != current.server_digest:
+    """Permit same owner, or takeover after a full snapshot proves absence.
+
+    ``allow_legacy_server_digest`` is only for a marker already proven to live
+    on its exact tmux session and pane.  Railmux versions through 0.1.1 used a
+    mutable socket ctime in the digest; the same server PID is sufficient to
+    migrate that tmux-local marker once, after which ``claim_owner`` rewrites
+    it with the stable digest.  Instance files and unmarked processes retain
+    strict digest matching.
+    """
+    if current is None:
+        return False
+    same_server = marker.owner.server_digest == current.server_digest
+    legacy_same_server = (
+        allow_legacy_server_digest
+        and marker.owner.server_pid == current.server_pid
+    )
+    if not (same_server or legacy_same_server):
         return False
     if marker.owner.pane_id == current.pane_id:
         return True

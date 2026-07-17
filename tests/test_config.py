@@ -8,7 +8,7 @@ def test_load_with_no_file_uses_defaults(tmp_path):
     cfg = load_config(config_path=tmp_path / "does-not-exist.toml")
     assert cfg.claude_binary == "claude"
     assert cfg.poll_interval_ms == 1000
-    assert cfg.agent_transport == "nested"
+    assert cfg.agent_transport == "swap"
     assert cfg.show_empty_projects is False
 
 
@@ -59,10 +59,10 @@ def test_invalid_poll_interval_is_rejected(tmp_path, value):
         load_config(config_path=path)
 
 
-def test_experimental_swap_transport(tmp_path):
+def test_nested_transport_can_be_selected_explicitly(tmp_path):
     path = tmp_path / "config.toml"
-    path.write_text('[live]\nagent_transport = "swap"\n')
-    assert load_config(config_path=path).agent_transport == "swap"
+    path.write_text('[live]\nagent_transport = "nested"\n')
+    assert load_config(config_path=path).agent_transport == "nested"
 
 
 def test_invalid_agent_transport_is_rejected(tmp_path):

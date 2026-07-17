@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ticks, and diagnostic scroll-scheduling models. Document raw local results
   and their strict limitation: marker observation is not terminal paint or a
   real-provider/SSH measurement.
-- Add an experimental, default-off de-nested agent display transport using
+- Add a de-nested agent display transport using
   transactional cross-session pane swaps, durable tmux recovery markers, and a
   zero-extra-pane session-group keeper. It returns real panes before preview,
   close, quit, or delete; repairs interrupted swaps; preserves agents across a
@@ -60,6 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Make the validated `swap` display the default for managed Railmux sessions;
+  `nested` remains an explicit compatibility choice and automatic safe fallback.
 - Show an immediate startup surface while initial provider and tmux discovery
   runs, reuse the already-built project snapshot during orphan recovery, and
   avoid leaving a newly-created terminal pane apparently blank.
@@ -69,6 +71,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make the one-line Button Bar responsive at narrow sidebar widths and paint a
   short pressed state before synchronous actions, so remote clicks receive an
   immediate visual acknowledgement without adding another focusable widget.
+- Keep mode switching in the Button Bar and remove its duplicate `m Mode`
+  entry from the context-sensitive Hint Bar; the `m` keyboard shortcut remains.
 - Clarify the final `railmux --doctor` privacy note and remind users to review
   the redacted report before sharing it.
 - Group blocked Running sessions ahead of other activity states during the
@@ -80,7 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failure, and bound shutdown even when filesystem IO is stuck.
 - Raise copy-mode wheel coalescing from 2 FPS to 10 FPS over SSH while keeping
   the immediate leading update, native scroll distance, and both nested and
-  experimental swap transport lifecycles unchanged.
+  swap transport lifecycles unchanged.
 - Use one grass-green focus system (`#5FAF00`): bright pane chrome and tmux
   status bar, a deep-green cursor row, a neutral slate persistent target, and
   grass-green live-session titles. Red/yellow/green status dots retain their
@@ -93,6 +97,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Resolve a tmux topology target back to its actual session name when callers
+  use an immutable `$id`, so a recovered marked Running entry is not falsely
+  rejected as having changed identity.
+- Remove the obsolete in-pane error row above the Button Bar. Errors now use
+  the full-width tmux status bar exclusively, like warnings, tips, and other
+  status messages, without resizing the sidebar footer.
+- Keep the tmux server lifetime identity stable when its socket metadata is
+  touched by a later client, and safely migrate exact legacy markers on the
+  same live server. Soft restart no longer hides a surviving resolved Claude
+  session from the Running pane.
+- Paint a clicked session as the sole active sidebar target before beginning
+  the synchronous agent transport transaction, so the previous session cannot
+  linger as a second grey selection. Failed attaches restore the confirmed old
+  target or reconcile to the transport's retained recovery state.
 - Restore the most recently displayed stable agent session or transcript after
   a soft restart even when the outer tmux pane is recreated. Portable state
   carries only provider/session/project view identity: live processes must be

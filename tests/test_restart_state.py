@@ -5,6 +5,7 @@ import json
 import os
 import stat
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from railmux import restart_state, tmux_ctl
@@ -65,6 +66,59 @@ def test_capture_identity_hashes_socket_and_server_lifetime(
     assert identity.pane_id == "%7"
     assert str(socket_path) not in identity.server_digest
     assert len(identity.server_digest) == 64
+
+
+def test_capture_identity_ignores_mutable_socket_ctime(monkeypatch):
+    monkeypatch.setenv("TMUX", "/tmp/tmux.sock,4321,0")
+    monkeypatch.setenv("TMUX_PANE", "%7")
+    monkeypatch.setattr(
+        restart_state.tmux_ctl,
+        "pane_identity",
+        lambda pane: tmux_ctl.PaneIdentity(
+            pane, 99, "same-name", "$3", "@5", False, 100, 30),
+    )
+    monkeypatch.setattr(
+        restart_state, "_process_start_token", lambda _pid: "proc-start:77")
+    ctime = [100]
+    monkeypatch.setattr(
+        restart_state.os,
+        "stat",
+        lambda _path: SimpleNamespace(
+            st_dev=1, st_ino=2, st_ctime_ns=ctime[0]),
+    )
+
+    first = restart_state.capture_outer_identity()
+    ctime[0] = 200
+    second = restart_state.capture_outer_identity()
+
+    assert first is not None and second is not None
+    assert first.server_digest == second.server_digest
+
+
+def test_capture_identity_changes_when_server_process_start_changes(monkeypatch):
+    monkeypatch.setenv("TMUX", "/tmp/tmux.sock,4321,0")
+    monkeypatch.setenv("TMUX_PANE", "%7")
+    monkeypatch.setattr(
+        restart_state.tmux_ctl,
+        "pane_identity",
+        lambda pane: tmux_ctl.PaneIdentity(
+            pane, 99, "same-name", "$3", "@5", False, 100, 30),
+    )
+    monkeypatch.setattr(
+        restart_state.os,
+        "stat",
+        lambda _path: SimpleNamespace(st_dev=1, st_ino=2),
+    )
+    process_start = ["proc-start:77"]
+    monkeypatch.setattr(
+        restart_state, "_process_start_token", lambda _pid: process_start[0])
+
+    first = restart_state.capture_outer_identity()
+    process_start[0] = "proc-start:88"
+    second = restart_state.capture_outer_identity()
+
+    assert first is not None and second is not None
+    assert first.server_digest != second.server_digest
 
 
 def test_capture_identity_requires_tmux_and_live_exact_pane(monkeypatch):

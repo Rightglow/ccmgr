@@ -936,7 +936,6 @@ def test_restore_right_pane_refuses_unrepresented_live_tmux(monkeypatch):
     app = _minimal_app()
     app._attach_in_right_pane = MagicMock(return_value=True)
     app._set_status = MagicMock()
-    app._show_error = MagicMock()
     monkeypatch.setattr(
         "railmux.ui.app.tmux_ctl.session_exists", lambda _name: True)
 
@@ -963,7 +962,6 @@ def test_restore_portable_agent_by_validated_session_id(monkeypatch):
     app._running[session_id] = running
     app._attach_in_right_pane = MagicMock(return_value=True)
     app._set_status = MagicMock()
-    app._show_error = MagicMock()
     monkeypatch.setattr(
         "railmux.ui.app.tmux_ctl.session_exists", lambda name: name == running.tmux_name)
 
@@ -1168,13 +1166,16 @@ def test_launch_resume_refuses_ambiguous_live_placeholder_without_procfs():
     app._agent_session_alive = MagicMock(return_value=True)
     app._launch = MagicMock()
     app._set_status = MagicMock()
-    app._show_error = MagicMock()
 
     app._launch_resume(meta)
 
     assert key in app._running and session_id not in app._running
     app._launch.assert_not_called()
-    app._show_error.assert_called_once()
+    app._set_status.assert_called_once_with(
+        "Resume deferred: a live initializing agent in this project could "
+        "own this session",
+        "error",
+    )
 
 
 def test_launch_refuses_untracked_preexisting_tmux(monkeypatch):
@@ -1185,7 +1186,6 @@ def test_launch_refuses_untracked_preexisting_tmux(monkeypatch):
     app._running = {}
     app._session_name = lambda _key: "cx-12345678-1234-12"
     app._set_status = MagicMock()
-    app._show_error = MagicMock()
     app._ensure_detached_agent = MagicMock()
     monkeypatch.setattr(
         "railmux.ui.app.tmux_ctl.session_exists", lambda _name: True)
@@ -1910,8 +1910,6 @@ def test_launch_snapshots_pre_existing_ids(monkeypatch):
     app = App.__new__(App)
     app._running = {}
     app._set_status = lambda *a, **k: None
-    app._show_error = lambda *a, **k: None
-    app._clear_error = lambda: None
     app._codex_index = MagicMock()
     app._codex_index.sessions_for_cwd.return_value = [
         _codex_session(proj, existing, mtime=5.0)]

@@ -1,8 +1,9 @@
 """Provider-neutral transports for rendering an agent in an outer tmux pane.
 
-Nested attach remains the default.  The experimental swap transport moves the
-real agent pane into the display window transactionally and records enough
-identity in tmux window options to repair an interrupted operation.
+The default swap transport moves the real agent pane into the display window
+transactionally and records enough identity in tmux window options to repair
+an interrupted operation. Nested attach remains the compatibility fallback for
+unsupported or unverified environments and can be selected explicitly.
 """
 from __future__ import annotations
 

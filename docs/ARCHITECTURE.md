@@ -173,12 +173,13 @@ that behavior until the dual-agent interaction below is approved and tested.
 
 ## Agent display transports preserve one ownership model
 
-The default `nested` transport runs a tmux client in the outer display pane and
-attaches it to the persistent agent session. The experimental `swap` transport
-moves the real pane into the display window. Both are provider-neutral and are
-selected behind `AgentDisplayTransport`; attach, preview, close, delete,
-liveness, and teardown must not bypass that boundary with a destructive
-`respawn-pane`, `kill-pane`, or `kill-session`.
+The default `swap` transport moves the real agent pane into the display window.
+The `nested` transport runs a tmux client in the outer display pane and remains
+both an explicit compatibility choice and the automatic fallback whenever swap
+cannot be proven safe. Both are provider-neutral and are selected behind
+`AgentDisplayTransport`; attach, preview, close, delete, liveness, and teardown
+must not bypass that boundary with a destructive `respawn-pane`, `kill-pane`,
+or `kill-session`.
 
 In swap mode `AgentSlot.pane_id` is the pane physically visible in that slot.
 It is the placeholder while idle/previewing and the real provider pane while
@@ -213,7 +214,7 @@ Core and outer-session phases are separately idempotent: the visible path may
 complete core cleanup, while `run()`'s `finally` retries an interrupted phase
 and performs only the remaining outer-session cleanup.
 
-The experimental floor is tmux 2.7. tmux 2.7 and 2.8 lack `resize-window`, so
+The swap floor is tmux 2.7. tmux 2.7 and 2.8 lack `resize-window`, so
 their native swap geometry may reflow a long inline transcript. This is a
 performance/visual limitation, not permission to alter provider history or
 alternate-screen behavior. Full evidence and remaining gates are in

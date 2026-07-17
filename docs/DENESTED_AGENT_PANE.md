@@ -1,11 +1,12 @@
 # De-nested agent pane feasibility and experiment record
 
-This document records the evidence for Railmux's experimental `swap` display
-transport. It is deliberately not the default: lifecycle safety is proven on
-Linux with tmux 2.7 and 3.4, and a reproducible local server-side benchmark now
-shows a narrow pipeline improvement on tmux 3.4. Real-provider terminal paint,
-SSH wheel behavior, long Codex transcript reflow, and the macOS CI run still
-need enough evidence to justify changing the default.
+This document records the evidence behind Railmux's `swap` display transport.
+Lifecycle safety is covered on Linux with tmux 2.7 and 3.4 and by the Linux and
+macOS private-tmux CI matrix. A reproducible local server-side benchmark shows
+a narrow pipeline improvement on tmux 3.4, while field use found session
+switching more responsive and exposed recovery/selection defects that were
+fixed before the 0.1.2 default change. The measurements still do not claim to
+observe remote client paint or every provider workload.
 
 ## Result
 
@@ -18,9 +19,9 @@ The prototype is functionally feasible when all of these conditions hold:
 - The transaction's pane, window, session, PID, and marker identities all
   validate before and after the swap.
 
-Anything else uses the unchanged nested `tmux attach-session` transport. The
-user must explicitly set `[live] agent_transport = "swap"`; the default is
-`nested`.
+Anything else uses the unchanged nested `tmux attach-session` transport. Swap
+is the default preference; users can explicitly set
+`[live] agent_transport = "nested"` to force the compatibility path.
 
 ## Lifecycle experiments
 
@@ -97,11 +98,11 @@ be exchanged into an agent's home.
 
 ## Fallback conditions
 
-Nested display is selected when swap was not explicitly requested, tmux is too
-old, the outer session is not the managed `railmux` session, identity probes
-fail, an independent client remains attached, topology is not one live
-pane/window, a real pane is already owned by another slot, keeper creation or
-metadata persistence fails, or a pre-movement swap command fails. A
+Nested display is selected when it is explicitly configured, tmux is too old,
+the outer session is not the managed `railmux` session, identity probes fail,
+an independent client remains attached, topology is not one live pane/window,
+a real pane is already owned by another slot, keeper creation or metadata
+persistence fails, or a pre-movement swap command fails. A
 post-movement failure with unproven rollback fails closed and leaves recovery
 metadata rather than respawning or killing either recorded pane.
 
@@ -154,8 +155,8 @@ used one path pane; nested and swap each used two, because swap replaces the
 visible nested client with a hidden home placeholder rather than eliminating a
 PTY. The consistent marker gap shows that the nested client adds measurable
 work to this local synthetic server pipeline, while swap remains close to the
-direct path. This is enough evidence to retain and continue supporting the
-opt-in experiment; it is not evidence of first-visible-paint improvement.
+direct path. This supports the default product choice together with field use
+and lifecycle coverage; it is not evidence of first-visible-paint improvement.
 
 Linux `/proc` CPU totals use a 100 Hz clock and include polling overhead. Across
 the three batches, tmux-server ticks were direct `15/14/13`, nested `24/23/22`,
@@ -199,27 +200,26 @@ not demonstrate a useful overall responsiveness gain. The reproducible Phase 6
 run does show a consistent narrow server-pipeline gain; neither run measures
 perceived responsiveness.
 
-The current environment could not validly measure first remote wheel paint,
+The benchmark environment could not validly measure first remote wheel paint,
 queued-frame drain after a wheel burst, real Claude/Codex sustained output,
 clipboard/mouse behavior through an actual terminal client, or long inline
-Codex transcript resize over the same SSH link. Those measurements, plus a
-confirmed macOS smoke run, remain gates for changing the default.
+Codex transcript resize over the same SSH link. These remain useful follow-up
+measurements, not claims made by the default change.
 
-## Phase 6 product decision
+## Product decision for 0.1.2
 
-Keep `swap` supported, experimental, and opt-in. Do not make it the default,
-remove it, or add user-facing frame controls from this evidence alone. The new
-benchmark demonstrates that its intended de-nested server path is measurably
-shorter than nested in a controlled synthetic workload, so immediate removal
-would discard a plausible gain before measuring the actual user-visible target.
+Use `swap` as the default preference, with every existing validation gate and
+automatic nested fallback retained. This is a product decision based on the
+combined lifecycle tests, cross-platform isolated-tmux CI, synthetic evidence,
+and real interactive field use; the benchmark alone would not justify it.
+`nested` remains supported as an explicit compatibility setting.
 
-This decision is falsifiable: if same-link SSH client-paint measurements show
-parity or regression for both Codex inline/copy-mode behavior and Claude
-alternate-screen behavior, remove the swap transport rather than carry its
-lifecycle complexity indefinitely. A default change still requires every gate
-in the project task, including real providers, Linux and macOS, minimum tmux
-versions, reflow, direct-kill/SIGKILL recovery, independent-client fallback,
-and mouse/copy/resize/detach/reconnect smoke.
+The decision remains falsifiable. Reproducible data loss, pane-identity errors,
+or a material provider regression should first disable swap for the affected
+environment through a narrow capability gate; a broad regression across both
+providers should restore nested as the default rather than normalize transport
+complexity. Optional client-paint measurements can still refine performance
+claims and scroll policy without weakening lifecycle safety.
 
 ## Unresolved limitations
 

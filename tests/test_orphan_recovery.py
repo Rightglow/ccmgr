@@ -86,8 +86,6 @@ def test_launch_marks_exact_holder_before_provider(monkeypatch):
     app._session_name = lambda key: "cx-new---token-1"
     app._shellify = lambda *a, **k: "provider-command"
     app._attach_in_right_pane = lambda *a, **k: True
-    app._clear_error = lambda: None
-    app._show_error = MagicMock()
     events: list[str] = []
     holder = _pane()
     monkeypatch.setattr(tmux_ctl, "session_exists", lambda name: False)
@@ -120,7 +118,6 @@ def test_marker_failure_kills_only_holder_and_never_starts_provider(monkeypatch)
     app._codex_index.sessions_for_cwd.return_value = []
     app._session_name = lambda key: "cx-new---token-1"
     app._shellify = lambda *a, **k: "provider-command"
-    app._show_error = MagicMock()
     holder = _pane()
     killed: list[tmux_ctl.PaneIdentity] = []
     started = MagicMock()
@@ -228,6 +225,90 @@ def test_dead_owner_takeover_claims_marker_before_adoption(monkeypatch):
     assert claims == [(marker, app._restart_identity)]
     assert running.orphan is not None
     assert running.orphan.owner == app._restart_identity
+
+
+def test_resolved_claude_marker_migrates_legacy_mutable_server_digest(
+    monkeypatch,
+):
+    """A ctime digest change must not hide a live resolved Claude writer."""
+    session_id = "537b47cc-aeee-4511-8de8-2f82f7503471"
+    legacy_owner = replace(
+        _owner("%2"), server_digest="b" * 64)
+    marker = replace(
+        _marker(
+            phase="resolved", owner=legacy_owner, session_id=session_id),
+        mode_key="claude",
+        tmux_name="cc-new---token-1",
+    )
+    project = Project(
+        marker.cwd, "-work-project", Path("/claude/projects/-work-project"),
+        1, 1001,
+    )
+    meta = SessionMeta(
+        project=project,
+        session_id=session_id,
+        jsonl_path=project.claude_dir / f"{session_id}.jsonl",
+        title="Railmux swap mode",
+        message_count=1,
+        token_total=1,
+        last_mtime=1001,
+        session_type="claude",
+    )
+    app = _app()
+    app._session_cache.get.return_value = meta
+    row = (f"{marker.tmux_name}\t{marker.cwd}\t1000\t$9\t%9\t"
+           f"{orphan_marker.encode(marker)}\t")
+    monkeypatch.setattr("subprocess.check_output", lambda *a, **k: row)
+    monkeypatch.setattr("railmux.ui.app.list_projects", lambda path: [project])
+    monkeypatch.setattr(
+        tmux_ctl, "pane_identity",
+        lambda pane_id: _pane(marker.tmux_name),
+    )
+    monkeypatch.setattr(
+        tmux_ctl,
+        "server_snapshot",
+        lambda: tmux_ctl.ServerSnapshot(
+            sessions=frozenset({marker.tmux_name}), panes=frozenset({"%9"})),
+    )
+    claims: list[orphan_marker.Marker] = []
+    monkeypatch.setattr(
+        orphan_marker,
+        "claim_owner",
+        lambda value, current, load, store: (
+            claims.append(value) or value.with_owner(current)),
+    )
+
+    assert app._discover_orphans()
+    assert claims == [marker]
+    assert app._running[session_id].tmux_name == marker.tmux_name
+    assert app._running[session_id].orphan is not None
+    assert app._running[session_id].orphan.owner == app._restart_identity
+
+
+def test_legacy_digest_migration_still_requires_same_server_pid():
+    marker = _marker(owner=replace(_owner("%2"), server_digest="b" * 64))
+    current = _owner("%1")
+
+    assert not orphan_marker.owner_available(
+        marker, current, frozenset({"%9"}))
+    assert orphan_marker.owner_available(
+        marker,
+        current,
+        frozenset({"%9"}),
+        allow_legacy_server_digest=True,
+    )
+    assert not orphan_marker.owner_available(
+        marker,
+        replace(current, server_pid=current.server_pid + 1),
+        frozenset({"%9"}),
+        allow_legacy_server_digest=True,
+    )
+    assert not orphan_marker.owner_available(
+        marker,
+        current,
+        frozenset({"%2", "%9"}),
+        allow_legacy_server_digest=True,
+    )
 
 
 def test_owner_claim_lock_allows_only_one_concurrent_takeover(
@@ -354,7 +435,6 @@ def test_stale_running_row_cannot_attach_reused_name(monkeypatch):
         )
     }
     app._cancel_pending_double_focus = lambda: None
-    app._show_error = MagicMock()
     app._attach_in_right_pane = MagicMock()
     monkeypatch.setattr(tmux_ctl, "pane_identity", lambda pane_id: None)
     app._on_running_select(RunningEntry(

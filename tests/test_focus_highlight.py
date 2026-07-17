@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 import urwid
 
 from railmux.models import Project, SessionMeta
+from railmux.display_transport import AttachOutcome
 from railmux.ui.app import App, _FocusAwareFrame
 from railmux.ui.modals import DeleteConfirmModal, RenameModal
 from railmux.ui.projects_pane import ProjectsPane
 from railmux.ui.sessions_pane import _SessionRow
+from railmux.ui.workspace import AgentWorkspace, DisplayTransportKind
 
 
 def _canvas_attrs(canvas) -> list[str | None]:
@@ -276,6 +279,122 @@ def test_double_click_prepaints_focus_before_tmux_settles(monkeypatch):
     assert app._double_focus_visual_pending is False
     assert app._railmux_has_focus is False
     assert loop.draw_screen.call_count == 2
+
+
+def test_single_click_prepaints_sidebar_before_agent_transport_switch():
+    app = App.__new__(App)
+    app._workspace = AgentWorkspace()
+    slot = app._workspace.primary
+    slot.active_session_id = "old-session"
+    slot.agent_tmux_name = "cc-old"
+    app._double_focus_visual_pending = False
+    app._redraw_focus_state_now = MagicMock()
+    app._check_agent_slot_size = MagicMock()
+    app._set_active_tmux_target = MagicMock()
+    app._set_railmux_focus = MagicMock()
+    app._schedule_scroll_acceleration = MagicMock()
+    app._install_fullscreen_binding = MagicMock()
+    app._modes = MagicMock()
+    app._modes.return_value.for_tmux_name.return_value = MagicMock(key="claude")
+    app._running = {
+        "old-session": SimpleNamespace(
+            key="old-session", tmux_name="cc-old", is_placeholder=False),
+        "new-session": SimpleNamespace(
+            key="new-session", tmux_name="cc-live", is_placeholder=False),
+    }
+    app._sessions_pane = MagicMock()
+    app._running_pane = MagicMock()
+    events: list[str] = []
+    app._sessions_pane.set_active_session.side_effect = (
+        lambda session_id: events.append(f"session:{session_id}"))
+    app._running_pane.set_active.side_effect = (
+        lambda tmux_name: events.append(f"running:{tmux_name}"))
+    app._redraw_focus_state_now.side_effect = lambda: events.append("draw")
+    transport = MagicMock()
+
+    def attach(slot, _tmux_name):
+        events.append("attach")
+        assert slot.active_session_id == "old-session"
+        assert slot.agent_tmux_name == "cc-old"
+        slot.pane_id = "%2"
+        return AttachOutcome(True, DisplayTransportKind.SWAP)
+
+    transport.attach.side_effect = attach
+    app._display_transport_manager = transport
+
+    assert app._attach_agent_slot(
+        slot, "cc-live", steal_focus=False)
+    assert events[:4] == [
+        "session:new-session", "running:cc-live", "draw", "attach"]
+
+
+def test_failed_attach_restores_prior_active_target_immediately():
+    app = App.__new__(App)
+    app._workspace = AgentWorkspace()
+    slot = app._workspace.primary
+    slot.active_session_id = "old-session"
+    slot.agent_tmux_name = "cc-old"
+    app._running = {
+        "old-session": SimpleNamespace(
+            key="old-session", tmux_name="cc-old", is_placeholder=False),
+        "new-session": SimpleNamespace(
+            key="new-session", tmux_name="cc-new", is_placeholder=False),
+    }
+    app._sessions_pane = MagicMock()
+    app._running_pane = MagicMock()
+    app._redraw_focus_state_now = MagicMock()
+    app._display_transport_manager = MagicMock()
+    app._display_transport_manager.attach.return_value = AttachOutcome(
+        False, DisplayTransportKind.SWAP, "test failure")
+
+    assert not app._attach_agent_slot(slot, "cc-new", steal_focus=False)
+
+    assert [item.args for item in
+            app._sessions_pane.set_active_session.call_args_list] == [
+        ("new-session",), ("old-session",)]
+    assert [item.args for item in
+            app._running_pane.set_active.call_args_list] == [
+        ("cc-new",), ("cc-old",)]
+    assert app._redraw_focus_state_now.call_count == 2
+    assert slot.active_session_id == "old-session"
+    assert slot.agent_tmux_name == "cc-old"
+
+
+def test_failed_attach_reconciles_transport_recovery_target():
+    """Do not roll back the UI if swap retained the new real pane."""
+    app = App.__new__(App)
+    app._workspace = AgentWorkspace()
+    slot = app._workspace.primary
+    slot.active_session_id = "old-session"
+    slot.agent_tmux_name = "cc-old"
+    app._running = {
+        "old-session": SimpleNamespace(
+            key="old-session", tmux_name="cc-old", is_placeholder=False,
+            project=None),
+        "new-session": SimpleNamespace(
+            key="new-session", tmux_name="cc-new", is_placeholder=False,
+            project=None),
+    }
+    app._sessions_pane = MagicMock()
+    app._running_pane = MagicMock()
+    app._redraw_focus_state_now = MagicMock()
+    app._modes = MagicMock()
+    app._modes.return_value.for_tmux_name.return_value = MagicMock(key="claude")
+    app._display_transport_manager = MagicMock()
+
+    def fail_after_movement(target_slot, _tmux_name):
+        target_slot.agent_tmux_name = "cc-new"
+        return AttachOutcome(False, DisplayTransportKind.SWAP, "uncertain")
+
+    app._display_transport_manager.attach.side_effect = fail_after_movement
+
+    assert not app._attach_agent_slot(slot, "cc-new", steal_focus=False)
+
+    assert slot.active_session_id == "new-session"
+    assert slot.agent_tmux_name == "cc-new"
+    assert app._sessions_pane.set_active_session.call_args.args == (
+        "new-session",)
+    assert app._running_pane.set_active.call_args.args == ("cc-new",)
 
 
 def test_failed_delayed_focus_restores_sidebar(monkeypatch):

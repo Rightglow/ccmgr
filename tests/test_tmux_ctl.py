@@ -153,7 +153,7 @@ def test_pane_identity_parses_stable_location_outside_tmux():
 
 def test_session_topology_requires_exact_server_results(monkeypatch):
     outputs = iter((
-        b"$2\n",
+        b"agent\t$2\n",
         b"0\n",
         b"@3\n",
         b"%7\t4242\tagent\t$2\t@3\t0\t91\t31\n",
@@ -161,6 +161,7 @@ def test_session_topology_requires_exact_server_results(monkeypatch):
     monkeypatch.setattr(subprocess, "check_output", lambda *_a, **_k: next(outputs))
     topology = tmux_ctl.session_topology("agent")
     assert topology is not None
+    assert topology.session_name == "agent"
     assert topology.single_live_pane.pane_id == "%7"
     assert topology.attached_clients == 0
 

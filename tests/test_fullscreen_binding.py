@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from railmux.config import Config
 from railmux.ui.app import App
 
 
@@ -12,6 +13,9 @@ def _bare_app(**attrs):
     app = App.__new__(App)
     app._right_pane_id = None
     app._right_pane_claude = None
+    # These focused pane-binding tests model the compatibility transport; the
+    # product default is asserted independently in test_config.py.
+    app._config = Config(agent_transport="nested")
     app._loop = None
     app._running = {}
     app._scroll_manager = MagicMock()

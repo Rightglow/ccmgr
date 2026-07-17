@@ -73,20 +73,32 @@ def capture_outer_identity() -> OuterTmuxIdentity | None:
     if pane is None or pane.pane_id != pane_id or pane.dead:
         return None
 
-    # Socket inode/ctime distinguishes a restarted private server even if its
-    # socket pathname and OS pid are eventually reused. Persist only the hash.
+    # Socket inode plus an immutable process/socket birth token distinguishes a
+    # restarted private server even if its pathname and OS pid are eventually
+    # reused.  Do not use ``st_ctime`` here: Unix socket metadata can be
+    # touched while the same tmux server accepts a later client, which used to
+    # change this digest across a Railmux soft restart and strand live agents.
+    # Persist only the hash.
     server_parts = [socket_path, str(server_pid)]
     try:
         socket_stat = os.stat(socket_path)
         server_parts.extend([
             str(socket_stat.st_dev),
             str(socket_stat.st_ino),
-            str(socket_stat.st_ctime_ns),
         ])
+        birth_ns = getattr(socket_stat, "st_birthtime_ns", None)
+        birth = getattr(socket_stat, "st_birthtime", None)
+        if isinstance(birth_ns, int):
+            server_parts.append(f"birth-ns:{birth_ns}")
+        elif isinstance(birth, (int, float)):
+            server_parts.append(f"birth:{birth!r}")
     except OSError:
         # tmux is already answering exact pane queries, so the socket+pid pair
         # remains a useful conservative identity when stat is unavailable.
         pass
+    process_start = _process_start_token(server_pid)
+    if process_start is not None:
+        server_parts.append(process_start)
     server_digest = hashlib.sha256(
         "\0".join(server_parts).encode("utf-8")
     ).hexdigest()
@@ -97,6 +109,27 @@ def capture_outer_identity() -> OuterTmuxIdentity | None:
         session_id=pane.session_id,
         window_id=pane.window_id,
     )
+
+
+def _process_start_token(pid: int) -> str | None:
+    """Return Linux's immutable process start tick without exposing proc data.
+
+    ``/proc/<pid>/stat`` field 22 is the process start time in clock ticks
+    since boot.  The command name (field 2) may contain spaces or parentheses,
+    so split only after its final closing parenthesis.  Other platforms safely
+    fall back to the socket inode and, where available, socket birth time.
+    """
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+        _head, separator, tail = raw.rpartition(")")
+        fields = tail.strip().split() if separator else []
+        # ``fields[0]`` is field 3 (state), making index 19 field 22.
+        start_ticks = fields[19]
+        if not start_ticks.isdecimal():
+            return None
+        return f"proc-start:{start_ticks}"
+    except (OSError, UnicodeError, IndexError):
+        return None
 
 
 def runtime_base() -> Path:

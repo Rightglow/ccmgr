@@ -176,34 +176,17 @@ def test_first_tip_after_expiry_lasts_one_interval(app, clock, shown):
     assert shown[-1] != first                    # advanced, not stuck at 2×
 
 
-# ── optional in-pane error row ───────────────────────────────────────────
+# ── one status surface ───────────────────────────────────────────────────
 
-def _error_row_visible(app) -> bool:
-    return any(widget is app._error_bar
-               for widget, _options in app._footer.contents)
+def test_error_status_does_not_add_an_in_pane_footer_row(app, clock, shown):
+    footer_widgets = [widget for widget, _options in app._footer.contents]
+    rows = app._footer.rows((100,))
 
+    app._set_status("Launch failed", "error")
 
-def test_error_row_uses_no_space_until_needed(app):
-    rows_without_error = app._footer.rows((100,))
-    assert not _error_row_visible(app)
-
-    app._show_error("Launch failed")
-    assert _error_row_visible(app)
-    assert app._footer.rows((100,)) == rows_without_error + 1
-
-    app._clear_error()
-    assert not _error_row_visible(app)
-    assert app._footer.rows((100,)) == rows_without_error
-
-
-def test_error_row_timeout_removes_optional_footer_row(app):
-    app._show_error("Launch failed")
-    assert _error_row_visible(app)
-
-    app._on_error_timeout(None, None)
-
-    assert app._error_text.text == ""
-    assert not _error_row_visible(app)
+    assert [widget for widget, _options in app._footer.contents] == footer_widgets
+    assert app._footer.rows((100,)) == rows
+    assert shown[-1] == "Launch failed"
 
 
 # ── idle tip rotation ────────────────────────────────────────────────────
@@ -275,10 +258,11 @@ def _cols(s: str) -> int:
 def test_hintbar_wide_shows_all_keys_no_ellipsis():
     bar = HintBar()
     bar.set_context(keymap.CTX_SESSIONS)
-    rows = _hint_rows(bar, 140)  # wider than the full sessions hint (incl. m Mode)
+    rows = _hint_rows(bar, 140)  # wider than the full sessions hint
     joined = "".join(rows)
     assert "…" not in joined
     assert "F9 fullscreen" in joined  # last key is present
+    assert "m Mode" not in joined  # dedicated Button Bar action
 
 
 def test_hintbar_narrow_still_two_lines_height():

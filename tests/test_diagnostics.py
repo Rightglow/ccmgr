@@ -68,6 +68,7 @@ def test_doctor_report_is_useful_and_redacts_user_values(
     assert "256-colour=yes" in report
     assert "true-colour=no" in report
     assert "Config: ~/.config/railmux/config.toml; valid=yes" in report
+    assert "Preferred agent display: swap" in report
     assert "Claude data: <custom>" in report
     assert "Privacy:" in report
     assert "review before sharing" in report

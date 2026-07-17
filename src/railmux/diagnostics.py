@@ -125,6 +125,7 @@ def run_doctor(
         f"SSH transport: {_yes_no(is_ssh_session(env))}",
         f"Terminal capabilities: {_terminal_capabilities(env)}",
         f"Config: {config_status}",
+        f"Preferred agent display: {config.agent_transport}",
         f"Claude data: {_directory_status(claude_home)}",
         f"Codex data: {_directory_status(Path(config.codex_home).expanduser())}",
         (

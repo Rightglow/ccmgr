@@ -171,3 +171,8 @@ def test_mode_binding_resolves_to_compatibility_action():
 
     assert action == "_toggle_codex_mode"
     assert callable(getattr(App, action))
+
+
+def test_mode_binding_is_not_duplicated_in_hint_bar():
+    for context in (CTX_PROJECTS, CTX_SESSIONS, CTX_RUNNING, None):
+        assert "m Mode" not in hint_text_for(context).split("\n", 1)[0]

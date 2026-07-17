@@ -99,6 +99,9 @@ def test_real_restart_identity_isolates_windows_sessions_and_servers(
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
     first = restart_state.capture_outer_identity()
     assert first is not None and first.pane_id == first_pane
+    topology_by_id = tmux_ctl.session_topology(first.session_id)
+    assert topology_by_id is not None
+    assert topology_by_id.session_name == session_name
 
     subprocess.run(
         ["tmux", "-S", first_socket, "new-window", "-d", "-t", session_name,

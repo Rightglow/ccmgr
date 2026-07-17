@@ -13,8 +13,8 @@ Read the smallest relevant document before changing behavior:
   workspaces, display transports, layout, focus colours, lifecycle state, and
   attention state. Update it whenever a change alters one of those contracts.
 - [`DENESTED_AGENT_PANE.md`](DENESTED_AGENT_PANE.md) records the evidence,
-  transaction model, fallbacks, benchmarks, product decision, and unresolved
-  limitations for the experimental swap transport. Keep measurements explicit
+  transaction model, fallbacks, benchmarks, default-transport decision, and
+  unresolved limitations for the swap transport. Keep measurements explicit
   about what they do and do not prove.
 - [`BACKGROUND_SESSION_INDEX.md`](BACKGROUND_SESSION_INDEX.md) records the
   reproducible evidence behind the background Codex index. It supplements the
@@ -59,10 +59,9 @@ Related repository-level documents have different roles:
   disposable once their durable conclusions and unresolved risks have reached
   the authoritative documents.
 
-`DENESTED_AGENT_PANE.md` is still active because swap rendering remains
-experimental and opt-in, and real-provider paint/SSH/reflow evidence still
-gates its default or removal decision. It should not remain a long historical
-report forever: once that decision closes, distill the final transport,
-fallback, recovery, and compatibility contract into `ARCHITECTURE.md`, preserve
-only useful reproducible benchmarks, and substantially shorten or remove the
-evidence narrative.
+`DENESTED_AGENT_PANE.md` remains temporarily active for the first release with
+swap as the default, because its reproducible recovery evidence and explicit
+tmux 2.7/2.8 limitations still protect the compatibility boundary. After that
+release is field-tested, retain only useful benchmark reproduction and move any
+new lasting contracts into `ARCHITECTURE.md`; Git history can preserve the full
+experiment narrative.

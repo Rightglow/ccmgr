@@ -30,6 +30,9 @@ class Binding:
     action: str | None = None   # App method name to call; None = handled inline
     # Sidebar pane contexts this binding is visible in.  None / empty = always.
     contexts: tuple[str, ...] | None = None
+    # A binding may already have a dedicated Button Bar control. Keep it
+    # dispatchable without duplicating it in the context-sensitive Hint Bar.
+    show_in_hint: bool = True
 
 
 BINDINGS: list[Binding] = [
@@ -63,7 +66,7 @@ BINDINGS: list[Binding] = [
             contexts=(CTX_SESSIONS, CTX_RUNNING)),
     # All three — cycle through the ordered agent-mode registry.
     Binding(("m", "M"), "m", "Mode", "_toggle_codex_mode",
-            contexts=_ALL_CTX),
+            contexts=_ALL_CTX, show_in_hint=False),
     # All three — opens a shell in the active project's directory.
     Binding(("t", "T"), "t", "term", "_open_terminal_for_active_project",
             contexts=_ALL_CTX),
@@ -105,7 +108,7 @@ def hint_text_for(context: str | None = None) -> str:
     main = " · ".join(
         f"{b.hint} {b.desc}"
         for b in BINDINGS
-        if _visible_in(b, context)
+        if b.show_in_hint and _visible_in(b, context)
     )
     trail = " · ".join(
         f"{b.hint} {b.desc}"
