@@ -1,5 +1,7 @@
 """Tests for railmux.ui.modals — PathBrowser directory navigation and filter."""
 
+from __future__ import annotations
+
 from pathlib import Path
 from unittest.mock import MagicMock
 
