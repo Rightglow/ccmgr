@@ -87,8 +87,8 @@ def test_claude_encode_collapses_dot_and_underscore():
     """Claude Code encodes '.', '_' and '/' all to '-' (lossy for those too)."""
     from railmux.path_codec import _claude_encode_path
     assert (
-        _claude_encode_path("/home/scratch.taianz_inf/workspace")
-        == "-home-scratch-taianz-inf-workspace"
+        _claude_encode_path("/home/scratch.user_inf/workspace")
+        == "-home-scratch-user-inf-workspace"
     )
 
 

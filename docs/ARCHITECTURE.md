@@ -24,6 +24,20 @@ the assumption that exactly Claude and Codex exist. Adding a truly new backend
 will require a backend adapter, but must not require redesigning mode cycling or
 per-mode state.
 
+## Sidebar rows are disposable views
+
+The periodic refresh publishes value snapshots to Projects, Sessions, and
+Running panes. Each pane skips an unchanged snapshot but may discard and rebuild
+all row widgets as soon as any rendered value changes. A row therefore has no
+stable lifetime: never store timers, click tracking, drag state, or other
+interaction authority on a row instance.
+
+State that must survive refresh belongs on the pane/application or in a shared
+controller keyed by stable identity (`encoded_name`, `session_id`, or exact
+tmux name). `ClickableRow`'s class-level double-click state and `click_key` are
+the reference pattern. Rendering caches are an optimization only and must not
+become a second state authority.
+
 Portable soft-restart state writes the stable active `mode` key inside a
 per-mode view map. The ownerless `codex_mode` boolean remains a read-only
 migration fallback for Railmux 0.1.x files; it is never copied into new state.
@@ -57,6 +71,12 @@ cleanup.
 Detached-session tmux stamps and swap-transport markers retain their own exact
 lifetimes and validation. Runtime JSON is a cache and must not become a
 competing authority for adopting, killing, or replacing an agent pane.
+
+Legacy detached-session discovery still derives truncated tmux names with
+`App._safe_name` and resolves them with `_resolve_truncated_id`. Their character
+normalization and width must remain in lockstep; changing either side requires
+updating the other and its recovery tests. Exact orphan and swap markers remain
+the stronger authority and must never fall back to name resemblance.
 
 New-session recovery uses `@railmux_orphan_v2`, a bounded session option written
 onto an inert, finite-lifetime holder before the provider command is respawned
@@ -156,6 +176,11 @@ external attached client, unsupported topology, incomplete identity, old tmux,
 or unowned outer session uses nested display. Controlled preview, close, soft
 quit, hard quit, and delete return the real pane before replacing a display
 placeholder or killing its home session.
+
+Soft quit may release UI-only resources and return displayed panes home, but it
+must branch before the detached-session kill loop. Hard-quit destruction must
+remain below that explicit decision so adding teardown work cannot silently
+turn a soft restart into loss of live agents.
 
 The experimental floor is tmux 2.7. tmux 2.7 and 2.8 lack `resize-window`, so
 their native swap geometry may reflow a long inline transcript. This is a

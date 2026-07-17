@@ -119,7 +119,7 @@ def _scan_recover(encoded: str, best_path: Path) -> Path:
 
         # This prefix matched textually but its subtree doesn't contain the
         # real path — a false match (e.g. a coincidental "/home/scratch" dir
-        # when the true path is "/home/scratch.jasxu_inf/..."). Keep trying
+        # when the true path is "/home/scratch.user_inf/..."). Keep trying
         # shallower prefixes rather than giving up: a shorter verified prefix
         # (down to "/home") often lets _resolve_tail recover the real path.
         continue
