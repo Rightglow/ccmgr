@@ -136,6 +136,12 @@ Each running session shows a coloured ● reflecting its current state:
 - **Yellow** — busy (assistant is processing)
 - **Red** — blocked (waiting for tool approval)
 
+An independent magenta **!** marks the last provider outcome that still needs
+attention, such as a generic abort or provider error. It does not replace the
+activity dot: a live session can be idle and still show `!`, while a stopped
+historical session keeps its neutral `○` liveness marker alongside the badge.
+Session Info and Running Info show the sanitized category and summary.
+
 A grass-green title identifies a live tmux session independently of its status;
 stopped sessions use a neutral hollow ○. The same grass green is used for the
 focused pane chrome and tmux status bar. The current cursor uses a deeper green
@@ -148,6 +154,11 @@ tool results remain busy. Older rollouts without lifecycle records fall back to
 their last user/assistant message. Because Codex has no reliable approval-wait
 signal, a pending tool must remain unchanged for two minutes before it turns
 red, reducing false alerts from normal long-running commands.
+
+Codex error details are read only from dedicated lifecycle/error records, never
+from user or assistant transcript text. Current observed rollouts do not persist
+a reliable capacity/rate-limit reason, so Railmux labels those records
+generically instead of guessing from message content.
 
 ## How it works
 

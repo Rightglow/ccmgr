@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import urwid
 
+from railmux.models import AttentionCategory, AttentionState
 from railmux.ui.running_pane import RunningEntry, RunningSessionsPane, _RunningRow
 
 
@@ -121,6 +122,18 @@ def test_running_row_uses_status_dot():
     row = _RunningRow(e)
     # Row renders without error with tuple status dot
     assert row is not None
+
+
+def test_running_row_attention_is_separate_from_idle_dot():
+    attention = AttentionState(
+        AttentionCategory.UNKNOWN_ERROR, "Provider reported an error.")
+    row = _RunningRow(RunningEntry(
+        tmux_name="cc-x", label="test", status="idle", attention=attention))
+    text = row._wrapped_widget.base_widget
+
+    assert text.text.startswith("● ! test")
+    assert text.attrib[0][0] == "status_idle"
+    assert any(attr == "attention" for attr, _length in text.attrib)
 
 
 def _selected_tmux_names(pane: RunningSessionsPane) -> set[str]:

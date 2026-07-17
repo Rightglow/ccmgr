@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   direct outer-session kill recovery, and independent-client fallback. The
   implementation path is verified on Linux with tmux 2.7 and 3.4 and remains in
   the existing Linux/macOS CI matrix.
+- Added a provider-derived attention state independent of tmux liveness and
+  idle/busy/blocked activity. Sessions and Running rows use a separate `!`
+  badge, info popups show sanitized details, and active errors receive a concise
+  retry-aware status message without changing attach/preview actions.
 - Added provider-neutral mode and at-most-two-slot agent-workspace foundations,
   plus internal architecture/roadmap guidance for future providers and dual
   agent panes. Current releases still expose the original single-agent layout.

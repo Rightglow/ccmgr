@@ -41,19 +41,22 @@ def _format_size(nbytes: int) -> str:
 
 _STATUS_DOTS = {"idle": ("status_idle", "●"), "busy": ("status_busy", "●"),
                 "blocked": ("status_blocked", "●")}
+_ATTENTION_MARK = ("attention", "!")
 # When a row is active in the right pane (or targeted by a context menu), map
 # status-dot attributes to variants with the selected background.
 _SELECTED_MAP = {None: "selected", "dim": "selected",
                  "status_idle": "status_idle_sel",
                  "status_busy": "status_busy_sel",
-                 "status_blocked": "status_blocked_sel"}
+                 "status_blocked": "status_blocked_sel",
+                 "attention": "attention_sel"}
 # Focus highlight (deep-grass bg). Status dots need their own remap so the coloured
 # ● inherits the focus background instead of leaving a black gap; everything
 # else (title, star, meta) collapses to the plain "focus" attribute.
 _FOCUS_REMAP = {None: "focus", "live": "focus", "dim": "focus",
                 "status_idle": "status_idle_focus",
                 "status_busy": "status_busy_focus",
-                "status_blocked": "status_blocked_focus"}
+                "status_blocked": "status_blocked_focus",
+                "attention": "attention_focus"}
 
 
 class _SessionRow(ClickableRow):
@@ -76,7 +79,12 @@ class _SessionRow(ClickableRow):
         dot = (_STATUS_DOTS.get(session.status, ("dim", "○"))
                if is_running else ("dim", "○"))
         title_markup.append(dot)
-        title_markup.append("  ")
+        title_markup.append(" ")
+        if session.attention is not None:
+            title_markup.append(_ATTENTION_MARK)
+            title_markup.append(" ")
+        else:
+            title_markup.append("  ")
         if is_favorite:
             # Plain text (no colour) so the star simply inherits the row's
             # highlight background instead of leaving an un-highlighted gap.

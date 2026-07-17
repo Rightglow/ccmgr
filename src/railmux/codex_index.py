@@ -15,7 +15,12 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from railmux.models import Project, SessionMeta
+from railmux.models import (
+    AttentionCategory,
+    AttentionState,
+    Project,
+    SessionMeta,
+)
 from railmux.renames import Renames
 
 # Codex has no reliable provider-neutral signal that distinguishes a long
@@ -234,14 +239,59 @@ class CodexIndex:
                     del self._negative[stale]
 
 
-# Lifecycle events (``event_msg.payload.type``) that end a turn — after any of
-# these the session is no longer "busy" unless a *newer* signal reopens it.
-_CODEX_TURN_END = frozenset({"task_complete", "turn_aborted", "thread_rolled_back"})
 # Tool-call / output record pairs, matched by ``call_id``.  Real Codex 0.144.x
 # rollouts are dominated by ``custom_tool_call`` (exec, apply_patch, …); plain
 # ``function_call`` is a minority.  Both must be paired to detect a pending tool.
 _CODEX_TOOL_CALLS = frozenset({"function_call", "custom_tool_call"})
 _CODEX_TOOL_OUTPUTS = frozenset({"function_call_output", "custom_tool_call_output"})
+
+
+def _event_timestamp(rec: dict) -> str | None:
+    """Return a display-safe event timestamp without coercing malformed data."""
+    timestamp = rec.get("timestamp")
+    if (isinstance(timestamp, str)
+            and 1 <= len(timestamp) <= 64
+            and all(ch in "0123456789TtZz:+-. " for ch in timestamp)):
+        return timestamp
+    return None
+
+
+def _codex_error_attention(
+    payload: dict, rec: dict, event_order: int,
+) -> AttentionState:
+    """Build attention from Codex's dedicated error event, never transcript text.
+
+    Real rollouts persist ``event_msg`` records with payload keys ``type``,
+    ``codex_error_info`` and ``message``. The message can contain provider or
+    account details, so Railmux deliberately does not copy or classify it.
+    ``codex_error_info`` currently proves only broad values such as
+    ``bad_request`` and ``other``; neither reliably proves capacity/rate-limit.
+    """
+    info = payload.get("codex_error_info")
+    if info == "bad_request":
+        summary = "Provider rejected the request."
+    else:
+        summary = "Provider reported an error."
+    return AttentionState(
+        category=AttentionCategory.UNKNOWN_ERROR,
+        retryable=None,
+        summary=summary,
+        timestamp=_event_timestamp(rec),
+        event_order=event_order,
+    )
+
+
+def _codex_abort_attention(
+    rec: dict, event_order: int,
+) -> AttentionState:
+    """Generic fallback for an abort whose reason is absent or not user-driven."""
+    return AttentionState(
+        category=AttentionCategory.ABORTED,
+        retryable=None,
+        summary="Turn aborted.",
+        timestamp=_event_timestamp(rec),
+        event_order=event_order,
+    )
 
 
 def _scan_codex_session(path: Path) -> SessionMeta | None | _ScanError:
@@ -345,8 +395,13 @@ def _parse_codex_session(path: Path, f) -> SessionMeta | None:
     lifecycle_seen = False
     turn_active = False
     last_message_role = ""
+    attention: AttentionState | None = None
+    # A dedicated error may be followed by ``task_complete`` for the same
+    # failed turn. Preserve that error; only a completion with no intervening
+    # error is successful and therefore allowed to clear older attention.
+    current_turn_had_error = False
 
-    for raw in f:
+    for event_order, raw in enumerate(f, start=1):
         line = raw.strip()
         if not line:
             continue
@@ -405,13 +460,42 @@ def _parse_codex_session(path: Path, f) -> SessionMeta | None:
             elif et == "task_started":
                 lifecycle_seen = True
                 turn_active = True
-            elif et in _CODEX_TURN_END:
+                current_turn_had_error = False
+                attention = None
+            elif et == "error":
+                attention = _codex_error_attention(ep, rec, event_order)
+                current_turn_had_error = True
+            elif et == "task_complete":
+                lifecycle_seen = True
+                turn_active = False
+                pending_calls.clear()
+                if not current_turn_had_error:
+                    attention = None
+                current_turn_had_error = False
+            elif et == "turn_aborted":
+                lifecycle_seen = True
+                turn_active = False
+                pending_calls.clear()
+                # The only durable real reason observed in current rollouts is
+                # the exact provider enum ``interrupted``. It is user-driven,
+                # not a model/provider failure, so it clears rather than adds
+                # attention. Missing, future, or malformed reasons degrade to
+                # a generic abort without inspecting transcript text.
+                if ep.get("reason") == "interrupted":
+                    attention = None
+                    current_turn_had_error = False
+                else:
+                    attention = _codex_abort_attention(rec, event_order)
+                    current_turn_had_error = True
+            elif et == "thread_rolled_back":
                 # task_complete / turn_aborted / thread_rolled_back: the turn is
                 # over and any dangling tool calls are dead — clear them so an
                 # aborted/rolled-back session never reads as busy/blocked.
                 lifecycle_seen = True
                 turn_active = False
                 pending_calls.clear()
+                attention = None
+                current_turn_had_error = False
 
     # -- skip empty sessions --------------------------------------------
     if message_count == 0:
@@ -479,6 +563,7 @@ def _parse_codex_session(path: Path, f) -> SessionMeta | None:
         status=status,
         pending_tool=pending_tool,
         session_type="codex",
+        attention=attention,
     )
 
 

@@ -2,9 +2,20 @@
 
 from pathlib import Path
 
+from railmux.models import (
+    AttentionCategory,
+    AttentionState,
+    Project,
+    SessionMeta,
+)
 
 from railmux.ui.modals import (
-    ContextMenu, PathBrowser, PathBrowserModal, _BrowserRow,
+    ContextMenu,
+    PathBrowser,
+    PathBrowserModal,
+    RunningInfoModal,
+    SessionInfoModal,
+    _BrowserRow,
 )
 
 
@@ -22,6 +33,63 @@ def _row_labels(browser: PathBrowser) -> list[str]:
         for w in browser._walker
         if isinstance(w, _BrowserRow)
     ]
+
+
+def _attention_session(tmp_path: Path) -> SessionMeta:
+    project = Project(
+        real_path=tmp_path,
+        encoded_name="-tmp-project",
+        claude_dir=tmp_path / ".claude",
+        session_count=1,
+        last_activity_ts=1.0,
+    )
+    return SessionMeta(
+        project=project,
+        session_id="11111111-1111-1111-1111-111111111111",
+        jsonl_path=tmp_path / "rollout.jsonl",
+        title="Attention test",
+        message_count=2,
+        token_total=10,
+        last_mtime=1.0,
+        attention=AttentionState(
+            AttentionCategory.UNKNOWN_ERROR,
+            "Provider reported an error.",
+            retryable=True,
+        ),
+    )
+
+
+def _rendered_text(widget, size=(60, 24)) -> str:
+    canvas = widget.render(size, focus=False)
+    return "\n".join(line.decode(errors="replace") for line in canvas.text)
+
+
+def test_session_info_renders_attention_and_retry(tmp_path: Path):
+    modal = SessionInfoModal(
+        _attention_session(tmp_path), running_label=None, on_close=lambda: None)
+
+    text = _rendered_text(modal)
+
+    assert "attention: unknown error" in text
+    assert "Provider reported an error." in text
+    assert "Retrying is likely safe." in text
+
+
+def test_running_info_renders_attention_in_narrow_width(tmp_path: Path):
+    session = _attention_session(tmp_path)
+    modal = RunningInfoModal(
+        label="project/Attention test",
+        tmux_name="cx-attention",
+        project=session.project,
+        session=session,
+        is_placeholder=False,
+        on_close=lambda: None,
+    )
+
+    text = _rendered_text(modal, size=(28, 24))
+
+    assert "! attention:" in text
+    assert "unknown error" in text
 
 
 # ── basic rendering ─────────────────────────────────────────────────────

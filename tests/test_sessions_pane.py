@@ -4,7 +4,12 @@ from pathlib import Path
 
 import urwid
 
-from railmux.models import Project, SessionMeta
+from railmux.models import (
+    AttentionCategory,
+    AttentionState,
+    Project,
+    SessionMeta,
+)
 from railmux.ui.sessions_pane import SessionsPane, _SessionRow
 
 
@@ -490,6 +495,50 @@ def test_stopped_session_row_uses_neutral_hollow_marker():
     assert title.attrib[0] == ("dim", 1)
 
 
+def test_live_attention_keeps_status_dot_and_adds_separate_badge():
+    proj = _project()
+    session = _session(proj)
+    session = SessionMeta(
+        **{**session.__dict__, "status": "idle", "attention": AttentionState(
+            AttentionCategory.UNKNOWN_ERROR, "Provider reported an error.")},
+    )
+
+    row = _SessionRow(session, is_running=True)
+    title = row._wrapped_widget.base_widget.contents[0][0]
+
+    assert title.text.startswith("● ! ")
+    assert title.attrib[0][0] == "status_idle"
+    assert any(attr == "attention" for attr, _length in title.attrib)
+
+
+def test_stopped_attention_keeps_neutral_liveness_marker():
+    proj = _project()
+    session = _session(proj)
+    session = SessionMeta(
+        **{**session.__dict__, "status": "blocked", "attention": AttentionState(
+            AttentionCategory.ABORTED, "Turn aborted.")},
+    )
+
+    row = _SessionRow(session, is_running=False)
+    title = row._wrapped_widget.base_widget.contents[0][0]
+
+    assert title.text.startswith("○ ! ")
+    assert title.attrib[0] == ("dim", 1)
+
+
+def test_attention_badge_survives_narrow_row_clipping():
+    proj = _project()
+    session = _session(proj, title="A very long title")
+    session = SessionMeta(
+        **{**session.__dict__, "attention": AttentionState(
+            AttentionCategory.UNKNOWN_ERROR, "Provider reported an error.")},
+    )
+
+    canvas = _SessionRow(session, is_running=True).render((5,), focus=False)
+
+    assert canvas.text[0].decode().startswith("● !")
+
+
 # ── attribute maps ──────────────────────────────────────────────────────
 
 def test_focus_remap_includes_status_dots():
@@ -498,6 +547,7 @@ def test_focus_remap_includes_status_dots():
         assert key in _FOCUS_REMAP, f"{key} missing from _FOCUS_REMAP"
         assert "focus" in _FOCUS_REMAP[key], \
             f"{key} focus variant should contain 'focus'"
+    assert _FOCUS_REMAP["attention"] == "attention_focus"
 
 
 def test_selected_map_includes_status_dots():
@@ -506,6 +556,7 @@ def test_selected_map_includes_status_dots():
         assert key in _SELECTED_MAP, f"{key} missing from _SELECTED_MAP"
         assert "sel" in _SELECTED_MAP[key], \
             f"{key} selected variant should contain 'sel'"
+    assert _SELECTED_MAP["attention"] == "attention_sel"
 
 
 def test_star_is_plain_text_no_palette():

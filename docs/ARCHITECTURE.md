@@ -139,3 +139,17 @@ sets active and inactive border styles to the same green while the agent is
 focused, producing one continuous line, and sets both gray for the sidebar.
 Do not assume `pane-active-border-style` can outline one future agent slot: the
 multi-agent layout needs an explicit border/focus design for shared edges.
+
+## Liveness, activity, and attention are separate axes
+
+Detached tmux/process ownership determines whether a session is running.
+Provider lifecycle records determine conversational activity (`idle`, `busy`,
+or `blocked`). An optional attention value records the last actionable terminal
+outcome without changing either of those facts. Provider errors and aborts must
+never prune a live registry entry or reuse the red blocked dot.
+
+Attention summaries come only from dedicated provider error/lifecycle fields and
+must be short and sanitized. Never classify an error from user prompts,
+assistant messages, tool output, or titles. A newer turn start and a newer
+successful turn clear stale attention. User interrupts and explicit rollbacks
+are not provider failures.

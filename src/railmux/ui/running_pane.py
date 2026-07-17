@@ -6,11 +6,17 @@ from dataclasses import dataclass
 
 import urwid
 
+from railmux.models import AttentionState
 from railmux.ui._widgets import ClickableRow, remember_focus, restore_focus
 # Reuse the status-dot glyphs and the focus/selected attribute maps so the
 # coloured ● blends into highlighted rows the same way it does in the Sessions
 # pane (extra keys like "dim" are harmless here).
-from railmux.ui.sessions_pane import _STATUS_DOTS, _FOCUS_REMAP, _SELECTED_MAP
+from railmux.ui.sessions_pane import (
+    _ATTENTION_MARK,
+    _FOCUS_REMAP,
+    _SELECTED_MAP,
+    _STATUS_DOTS,
+)
 
 
 @dataclass(frozen=True)
@@ -18,6 +24,7 @@ class RunningEntry:
     tmux_name: str  # detached tmux session name (cc-<id>)
     label: str      # display label, e.g. "ger-lang/Refactor X" or "claude-chat/(new)"
     status: str = "idle"  # "idle" | "busy" | "blocked"
+    attention: AttentionState | None = None
 
 
 class _RunningRow(ClickableRow):
@@ -28,7 +35,10 @@ class _RunningRow(ClickableRow):
                  on_right_click: "Callable[[], None] | None" = None) -> None:
         self.entry = entry
         dot = _STATUS_DOTS.get(entry.status, ("dim", "○"))
-        text = urwid.Text([dot, " ", entry.label], wrap="clip")
+        markup: list = [dot, " "]
+        if entry.attention is not None:
+            markup.extend([_ATTENTION_MARK, " "])
+        text = urwid.Text(markup + [entry.label], wrap="clip")
         # Use the dict map when selected so the coloured dot picks up the
         # selected background (a bare "selected" string would leave the dot's
         # own attribute — and thus its background — untouched).

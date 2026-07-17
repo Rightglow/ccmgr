@@ -13,6 +13,7 @@ from railmux.codex_index import (
     _TOOL_BLOCK_AGE_S,
     _scan_codex_session,
 )
+from railmux.models import AttentionCategory
 
 
 def _write_codex_session(path: Path, session_id: str, cwd: str,
@@ -649,6 +650,111 @@ def test_scan_codex_turn_aborted_not_busy(tmp_path):
     assert meta is not None
     assert meta.pending_tool is False
     assert meta.status == "idle"
+    assert meta.attention is None
+
+
+def test_scan_codex_generic_turn_aborted_needs_attention(tmp_path):
+    """Missing reasons degrade to a generic abort, never a capacity guess."""
+    p = tmp_path / "rollout.jsonl"
+    _write_codex_session(
+        p, "sid-generic-abort", "/tmp/proj", originator="codex-tui",
+        messages=[{"role": "user", "text": "go"}],
+        extra_lines=[_event("task_started"), _event("turn_aborted")],
+    )
+
+    meta = _scan_codex_session(p)
+
+    assert meta is not None
+    assert meta.status == "idle"
+    assert meta.attention is not None
+    assert meta.attention.category is AttentionCategory.ABORTED
+    assert meta.attention.summary == "Turn aborted."
+    assert meta.attention.retryable is None
+
+
+def test_scan_codex_malformed_abort_reason_is_generic(tmp_path):
+    p = tmp_path / "rollout.jsonl"
+    _write_codex_session(
+        p, "sid-malformed-abort", "/tmp/proj", originator="codex-tui",
+        messages=[{"role": "user", "text": "go"}],
+        extra_lines=[_event("turn_aborted", reason={"unexpected": [1, 2]})],
+    )
+
+    meta = _scan_codex_session(p)
+
+    assert meta is not None
+    assert meta.attention is not None
+    assert meta.attention.category is AttentionCategory.ABORTED
+
+
+def test_scan_codex_real_error_shape_is_sanitized_and_survives_completion(
+    tmp_path,
+):
+    """Real persisted schema: error is followed by task_complete for the same turn."""
+    p = tmp_path / "rollout.jsonl"
+    private = "private prompt, response, credential, and hostname"
+    error = json.dumps({
+        "timestamp": "2026-04-17T09:30:42.915Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "error",
+            "codex_error_info": "bad_request",
+            "message": private,
+        },
+    })
+    _write_codex_session(
+        p, "sid-error", "/tmp/proj", originator="codex-tui",
+        messages=[{"role": "user", "text": "go"}],
+        extra_lines=[_event("task_started"), error, _event("task_complete")],
+    )
+
+    meta = _scan_codex_session(p)
+
+    assert meta is not None
+    assert meta.status == "idle"
+    assert meta.attention is not None
+    assert meta.attention.category is AttentionCategory.UNKNOWN_ERROR
+    assert meta.attention.summary == "Provider rejected the request."
+    assert meta.attention.timestamp == "2026-04-17T09:30:42.915Z"
+    assert private not in meta.attention.summary
+
+
+def test_scan_codex_new_successful_turn_clears_error_attention(tmp_path):
+    error = _event(
+        "error", codex_error_info="other", message="sensitive provider detail")
+    p = tmp_path / "rollout.jsonl"
+    _write_codex_session(
+        p, "sid-error-cleared", "/tmp/proj", originator="codex-tui",
+        messages=[{"role": "user", "text": "go"}],
+        extra_lines=[
+            _event("task_started"), error, _event("task_complete"),
+            _event("task_started"), _event("task_complete"),
+        ],
+    )
+
+    meta = _scan_codex_session(p)
+
+    assert meta is not None
+    assert meta.attention is None
+
+
+def test_scan_codex_malformed_error_fields_degrade_safely(tmp_path):
+    p = tmp_path / "rollout.jsonl"
+    _write_codex_session(
+        p, "sid-bad-error", "/tmp/proj", originator="codex-tui",
+        messages=[{"role": "user", "text": "go"}],
+        extra_lines=[
+            _event("error", codex_error_info=["bad"], message={"private": True}),
+            _event("task_complete"),
+        ],
+    )
+
+    meta = _scan_codex_session(p)
+
+    assert meta is not None
+    assert meta.attention is not None
+    assert meta.attention.category is AttentionCategory.UNKNOWN_ERROR
+    assert meta.attention.summary == "Provider reported an error."
 
 
 def test_scan_codex_thread_rolled_back_not_busy(tmp_path):
@@ -663,6 +769,7 @@ def test_scan_codex_thread_rolled_back_not_busy(tmp_path):
     meta = _scan_codex_session(p)
     assert meta is not None
     assert meta.status == "idle"
+    assert meta.attention is None
 
 
 def test_scan_codex_task_started_without_complete_is_busy(tmp_path):
@@ -715,6 +822,7 @@ def test_scan_codex_legacy_assistant_without_lifecycle_is_idle(tmp_path):
     meta = _scan_codex_session(p)
     assert meta is not None
     assert meta.status == "idle"
+    assert meta.attention is None
 
 
 def test_scan_codex_user_after_completed_turn_reopens_busy(tmp_path):

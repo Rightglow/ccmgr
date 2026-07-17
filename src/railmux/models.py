@@ -2,7 +2,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
+
+
+class AttentionCategory(str, Enum):
+    """Stable, provider-derived outcomes that may need user attention."""
+
+    ABORTED = "aborted"
+    UNKNOWN_ERROR = "unknown_error"
+
+
+@dataclass(frozen=True)
+class AttentionState:
+    """Last actionable conversational outcome, independent of liveness/status."""
+
+    category: AttentionCategory
+    summary: str
+    retryable: bool | None = None
+    timestamp: str | None = None
+    event_order: int = 0
 
 
 @dataclass(frozen=True)
@@ -47,6 +66,10 @@ class SessionMeta:
     pending_tool: bool = False
     # "claude" or "codex" — which CLI owns this session.
     session_type: str = "claude"
+    # A terminal provider outcome that deserves a separate UI marker. This is
+    # intentionally independent from ``status`` (conversation activity) and
+    # from tmux/process liveness, which is owned by App's running registry.
+    attention: AttentionState | None = None
 
     @property
     def display_title(self) -> str:

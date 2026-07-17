@@ -41,7 +41,7 @@ from railmux.modes import (
     ModeRegistry,
     ProjectSource,
 )
-from railmux.models import Project, SessionMeta
+from railmux.models import AttentionState, Project, SessionMeta
 from railmux.renames import Renames
 from railmux.session_cache import SessionCache
 from railmux.scroll_manager import ScrollManager
@@ -121,6 +121,14 @@ PALETTE = [
      "bold", f"{_STATUS_RED},bold", _DEEP_GRASS_GREEN),
     ("status_blocked_sel", "light red,bold", "dark gray",
      "bold", f"{_STATUS_RED},bold", _SLATE),
+    # Attention is a separate conversational outcome, not another activity
+    # state. Magenta ``!`` badges therefore never compete with green/yellow/red
+    # status dots or with the grass-green liveness/focus signal.
+    ("attention", "light magenta,bold", ""),
+    ("attention_focus", "light magenta,bold", "dark green",
+     "bold", "#ff5fff,bold", _DEEP_GRASS_GREEN),
+    ("attention_sel", "light magenta,bold", "dark gray",
+     "bold", "#ff5fff,bold", _SLATE),
     # Pane border. Dim by default; grass green when focused. Keep
     # row selection and status colours separate so green retains a clear focus
     # role rather than also meaning "selected" or "idle".
@@ -198,6 +206,7 @@ class _Running:
     status: str = "idle"                   # "idle" | "busy" | "blocked"
     last_mtime: float = 0.0                # session JSONL mtime, for recency sort
     session_type: str = "claude"           # "claude" | "codex" — which CLI owns it
+    attention: AttentionState | None = None
 
     @property
     def is_placeholder(self) -> bool:
@@ -339,6 +348,7 @@ class App:
     _status_text: str | None = None
     _status_level: str = "info"
     _status_since: float = 0.0
+    _attention_notice_key: tuple[str, int] | None = None
     _tip_index: int = 0
     _tip_since: float = 0.0
     # railmux's status line is rendered into the OUTER tmux status bar (full
@@ -493,6 +503,7 @@ class App:
         self._status_text: str | None = None
         self._status_level: str = "info"
         self._status_since: float = 0.0
+        self._attention_notice_key: tuple[str, int] | None = None
         self._tip_index: int = 0
         self._tip_since: float = 0.0
         # Outer tmux status-bar rendering; run() enables it once tmux is up.
@@ -1086,7 +1097,8 @@ class App:
                     favorite_ids=self._favorites.get_ids(),
                 )
         self._clear_error()
-        self._set_status(f"→ {entry.label}")
+        if not self._show_attention_status(entry.attention):
+            self._set_status(f"→ {entry.label}")
 
     # --- history preview (display pane shows a transcript, not an agent session) ---
 
@@ -1124,7 +1136,9 @@ class App:
                                  session_type=session.session_type):
             self._primary_slot.in_history_mode = True
             self._set_active_target(session.session_id, None)
-            self._set_status(f"≡ Previewing {session.display_title} (history)")
+            if not self._show_attention_status(session.attention):
+                self._set_status(
+                    f"≡ Previewing {session.display_title} (history)")
 
     def _save_restore_state(self) -> None:
         """Remember what's in the right pane before taking it over for history."""
@@ -3099,6 +3113,16 @@ class App:
                     r.label = f"{meta.project.display_name}/{meta.display_title}"
                 r.status = self._effective_status(meta, child_probes, server)
                 r.last_mtime = meta.last_mtime
+                r.attention = meta.attention
+                if self._primary_slot.agent_tmux_name == r.tmux_name:
+                    if meta.attention is None:
+                        self._attention_notice_key = None
+                    else:
+                        notice_key = (
+                            meta.session_id, meta.attention.event_order)
+                        if self._attention_notice_key != notice_key:
+                            self._attention_notice_key = notice_key
+                            self._show_attention_status(meta.attention)
         self._maybe_resort_running()
         self._render_running_pane()
 
@@ -3131,7 +3155,12 @@ class App:
         """
         prefix = self._active_mode().tmux_prefix
         entries = [
-            RunningEntry(tmux_name=r.tmux_name, label=r.label, status=r.status)
+            RunningEntry(
+                tmux_name=r.tmux_name,
+                label=r.label,
+                status=r.status,
+                attention=r.attention,
+            )
             for r in self._running.values()
             if r.tmux_name.startswith(prefix)
         ]
@@ -3990,6 +4019,28 @@ class App:
             )
 
     # --- status bar ---
+
+    @staticmethod
+    def _attention_status_text(attention: AttentionState) -> str:
+        raw_category = getattr(attention.category, "value", attention.category)
+        category = str(raw_category).replace("_", " ")
+        if attention.retryable is True:
+            retry = "Retrying is likely safe."
+        elif attention.retryable is False:
+            retry = "Retry is unlikely to help."
+        else:
+            retry = "Retry suitability is unknown."
+        return f"! {category}: {attention.summary} {retry}"
+
+    def _show_attention_status(
+        self, attention: AttentionState | None,
+    ) -> bool:
+        """Explain an active/selected outcome without changing its actions."""
+        if not isinstance(attention, AttentionState):
+            return False
+        self._set_status(
+            self._attention_status_text(attention), "warn", force=True)
+        return True
 
     # How long an explicit message holds the bar before it falls back to idle
     # tips. Errors are sticky (cleared only by the next message or action);

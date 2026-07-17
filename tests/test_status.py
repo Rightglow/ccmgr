@@ -9,7 +9,12 @@ import urwid
 
 from railmux import tmux_ctl
 from railmux.config import Config
-from railmux.models import Project, SessionMeta
+from railmux.models import (
+    AttentionCategory,
+    AttentionState,
+    Project,
+    SessionMeta,
+)
 from railmux.session_cache import SessionCache
 from railmux.session_index import _scan_session
 
@@ -239,6 +244,71 @@ def test_effective_status_non_pending_unchanged(app, monkeypatch):
                     status="busy", pending_tool=False)
     assert a._effective_status(m) == "busy"
     assert called == []  # non-pending never inspects the process
+
+
+def test_attention_does_not_change_idle_activity_status(app):
+    a, _Running = app
+    attention = AttentionState(
+        AttentionCategory.UNKNOWN_ERROR, "Provider reported an error.")
+    meta = SessionMeta(
+        project=None, session_id=_UID, jsonl_path=Path("/x"), title="t",
+        message_count=1, token_total=1, last_mtime=0.0,
+        status="idle", attention=attention,
+    )
+
+    assert a._effective_status(meta) == "idle"
+
+
+def test_live_tmux_idle_attention_remains_in_running_pane(app, monkeypatch):
+    """Attention is presentation metadata, never a liveness/pruning signal."""
+    a, _Running = app
+    attention = AttentionState(
+        AttentionCategory.UNKNOWN_ERROR, "Provider reported an error.")
+    a._running[_UID] = _Running(
+        key=_UID, tmux_name="cc-x", label="project/session",
+        status="idle", attention=attention,
+    )
+    monkeypatch.setattr(
+        tmux_ctl,
+        "server_snapshot",
+        lambda: tmux_ctl.ServerSnapshot(
+            sessions=frozenset({"cc-x"}), panes=frozenset()),
+    )
+
+    a._refresh()
+
+    from railmux.ui.running_pane import _RunningRow
+    row = next(w for w in a._running_pane._walker if isinstance(w, _RunningRow))
+    assert _UID in a._running
+    assert row.entry.status == "idle"
+    assert row.entry.attention == attention
+
+
+def test_attention_status_text_is_succinct_and_retry_aware():
+    from railmux.ui.app import App
+    attention = AttentionState(
+        AttentionCategory.ABORTED,
+        "Turn aborted.",
+        retryable=True,
+    )
+
+    text = App._attention_status_text(attention)
+
+    assert text == "! aborted: Turn aborted. Retrying is likely safe."
+
+
+def test_attention_status_text_never_adds_transcript_content():
+    from railmux.ui.app import App
+    attention = AttentionState(
+        AttentionCategory.UNKNOWN_ERROR,
+        "Provider reported an error.",
+        retryable=None,
+    )
+
+    text = App._attention_status_text(attention)
+
+    assert "Provider reported an error." in text
+    assert "Retry suitability is unknown." in text
 
 
 def test_refresh_clears_visual_selection_for_missing_project(app):

@@ -6,8 +6,26 @@ from pathlib import Path
 
 import urwid
 
-from railmux.models import Project, SessionMeta
+from railmux.models import AttentionState, Project, SessionMeta
 from railmux.ui._widgets import ClickableRow
+
+
+def _attention_lines(attention: AttentionState | None) -> list:
+    """Compact, generic rendering for known and future attention categories."""
+    if attention is None:
+        return []
+    raw_category = getattr(attention.category, "value", attention.category)
+    category = str(raw_category).replace("_", " ")
+    lines = [
+        urwid.Divider(),
+        urwid.Text(("attention", f"! attention: {category}"), wrap="clip"),
+        urwid.Text(f"  {attention.summary}", wrap="clip"),
+    ]
+    if attention.retryable is True:
+        lines.append(urwid.Text(("dim", "  Retrying is likely safe."), wrap="clip"))
+    elif attention.retryable is False:
+        lines.append(urwid.Text(("dim", "  Retry is unlikely to help."), wrap="clip"))
+    return lines
 
 
 class ProjectInfoModal(urwid.WidgetWrap):
@@ -231,6 +249,7 @@ class SessionInfoModal(urwid.WidgetWrap):
                 urwid.Text(f"messages:  {session.message_count}"),
                 urwid.Text(f"tokens:    {session.token_total}"),
             ]
+            body_lines.extend(_attention_lines(session.attention))
             if session.last_user_message:
                 body_lines.append(urwid.Divider())
                 body_lines.append(urwid.Text("last user input:"))
@@ -279,6 +298,7 @@ class RunningInfoModal(urwid.WidgetWrap):
             body_lines.append(urwid.Text(f"session id:    {session.session_id}"))
             body_lines.append(urwid.Text(f"messages:      {session.message_count}"))
             body_lines.append(urwid.Text(f"tokens:        {session.token_total}"))
+            body_lines.extend(_attention_lines(session.attention))
         else:
             body_lines.append(urwid.Divider())
             body_lines.append(urwid.Text(("dim", "(session metadata not available)")))
