@@ -18,8 +18,12 @@ from railmux.ui.modals import (
     DeleteConfirmModal,
     PathBrowser,
     PathBrowserModal,
+    ProjectInfoModal,
+    QuitConfirmModal,
+    RenameModal,
     RunningInfoModal,
     SessionInfoModal,
+    YoloConfirmModal,
     _BrowserRow,
 )
 
@@ -103,6 +107,56 @@ def test_delete_confirm_action_keys_use_high_contrast_attribute():
         modal, size=(40, modal.preferred_height(40)))
 
 
+def test_modal_action_legends_use_high_contrast_attribute(tmp_path):
+    project = Project(
+        real_path=tmp_path,
+        encoded_name="project",
+        claude_dir=tmp_path / ".claude",
+        session_count=0,
+        last_activity_ts=0.0,
+    )
+    modals = [
+        ProjectInfoModal(project, on_close=lambda: None),
+        QuitConfirmModal(
+            on_confirm=lambda: None,
+            on_soft_quit=lambda: None,
+            on_cancel=lambda: None,
+            running_count=1,
+        ),
+        RenameModal("old title", lambda _title: None, lambda: None),
+        YoloConfirmModal(lambda: None, lambda: None),
+        SessionInfoModal(None, None, lambda: None),
+        RunningInfoModal(
+            "agent", "cx-agent", None, None, False, lambda: None),
+        PathBrowser(tmp_path, lambda _path: None, allow_create=True),
+    ]
+
+    for modal in modals:
+        assert "modal_key" in _rendered_attrs(modal), type(modal).__name__
+
+
+def test_rename_ctrl_u_clears_entire_title_without_closing():
+    submitted = MagicMock()
+    cancelled = MagicMock()
+    modal = RenameModal("old title", submitted, cancelled)
+    modal._edit.set_edit_pos(3)
+
+    assert modal.keypress((40, 12), "ctrl u") is None
+    assert modal._edit.edit_text == ""
+    assert modal._edit.edit_pos == 0
+    assert modal.keypress((40, 12), "ctrl u") is None
+    submitted.assert_not_called()
+    cancelled.assert_not_called()
+
+
+def test_rename_legend_documents_clear_shortcut():
+    modal = RenameModal("old title", lambda _title: None, lambda: None)
+
+    text = _rendered_text(modal, size=(40, 12))
+
+    assert "Ctrl+U = clear" in text
+
+
 def test_app_uses_compact_fixed_height_for_short_delete_confirm():
     app = App.__new__(App)
     app._loop = MagicMock()
@@ -134,7 +188,7 @@ def test_delete_confirm_keeps_actions_visible_for_long_name():
 
     text = _rendered_text(modal, size=(30, 12))
 
-    assert "Enter = confirm" in text
+    assert "↵ = confirm" in text
     assert "Esc = cancel" in text
 
 
@@ -167,7 +221,7 @@ def test_delete_confirm_scrolls_long_body_but_keeps_footer():
     text = _rendered_text(modal, size=(30, 10))
 
     assert "PERMANENT CONSEQUENCE" in text
-    assert "Enter = confirm" in text
+    assert "↵ = confirm" in text
 
 
 def test_session_info_renders_attention_and_retry(tmp_path: Path):

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Replace the three stacked sidebar boxes with labelled horizontal section
+  rules inside one pair of shared vertical rails, reclaiming two rows while
+  preserving pointer-local wheel routing. The focused section owns green upper
+  and lower rules plus matching segments on both rails; focus changes no longer
+  shift section heights, and narrow layouts keep every stable section name
+  visible. Inactive section names and rules share one subdued gray when focus
+  moves to the agent, while pinned-row separators remain secondary chrome. A
+  shared lower boundary does not recolour the next section's title. Green corner
+  glyphs join focused rail segments to their horizontal boundaries without
+  visually overrunning them. Neutral outer corners and internal junctions also
+  close the inactive frame cleanly, and the final rule uses the same inactive
+  gray.
+- Give modal action keys one shared high-contrast treatment across rename,
+  quit, info, auto-run, help, path-browser, kill, and delete workflows. Rename
+  now accepts `Ctrl-U` to clear a non-empty title without closing the popup,
+  and visible Enter labels use the compact `↵` symbol.
+
 ### Fixed
 
 - Preserve the active tmux pane during swap-transport moves, so a single click

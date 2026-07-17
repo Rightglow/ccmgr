@@ -69,11 +69,14 @@ class RunningSessionsPane(ScrollableSidebarPane, urwid.WidgetWrap):
     def __init__(self, on_select: Callable[[RunningEntry], None],
                  on_context: "Callable[[RunningEntry], None] | None" = None,
                  on_double_detected: "Callable[[], None] | None" = None,
-                 provider_label: str = "Agent") -> None:
+                 provider_label: str = "Agent",
+                 *, boxed: bool = True) -> None:
         self._on_select = on_select
         self._on_context = on_context
         self._on_double_detected = on_double_detected
         self._provider_label = provider_label
+        self._boxed = boxed
+        self._section_title = "Running"
         self._entries: list[RunningEntry] = []
         self._filter = ""
         self._pre_filter_focus: str | None = None
@@ -87,8 +90,26 @@ class RunningSessionsPane(ScrollableSidebarPane, urwid.WidgetWrap):
         # Keep App's pane-focus colour on chrome instead of leaking it into
         # unstyled running-session text.
         self._body = urwid.AttrMap(self._listbox, "body")
-        self._linebox = urwid.LineBox(self._body, title="Running")
-        super().__init__(self._linebox)
+        self._linebox = (
+            urwid.LineBox(self._body, title=self._section_title)
+            if boxed else None
+        )
+        super().__init__(self._linebox or self._body)
+
+    def _wheel_chrome_rows(self) -> int:
+        return 2 if self._boxed else 0
+
+    def _wheel_border_columns(self) -> int:
+        return 2 if self._boxed else 0
+
+    @property
+    def section_title(self) -> str:
+        return self._section_title
+
+    def _set_section_title(self, title: str) -> None:
+        self._section_title = title
+        if self._linebox is not None:
+            self._linebox.set_title(title)
 
     def set_active(self, tmux_name: str | None) -> None:
         """Persistently highlight the session attached in the right pane."""
@@ -196,7 +217,7 @@ class RunningSessionsPane(ScrollableSidebarPane, urwid.WidgetWrap):
                 text = f"  (no running {self._provider_label} sessions)"
                 title = "Running"
             self._walker[:] = [urwid.Text(("dim", text), align="left")]
-            self._linebox.set_title(title)
+            self._set_section_title(title)
             return
         self._walker[:] = [
             _RunningRow(
@@ -213,7 +234,7 @@ class RunningSessionsPane(ScrollableSidebarPane, urwid.WidgetWrap):
         count = (
             f"{len(visible)}/{len(entries)}" if self._filter else str(len(entries))
         )
-        self._linebox.set_title(f"Running ({count})")
+        self._set_section_title(f"Running ({count})")
         self._restore_focus(prior)
 
     @staticmethod

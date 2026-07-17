@@ -132,12 +132,15 @@ class SessionsPane(ScrollableSidebarPane, urwid.WidgetWrap):
                  on_preview: "Callable[[SessionMeta], None] | None" = None,
                  on_context: "Callable[[SessionMeta], None] | None" = None,
                  on_double_detected: "Callable[[], None] | None" = None,
-                 provider_label: str = "Agent") -> None:
+                 provider_label: str = "Agent",
+                 *, boxed: bool = True) -> None:
         self._on_select = on_select
         self._on_preview = on_preview
         self._on_context = on_context
         self._on_double_detected = on_double_detected
         self._provider_label = provider_label
+        self._boxed = boxed
+        self._section_title = "Sessions"
         self._sessions: list[SessionMeta] = []
         self._project: Project | None = None
         self._filter = ""
@@ -148,7 +151,7 @@ class SessionsPane(ScrollableSidebarPane, urwid.WidgetWrap):
         self._rendered_data: tuple | None = None
 
         self._new_row = _NewSessionRow(on_click=lambda: self._on_select(None))
-        self._divider = urwid.Divider("─")
+        self._divider = urwid.AttrMap(urwid.Divider("─"), "dim")
         self._walker = urwid.SimpleFocusListWalker([
             urwid.Text(self._no_project_text(), align="center")])
         self._listbox = urwid.ListBox(self._walker)
@@ -158,15 +161,31 @@ class SessionsPane(ScrollableSidebarPane, urwid.WidgetWrap):
         # Keep pane focus on the LineBox border/title. Without an explicit body
         # attr, the outer AttrMap also turns every ordinary session title green.
         self._body = urwid.AttrMap(self._pile, "body")
-        self._linebox = urwid.LineBox(self._body, title="Sessions")
+        self._linebox = (
+            urwid.LineBox(self._body, title=self._section_title)
+            if boxed else None
+        )
         # Start focused on the listbox when it has selectable content.
         if self._walker:
             self._pile.focus_position = 0
-        super().__init__(self._linebox)
+        super().__init__(self._linebox or self._body)
 
     def _wheel_chrome_rows(self) -> int:
         # A selected project adds the pinned New Session row and divider.
-        return 4 if self._project is not None else 2
+        pinned_rows = 2 if self._project is not None else 0
+        return pinned_rows + (2 if self._boxed else 0)
+
+    def _wheel_border_columns(self) -> int:
+        return 2 if self._boxed else 0
+
+    @property
+    def section_title(self) -> str:
+        return self._section_title
+
+    def _set_section_title(self, title: str) -> None:
+        self._section_title = title
+        if self._linebox is not None:
+            self._linebox.set_title(title)
 
     def set_sessions(self, project: Project | None, sessions: list[SessionMeta],
                      running_ids: set[str] | None = None,
@@ -198,7 +217,7 @@ class SessionsPane(ScrollableSidebarPane, urwid.WidgetWrap):
         if project is None:
             self._walker[:] = [
                 urwid.Text(self._no_project_text(), align="center")]
-            self._linebox.set_title("Sessions")
+            self._set_section_title("Sessions")
             self._pile.contents[:] = [
                 (self._listbox, self._pile.options("weight", 1)),
             ]
@@ -213,7 +232,7 @@ class SessionsPane(ScrollableSidebarPane, urwid.WidgetWrap):
         ]
 
         self._render(self._visible_sessions())
-        self._linebox.set_title(f"Sessions ({project.display_name})")
+        self._set_section_title(f"Sessions ({project.display_name})")
 
         self._restore_focus(prior_focus)
 

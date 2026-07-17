@@ -28,14 +28,18 @@ class ScrollableSidebarPane:
     def _wheel_chrome_rows(self) -> int:
         return 2  # LineBox top and bottom borders
 
+    def _wheel_border_columns(self) -> int:
+        return 2  # LineBox left and right borders
+
     def mouse_event(self, size, event, button, col, row, focus):
         if event == "mouse press" and button in (4, 5):
             if len(size) >= 2:
                 maxcol, maxrow = size[:2]
                 rows = maxrow - self._wheel_chrome_rows()
-                if maxcol > 2 and rows > 0:
+                columns = maxcol - self._wheel_border_columns()
+                if columns > 0 and rows > 0:
                     self._listbox.keypress(
-                        (maxcol - 2, rows),
+                        (columns, rows),
                         "up" if button == 4 else "down",
                     )
             # Consume even at a boundary or critically-small geometry so the

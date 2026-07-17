@@ -56,11 +56,13 @@ class ProjectsPane(ScrollableSidebarPane, urwid.WidgetWrap):
     def __init__(self, projects: list[Project],
                  on_select: Callable[[Project | None], None],
                  on_double_click: Callable[[Project | None], None] | None = None,
-                 provider_label: str = "Agent") -> None:
+                 provider_label: str = "Agent",
+                 *, boxed: bool = True) -> None:
         self._all_projects = projects
         self._on_select = on_select
         self._on_double_click = on_double_click
         self._provider_label = provider_label
+        self._boxed = boxed
         self._filter = ""
         self._selected_encoded_name: str | None = None
 
@@ -69,7 +71,7 @@ class ProjectsPane(ScrollableSidebarPane, urwid.WidgetWrap):
         self._listbox = urwid.ListBox(self._walker)
         self._pile = urwid.Pile([
             ("pack", self._new_row),
-            ("pack", urwid.Divider("─")),
+            ("pack", urwid.AttrMap(urwid.Divider("─"), "dim")),
             ("weight", 1, self._listbox),
         ])
         # Start with focus on the ListBox so j/k works immediately.
@@ -78,11 +80,16 @@ class ProjectsPane(ScrollableSidebarPane, urwid.WidgetWrap):
         # Give body cells an explicit attribute so App's outer pane-focus map
         # colours only the LineBox chrome (border/title), never ordinary rows.
         self._body = urwid.AttrMap(self._pile, "body")
-        super().__init__(urwid.LineBox(self._body, title="Projects"))
+        self._linebox = (
+            urwid.LineBox(self._body, title="Projects") if boxed else None)
+        super().__init__(self._linebox or self._body)
 
     def _wheel_chrome_rows(self) -> int:
         # LineBox borders plus the pinned New Project row and divider.
-        return 4
+        return 4 if self._boxed else 2
+
+    def _wheel_border_columns(self) -> int:
+        return 2 if self._boxed else 0
 
     def _build_rows(self, projects: list[Project]) -> list:
         needle = self._filter.lower()

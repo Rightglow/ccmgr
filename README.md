@@ -95,6 +95,10 @@ absolute, or `~`-based path. When no existing entry matches, select the
 explicit `+ create …` row (it is focused automatically) and press `Enter`;
 railmux creates the directory before starting the agent.
 
+The rename popup starts with the current title pre-filled. Press
+`Ctrl-U` to clear the entire input, `Enter` to save a non-empty title, or `Esc`
+to cancel.
+
 When a mode has no projects or sessions, its empty state names the active
 provider and points to `+ New project` or `n`, so an unavailable provider never
 looks like data from the previous mode.

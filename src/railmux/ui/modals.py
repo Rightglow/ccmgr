@@ -10,6 +10,21 @@ from railmux.models import AttentionState, Project, SessionMeta
 from railmux.ui._widgets import ClickableRow
 
 
+def _action_legend(
+    actions: list[tuple[str, str]],
+    *,
+    align: str = "left",
+    separator: str = "\n",
+) -> urwid.Text:
+    """Render modal actions with keys visually distinct from descriptions."""
+    markup: list = []
+    for index, (keys, description) in enumerate(actions):
+        if index:
+            markup.append(separator)
+        markup.extend([("modal_key", keys), f" = {description}"])
+    return urwid.Text(markup, align=align, wrap="clip")
+
+
 def _attention_lines(attention: AttentionState | None) -> list:
     """Compact, generic rendering for known and future attention categories."""
     if attention is None:
@@ -50,7 +65,9 @@ class ProjectInfoModal(urwid.WidgetWrap):
                 urwid.Text(f"last activity:  {ts}"),
             ]
         body_lines.append(urwid.Divider())
-        body_lines.append(urwid.Text(("dim", "Esc or Enter to close"), align="left"))
+        body_lines.append(_action_legend([
+            ("↵ / Esc", "close"),
+        ]))
         super().__init__(urwid.LineBox(urwid.Filler(urwid.Pile(body_lines), valign="top"), title="Project info"))
 
     def selectable(self) -> bool:
@@ -80,15 +97,16 @@ class QuitConfirmModal(urwid.WidgetWrap):
         else:
             summary = "No running sessions."
 
-        soft_line = "s = soft quit (keep sessions alive)"
+        actions = [("y / ↵", "quit and kill all sessions")]
+        if on_soft_quit is not None:
+            actions.append(("s", "soft quit (keep sessions alive)"))
+        actions.append(("n / Esc", "cancel"))
         body = urwid.Pile([
             urwid.Text("Quit railmux?", align="center"),
             urwid.Divider(),
             urwid.Text(("live", summary), align="center"),
             urwid.Divider(),
-            urwid.Text(("dim", "y / Enter = quit and kill all sessions"), align="center"),
-            urwid.Text(("dim", soft_line if on_soft_quit else ""), align="center"),
-            urwid.Text(("dim", "n / Esc   = cancel"), align="center"),
+            _action_legend(actions, align="center"),
         ])
         super().__init__(urwid.LineBox(urwid.Filler(body, valign="middle"), title="Confirm quit"))
 
@@ -153,7 +171,7 @@ class HelpModal(urwid.WidgetWrap):
             ("Esc", "Clear filter / close popup / move up one pane level"),
         ]),
         ("Actions", [
-            ("Enter", "Open or resume the selected session"),
+            ("↵", "Open or resume the selected session"),
             ("n", "Start a new agent session in the current project"),
             ("/", "Filter the focused pane"),
             ("i", "Details of the focused project / session"),
@@ -208,8 +226,12 @@ class HelpModal(urwid.WidgetWrap):
         for section_title, bindings in self.SECTIONS:
             rows.append(urwid.Text(("title", section_title)))
             for key, desc in bindings:
+                key_widget = (
+                    urwid.Text(("modal_key", key), align="left")
+                    if section_title else urwid.Text(key, align="left")
+                )
                 rows.append(urwid.Columns([
-                    ("fixed", 26, urwid.Text(key, align="left")),
+                    ("fixed", 26, key_widget),
                     urwid.Text(desc, align="left"),
                 ], dividechars=1))
             rows.append(urwid.Divider())
@@ -280,7 +302,9 @@ class SessionInfoModal(urwid.WidgetWrap):
                 body_lines.append(urwid.Divider())
                 body_lines.append(urwid.Text(("live", f"▶ running in tmux: {running_label}")))
         body_lines.append(urwid.Divider())
-        body_lines.append(urwid.Text(("dim", "Esc or Enter to close"), align="left"))
+        body_lines.append(_action_legend([
+            ("↵ / Esc", "close"),
+        ]))
         super().__init__(urwid.LineBox(urwid.Filler(urwid.Pile(body_lines), valign="top"), title="Session info"))
 
     def selectable(self) -> bool:
@@ -326,7 +350,9 @@ class RunningInfoModal(urwid.WidgetWrap):
             body_lines.append(urwid.Text(("dim", "(session metadata not available)")))
 
         body_lines.append(urwid.Divider())
-        body_lines.append(urwid.Text(("dim", "Esc or Enter to close"), align="left"))
+        body_lines.append(_action_legend([
+            ("↵ / Esc", "close"),
+        ]))
         super().__init__(urwid.LineBox(urwid.Filler(urwid.Pile(body_lines), valign="top"), title="Running session"))
 
 
@@ -367,14 +393,10 @@ class DeleteConfirmModal(urwid.WidgetWrap):
         self._listbox = urwid.ListBox(urwid.SimpleFocusListWalker(rows))
         footer = urwid.Pile([
             urwid.Divider(),
-            urwid.Text(
-                [
-                    ("modal_key", "y / Enter"), " = confirm\n",
-                    ("modal_key", "n / Esc"), " = cancel",
-                ],
-                align="center",
-                wrap="clip",
-            ),
+            _action_legend([
+                ("y / ↵", "confirm"),
+                ("n / Esc", "cancel"),
+            ], align="center"),
         ])
         self._frame = urwid.Frame(
             body=self._listbox,
@@ -439,8 +461,10 @@ class YoloConfirmModal(urwid.WidgetWrap):
                 ("dim", "Change later in ~/.config/railmux/settings.json"),
                 align="center")),
             _Selectable(urwid.Divider()),
-            _Selectable(urwid.Text(
-                ("dim", "y = enable,  Enter / n / Esc = keep off"), align="center")),
+            _Selectable(_action_legend([
+                ("y", "enable"),
+                ("↵ / n / Esc", "keep off"),
+            ], align="center")),
         ]
         self._listbox = urwid.ListBox(urwid.SimpleFocusListWalker(rows))
         super().__init__(urwid.LineBox(self._listbox, title="Codex auto-run"))
@@ -462,7 +486,7 @@ class YoloConfirmModal(urwid.WidgetWrap):
 
 
 class RenameModal(urwid.WidgetWrap):
-    """Inline rename popup. Enter submits the new title; Esc cancels."""
+    """Inline rename popup with a terminal-standard Ctrl-U clear action."""
 
     def __init__(self, current_title: str,
                  on_submit: Callable[[str], None],
@@ -475,7 +499,11 @@ class RenameModal(urwid.WidgetWrap):
             urwid.Divider(),
             self._edit,
             urwid.Divider(),
-            urwid.Text(("dim", "Enter to save, Esc to cancel"), align="left"),
+            _action_legend([
+                ("↵", "save"),
+                ("Ctrl+U", "clear"),
+                ("Esc", "cancel"),
+            ]),
         ])
         super().__init__(urwid.LineBox(urwid.Filler(body, valign="top"), title="Rename"))
 
@@ -492,6 +520,11 @@ class RenameModal(urwid.WidgetWrap):
             return None
         if key == "esc":
             self._on_cancel()
+            return None
+        if key == "ctrl u":
+            if self._edit.edit_text:
+                self._edit.set_edit_text("")
+                self._edit.set_edit_pos(0)
             return None
         return super().keypress(size, key)
 
@@ -541,12 +574,12 @@ class PathBrowser(urwid.WidgetWrap):
             ("pack", urwid.Divider("─")),
             ("weight", 1, self._listbox),
             ("pack", urwid.Divider("─")),
-            ("pack", urwid.Text(
-                ("dim", "type to filter/create  ↑↓  ↵ enter  Esc = cancel"
-                 if allow_create else
-                 "type to filter  ↑↓  ↵ enter  Esc = cancel"),
-                align="left",
-            )),
+            ("pack", urwid.Text([
+                "type to filter/create  " if allow_create else "type to filter  ",
+                ("modal_key", "↑↓"), " move  ",
+                ("modal_key", "↵"), " open  ",
+                ("modal_key", "Esc"), " cancel",
+            ], align="left")),
         ])
         self._header_pile.focus_position = 3  # the ListBox
         super().__init__(urwid.LineBox(self._header_pile, title="Choose directory"))

@@ -64,6 +64,11 @@ from railmux.ui.modals import (
 from railmux.ui.projects_pane import ProjectsPane
 from railmux.ui.running_pane import RunningEntry, RunningSessionsPane
 from railmux.ui.sessions_pane import SessionsPane
+from railmux.ui.sidebar import (
+    SidebarSection,
+    StableWeightedPile,
+    UnifiedSidebarFrame,
+)
 from railmux.ui.statusbar import ButtonBar, HintBar, TIPS
 from railmux.ui.workspace import (
     AgentSlot,
@@ -621,6 +626,7 @@ class App:
             on_select=self._on_project_select,
             on_double_click=self._on_project_double_click,
             provider_label=initial_mode.label,
+            boxed=False,
         )
         self._sessions_pane = SessionsPane(
             on_select=self._on_session_select,
@@ -628,12 +634,14 @@ class App:
             on_context=self._open_session_context_menu,
             on_double_detected=self._schedule_right_pane_focus_after_double,
             provider_label=initial_mode.label,
+            boxed=False,
         )
         self._running_pane = RunningSessionsPane(
             on_select=self._on_running_select,
             on_context=self._on_running_context_menu,
             on_double_detected=self._schedule_right_pane_focus_after_double,
             provider_label=initial_mode.label,
+            boxed=False,
         )
         # Warn early if dependencies are missing so the user doesn't
         # discover it by getting a cryptic error in the right pane.
@@ -641,15 +649,29 @@ class App:
             self._set_status(
                 "ERROR: tmux not found on PATH — railmux cannot run without tmux")
 
-        # The outer AttrMaps highlight both LineBox borders and otherwise-
-        # unstyled titles in the focused pane. A one-column gutter keeps those
-        # right edges visually separate from tmux's center divider.
-        self._sidebar = urwid.Pile([
-            ("weight", 2, urwid.AttrMap(self._projects_pane, "pane", focus_map="pane_focus")),
-            ("weight", 3, urwid.AttrMap(self._sessions_pane, "pane", focus_map="pane_focus")),
-            ("weight", 2, urwid.AttrMap(self._running_pane, "pane", focus_map="pane_focus")),
+        # Three horizontal title rules replace the stacked boxes inside one
+        # shared pair of vertical rails. The focused section owns a closed green
+        # outline, while stable weight rounding prevents a one-row jump when
+        # keyboard focus moves between sections.
+        self._sidebar = StableWeightedPile([
+            ("weight", 2, SidebarSection(
+                self._projects_pane,
+                lambda: "Projects",
+            )),
+            ("weight", 3, SidebarSection(
+                self._sessions_pane,
+                lambda: self._sessions_pane.section_title,
+            )),
+            ("weight", 2, SidebarSection(
+                self._running_pane,
+                lambda: self._running_pane.section_title,
+            )),
         ])
-        self._sidebar_body = urwid.Padding(self._sidebar, right=1)
+        sidebar_frame = UnifiedSidebarFrame(
+            self._sidebar,
+            (self._projects_pane, self._sessions_pane, self._running_pane),
+        )
+        self._sidebar_body = urwid.Padding(sidebar_frame, right=1)
         self._hint_bar = HintBar()
         # Start on the focused pane's key set (sidebar defaults to Projects) so
         # the bar is correct before the first refresh tick.

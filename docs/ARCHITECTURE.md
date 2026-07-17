@@ -48,6 +48,23 @@ Portable soft-restart state writes the stable active `mode` key inside a
 per-mode view map. The ownerless `codex_mode` boolean remains a read-only
 migration fallback for Railmux 0.1.x files; it is never copied into new state.
 
+The three lists use horizontal labelled rules instead of independent boxes, so
+adjacent section borders do not consume duplicate terminal rows. There are no
+duplicate per-section vertical borders: one shared rail on each side spans the
+whole sidebar. The focused section owns green upper and lower horizontal rules
+plus the matching height segments on both rails. Green corner glyphs join the
+rails to each horizontal boundary so the focus outline closes without ordinary
+vertical glyphs appearing to overrun the pane. When the next section's title row
+doubles as that lower boundary, only the line and corners turn green and the next
+title remains neutral. All other title rows and the final bottom rule use the
+same subdued inactive gray. Neutral `┌┐` / `└┘` outer corners and `├┤` internal
+junctions keep those rules joined to both rails when no section owns the
+boundary. Weighted section heights are
+deterministic for a given terminal size and must not change when focus moves.
+The stable section name remains visible when dynamic title detail is truncated.
+Wheel input over any title rule or the bottom rule is routed by pointer position
+to that section's own `ListBox`.
+
 ## Restart state has two authorities
 
 Instance-local recovery state lives under `XDG_RUNTIME_DIR` (or the existing
