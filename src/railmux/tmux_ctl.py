@@ -1295,6 +1295,137 @@ def new_detached_session(name: str, cmd: str,
     return True, None
 
 
+def create_detached_holder(
+    name: str, env: dict[str, str] | None = None,
+) -> tuple[PaneIdentity | None, str | None]:
+    """Create a short-lived inert session so identity can be marked first.
+
+    The finite holder closes the only unmarked crash window: if the creator
+    dies between ``new-session`` and ``set-option``, tmux removes the holder
+    automatically instead of retaining an unowned process indefinitely.
+    """
+    use_env = bool(env) and tmux_version() >= (3, 2)
+    args = ["tmux", "new-session", "-d"]
+    if use_env and env:
+        for key, value in env.items():
+            args.extend(["-e", f"{key}={value}"])
+    args.extend(["-s", name, "sleep 30"])
+    try:
+        subprocess.check_call(
+            args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    except FileNotFoundError:
+        return None, "tmux: command not found"
+    except subprocess.CalledProcessError as exc:
+        raw = (exc.stderr.decode("utf-8", errors="replace")
+               if isinstance(exc.stderr, bytes) else str(exc.stderr or ""))
+        return None, _single_line_error(raw) or (
+            f"tmux new-session failed (exit {exc.returncode})")
+    except OSError as exc:
+        return None, _single_line_error(f"tmux new-session failed: {exc}")
+
+    topology = session_topology(name)
+    pane = topology.single_live_pane if topology is not None else None
+    if pane is None:
+        kill_session(name)
+        return None, "created tmux session has no unique live pane"
+    try:
+        for option, value in (
+            ("mouse", "on"), ("set-clipboard", "on"), ("status", "off"),
+        ):
+            subprocess.check_call(
+                ["tmux", "set-option", "-t", pane.session_id, option, value],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+    except (OSError, subprocess.SubprocessError):
+        # Presentation setup remains best effort; identity is the safety gate.
+        pass
+    return pane, None
+
+
+def exact_pane_alive(identity: PaneIdentity) -> bool:
+    current = pane_identity(identity.pane_id)
+    return bool(
+        current is not None
+        and not current.dead
+        and current.session_id == identity.session_id
+        and current.session_name == identity.session_name
+    )
+
+
+def kill_session_identity(identity: PaneIdentity) -> bool:
+    """Kill an exact immutable tmux session, never a reused session name."""
+    current = pane_identity(identity.pane_id)
+    if (current is None
+            or current.session_id != identity.session_id
+            or current.session_name != identity.session_name):
+        return False
+    try:
+        subprocess.check_call(
+            ["tmux", "kill-session", "-t", identity.session_id],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return True
+    except (OSError, subprocess.CalledProcessError):
+        return False
+
+
+def start_detached_holder(
+    identity: PaneIdentity, cmd: str,
+) -> tuple[bool, str | None]:
+    """Replace an exactly identified, already-marked holder with provider."""
+    if not exact_pane_alive(identity):
+        return False, "marked tmux holder disappeared before provider start"
+    try:
+        # Enable this only after the caller has durably marked the holder. An
+        # unmarked holder must self-reap when its finite sleep exits. This is a
+        # window option on the single-pane holder and works on tmux 2.7.
+        subprocess.check_call(
+            ["tmux", "set-window-option", "-t", identity.pane_id,
+             "remain-on-exit", "on"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        kill_session_identity(identity)
+        return False, "tmux could not enable provider launch diagnostics"
+    if not respawn_pane(identity.pane_id, cmd):
+        kill_session_identity(identity)
+        return False, "tmux could not start the provider in the marked pane"
+
+    # Port the legacy immediate-exit diagnosis to the two-step launch path.
+    try:
+        dead = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", identity.pane_id,
+             "#{pane_dead}"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if dead.returncode == 0 and dead.stdout.strip() == "1":
+            capture = subprocess.run(
+                ["tmux", "capture-pane", "-t", identity.pane_id,
+                 "-p", "-S", "-20"],
+                capture_output=True, text=True, timeout=2,
+            )
+            lines = [line.strip() for line in capture.stdout.splitlines()
+                     if line.strip()] if capture.returncode == 0 else []
+            kill_session_identity(identity)
+            detail = _single_line_error("; ".join(lines[-3:]))
+            return False, "agent command failed: " + (
+                detail or "exited immediately")
+        if dead.returncode != 0 and not exact_pane_alive(identity):
+            return False, "agent command exited immediately"
+        subprocess.run(
+            ["tmux", "set-window-option", "-t", identity.pane_id,
+             "remain-on-exit", "off"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # A diagnostic failure cannot authorize a different pane; retain the
+        # exact identity and let normal liveness polling make the next decision.
+        if not exact_pane_alive(identity):
+            return False, "provider pane disappeared during launch"
+    return True, None
+
+
 def session_exists(name: str) -> bool:
     try:
         subprocess.check_call(

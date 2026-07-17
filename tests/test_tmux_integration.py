@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from railmux import restart_state, tmux_ctl
+from railmux import orphan_marker, restart_state, tmux_ctl
 from railmux.display_transport import (
     AgentDisplayTransport,
     recover_interrupted_swaps,
@@ -180,6 +180,70 @@ def test_real_restart_identity_isolates_windows_sessions_and_servers(
             check=False,
         )
         shutil.rmtree(second_root, ignore_errors=True)
+
+
+def test_real_marked_holder_persists_identity_before_provider_runs(
+    isolated_tmux, tmp_path,
+):
+    """The provider's first instruction observes an already-durable marker."""
+    owner = restart_state.capture_outer_identity()
+    assert owner is not None
+    holder, reason = tmux_ctl.create_detached_holder("railmux-marked-agent")
+    assert holder is not None, reason
+    remain = subprocess.check_output(
+        ["tmux", "show-window-options", "-v", "-t", holder.pane_id,
+         "remain-on-exit"], text=True).strip()
+    assert remain in {"", "off"}  # inherited default or explicit rendering
+    marker = orphan_marker.Marker(
+        mode_key="codex",
+        placeholder_key="__new__-real-1",
+        tmux_name=holder.session_name,
+        tmux_session_id=holder.session_id,
+        tmux_pane_id=holder.pane_id,
+        owner=owner,
+        cwd=tmp_path.resolve(),
+        created_at=time.time(),
+        creation_token="c" * 32,
+        phase="launching",
+    )
+    raw = orphan_marker.encode(marker)
+    assert tmux_ctl.set_session_user_option(
+        holder.session_id, orphan_marker.OPTION_NAME, raw)
+    assert tmux_ctl.show_session_user_option(
+        holder.session_id, orphan_marker.OPTION_NAME) == raw
+    listed = subprocess.check_output(
+        ["tmux", "list-sessions", "-F",
+         f"#{{session_name}}\t#{{{orphan_marker.OPTION_NAME}}}"],
+        text=True,
+    ).splitlines()
+    assert f"{holder.session_name}\t{raw}" in listed
+
+    observed = tmp_path / "provider-observed-marker"
+    script = (
+        f'tmux show-options -v -t "$TMUX_PANE" '
+        f'{shlex.quote(orphan_marker.OPTION_NAME)} > '
+        f'{shlex.quote(str(observed))}; sleep 60'
+    )
+    ok, reason = tmux_ctl.start_detached_holder(
+        holder, f"sh -c {shlex.quote(script)}")
+    assert ok, reason
+    assert _wait_until(observed.exists)
+    assert observed.read_text().strip() == raw
+    current = tmux_ctl.pane_identity(holder.pane_id)
+    assert current is not None
+    assert tmux_ctl.kill_session_identity(current)
+
+
+def test_real_exact_kill_refuses_reused_session_name(isolated_tmux):
+    holder, reason = tmux_ctl.create_detached_holder("railmux-reused-name")
+    assert holder is not None, reason
+    assert tmux_ctl.kill_session(holder.session_name)
+    created, reason = tmux_ctl.new_detached_session(
+        holder.session_name, "sleep 60")
+    assert created, reason
+    assert not tmux_ctl.kill_session_identity(holder)
+    assert tmux_ctl.session_exists(holder.session_name)
+    assert tmux_ctl.kill_session(holder.session_name)
 
 
 def test_real_tmux_session_split_attach_persistence_and_styles(isolated_tmux):

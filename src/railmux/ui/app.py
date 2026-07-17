@@ -11,13 +11,14 @@ import math
 import shutil
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 import urwid
 
-from railmux import tmux_ctl
+from railmux import orphan_marker, tmux_ctl
 from railmux.atomic_file import atomic_write_text
 from railmux.codex_index import CodexIndex
 from railmux.config import Config
@@ -208,6 +209,7 @@ class _Running:
     last_mtime: float = 0.0                # session JSONL mtime, for recency sort
     session_type: str = "claude"           # "claude" | "codex" — which CLI owns it
     attention: AttentionState | None = None
+    orphan: orphan_marker.Marker | None = None
 
     @property
     def is_placeholder(self) -> bool:
@@ -1072,6 +1074,14 @@ class App:
                             from_double: bool = False) -> None:
         if not from_double:
             self._cancel_pending_double_focus()
+        selected = self._by_tmux(entry.tmux_name)
+        if (selected is not None and selected.orphan is not None
+                and not self._running_action_valid(
+                    selected, entry.identity_token)):
+            msg = "Open refused: the unresolved tmux identity changed"
+            self._set_status(msg, "error")
+            self._show_error(msg)
+            return
         # Re-attach the agent pane to this already-running session AND
         # sync the Projects/Sessions panes to that session's project, so the
         # sidebar reflects what's actually showing on the right.
@@ -1244,6 +1254,12 @@ class App:
             return
         if restore.kind in ("agent", "claude") and restore.tmux_name:
             if tmux_ctl.session_exists(restore.tmux_name):
+                running = self._by_tmux(restore.tmux_name)
+                if (running is not None and running.orphan is not None
+                        and not self._running_action_valid(running)):
+                    self._set_status(
+                        "Restore refused: marked tmux identity changed", "error")
+                    return
                 self._attach_in_right_pane(restore.tmux_name)
                 # Sync the sidebar to the restored session's project so the
                 # user doesn't see a stale project after less exits.
@@ -1463,7 +1479,43 @@ class App:
                      if env else None)
         shell_cmd = self._shellify(cmd, cwd=cwd, env=shell_env,
                                    login_shell=login_shell)
-        ok, err = self._ensure_detached_agent(tmux_name, shell_cmd, env=env)
+        launch_marker: orphan_marker.Marker | None = None
+        if placeholder_path is not None:
+            owner = getattr(self, "_restart_identity", None)
+            mode = self._modes().for_tmux_name(tmux_name)
+            if owner is None or mode is None:
+                ok, err = False, "exact outer tmux identity is unavailable"
+            else:
+                created_at = time.time()
+                holder, err = tmux_ctl.create_detached_holder(tmux_name, env=env)
+                ok = holder is not None
+                if holder is not None:
+                    launch_marker = orphan_marker.Marker(
+                        mode_key=mode.key,
+                        placeholder_key=key,
+                        tmux_name=tmux_name,
+                        tmux_session_id=holder.session_id,
+                        tmux_pane_id=holder.pane_id,
+                        owner=owner,
+                        cwd=self._path_key(placeholder_path),
+                        created_at=created_at,
+                        creation_token=uuid.uuid4().hex,
+                        phase="launching",
+                    )
+                    if not self._write_orphan_marker(launch_marker):
+                        tmux_ctl.kill_session_identity(holder)
+                        ok, err = False, "could not persist launch recovery marker"
+                    else:
+                        ok, err = tmux_ctl.start_detached_holder(holder, shell_cmd)
+                        if ok:
+                            unresolved = launch_marker.with_phase("unresolved")
+                            # If this transition fails, the durable launching
+                            # marker remains sufficient for conservative
+                            # recovery after a crash. Never erase it or guess.
+                            if self._write_orphan_marker(unresolved):
+                                launch_marker = unresolved
+        else:
+            ok, err = self._ensure_detached_agent(tmux_name, shell_cmd, env=env)
         if not ok:
             msg = f"Launch failed: {err or 'could not create agent session'}"
             self._set_status(msg, "error")
@@ -1472,9 +1524,11 @@ class App:
         self._running[key] = _Running(
             key=key, tmux_name=tmux_name, label=label, project=project,
             placeholder_path=placeholder_path,
-            created_at=time.time() if placeholder_path is not None else 0.0,
+            created_at=(launch_marker.created_at if launch_marker is not None
+                        else 0.0),
             session_type=session_type,
             pre_launch_ids=pre_launch_ids,
+            orphan=launch_marker,
         )
         self._stamp_running(self._running[key])
         if not self._attach_in_right_pane(tmux_name, steal_focus=steal_focus):
@@ -2003,6 +2057,12 @@ class App:
                     self._set_status(msg, "error")
                     self._show_error(msg)
                     return False
+                if (running.orphan is not None
+                        and not self._running_action_valid(running)):
+                    msg = "Restore deferred: marked tmux identity changed"
+                    self._set_status(msg, "error")
+                    self._show_error(msg)
+                    return False
                 ok = self._attach_in_right_pane(tmux_name, steal_focus=False)
                 if not ok:
                     msg = (
@@ -2186,6 +2246,60 @@ class App:
             json.dumps(data, separators=(",", ":"), sort_keys=True),
         )
 
+    @staticmethod
+    def _write_orphan_marker(marker: orphan_marker.Marker) -> bool:
+        """Write and read back the bounded marker on its immutable session."""
+        try:
+            raw = orphan_marker.encode(marker)
+        except ValueError:
+            return False
+        if not tmux_ctl.set_session_user_option(
+                marker.tmux_session_id, orphan_marker.OPTION_NAME, raw):
+            return False
+        saved = tmux_ctl.show_session_user_option(
+            marker.tmux_session_id, orphan_marker.OPTION_NAME)
+        return orphan_marker.decode(saved) == marker
+
+    def _exact_running_pane(
+        self, running: _Running,
+    ) -> tmux_ctl.PaneIdentity | None:
+        marker = running.orphan
+        if marker is None:
+            return None
+        pane = tmux_ctl.pane_identity(marker.tmux_pane_id)
+        topology = tmux_ctl.session_topology(marker.tmux_session_id)
+        home_matches = bool(
+            topology is not None
+            and topology.session_id == marker.tmux_session_id
+            and topology.session_name == marker.tmux_name
+        )
+        at_home = orphan_marker.same_live_tmux(marker, pane)
+        displayed = bool(
+            home_matches and pane is not None and not pane.dead and not at_home
+            and self._display_transport().displayed_real_pane(
+                marker.tmux_name) == marker.tmux_pane_id
+        )
+        if (not home_matches or pane is None or pane.dead
+                or not (at_home or displayed)):
+            return None
+        saved = orphan_marker.decode(tmux_ctl.show_session_user_option(
+            marker.tmux_session_id, orphan_marker.OPTION_NAME))
+        if saved != marker:
+            return None
+        return pane
+
+    def _running_action_valid(
+        self, running: _Running | None, identity_token: str | None = None,
+    ) -> bool:
+        if running is None:
+            return False
+        if running.orphan is None:
+            return identity_token is None
+        if (identity_token is not None
+                and identity_token != running.orphan.creation_token):
+            return False
+        return self._exact_running_pane(running) is not None
+
     def _discover_orphans(self, state: dict | None = None) -> bool:
         """Find registered agent tmux sessions and rebuild ``_running``.
 
@@ -2202,6 +2316,8 @@ class App:
             out = _sp.check_output(
                 ["tmux", "list-sessions", "-F",
                  "#{session_name}\t#{pane_current_path}\t#{session_created}"
+                 "\t#{session_id}\t#{pane_id}"
+                 f"\t#{{{orphan_marker.OPTION_NAME}}}"
                  f"\t#{{{_SESSION_BINDING_OPTION}}}"],
                 stderr=_sp.DEVNULL, text=True,
             )
@@ -2226,19 +2342,33 @@ class App:
 
         live: dict[str, tuple[Path, int]] = {}
         stamps: dict[str, object] = {}
+        orphan_stamps: dict[str, orphan_marker.Marker] = {}
+        marker_governed: set[str] = set()
         for line in out.splitlines():
-            parts = line.split("\t", 3)
-            if len(parts) not in (2, 3, 4) or not parts[0] or not parts[1]:
+            parts = line.split("\t", 6)
+            if len(parts) not in (2, 3, 4, 7) or not parts[0] or not parts[1]:
                 continue
             try:
                 created = int(parts[2]) if len(parts) >= 3 and parts[2] else 0
             except ValueError:
                 created = 0
             live[parts[0]] = (Path(parts[1]), created)
-            if len(parts) == 4 and parts[3]:
+            if len(parts) == 7:
+                if parts[5]:
+                    # Presence alone fences every legacy adoption path. A
+                    # corrupt/newer v2 marker is unresolved authority, never a
+                    # reason to fall back to ownerless name/cwd inference.
+                    marker_governed.add(parts[0])
+                marker = orphan_marker.decode(parts[5])
+                if marker is not None:
+                    orphan_stamps[parts[0]] = marker
+                legacy_raw = parts[6]
+            else:
+                legacy_raw = parts[3] if len(parts) == 4 else ""
+            if legacy_raw:
                 try:
                     import json
-                    stamps[parts[0]] = json.loads(parts[3])
+                    stamps[parts[0]] = json.loads(legacy_raw)
                 except (json.JSONDecodeError, ValueError):
                     pass
 
@@ -2256,10 +2386,119 @@ class App:
                 and isinstance(state.get("running_bindings"), list))
             else []
         )
+        # Version-2 markers are authoritative for new launches. They carry the
+        # exact tmux objects, launch owner, and transaction phase; a name/cwd
+        # match alone can never re-adopt one.
+        current_owner = getattr(self, "_restart_identity", None)
+        live_panes: frozenset[str] | None = None
+        owner_snapshot_loaded = False
+        for name, marker in sorted(
+                orphan_stamps.items(),
+                key=lambda item: (item[1].created_at, item[0])):
+            if name in claimed_tmux or marker.tmux_name != name:
+                continue
+            mode = self._modes().for_tmux_name(name)
+            if (mode is None or marker.mode_key != mode.key
+                    or self._placeholder_tmux_key(name, mode)
+                    != marker.placeholder_key):
+                continue
+            pane = tmux_ctl.pane_identity(marker.tmux_pane_id)
+            if not orphan_marker.same_live_tmux(marker, pane):
+                continue
+            if (current_owner is not None
+                    and marker.owner.server_digest
+                    == current_owner.server_digest
+                    and marker.owner.pane_id != current_owner.pane_id
+                    and not owner_snapshot_loaded):
+                server = tmux_ctl.server_snapshot()
+                live_panes = server.panes if server is not None else None
+                owner_snapshot_loaded = True
+            if not orphan_marker.owner_available(
+                    marker, current_owner, live_panes):
+                continue
+            if (current_owner is not None
+                    and marker.owner.pane_id != current_owner.pane_id):
+                claimed = orphan_marker.claim_owner(
+                    marker,
+                    current_owner,
+                    tmux_ctl.show_session_user_option,
+                    tmux_ctl.set_session_user_option,
+                )
+                if claimed is None:
+                    continue
+                marker = claimed
+
+            cwd_key = self._path_key(marker.cwd)
+            project = projects.get(cwd_key)
+            if project is None:
+                if mode.project_source == ProjectSource.CODEX:
+                    project = self._synthesise_codex_project(marker.cwd, 0)
+                else:
+                    from railmux.path_codec import encode as encode_project_path
+                    encoded = encode_project_path(marker.cwd)
+                    project = Project(
+                        real_path=marker.cwd,
+                        encoded_name=encoded,
+                        claude_dir=self._claude_home / "projects" / encoded,
+                        session_count=0,
+                        last_activity_ts=0.0,
+                    )
+                projects[cwd_key] = project
+            running: _Running | None = None
+            if marker.phase == "resolved" and marker.session_id is not None:
+                running = self._valid_running_binding(
+                    {
+                        "key": marker.session_id,
+                        "tmux_name": name,
+                        "session_type": mode.session_type,
+                        "cwd": str(marker.cwd),
+                    },
+                    {name: (marker.cwd, int(marker.created_at))},
+                    projects,
+                )
+            if running is None:
+                pre_launch_ids: frozenset[str] = frozenset()
+                pre_launch_complete = False
+                for saved in state_bindings:
+                    if (isinstance(saved, dict)
+                            and saved.get("tmux_name") == name
+                            and saved.get("key") == marker.placeholder_key
+                            and saved.get("cwd") == str(marker.cwd)
+                            and isinstance(saved.get("pre_launch_ids"), list)):
+                        values = saved["pre_launch_ids"]
+                        if (len(values) <= 100000
+                                and all(isinstance(value, str)
+                                        and len(value) <= 256
+                                        for value in values)):
+                            pre_launch_ids = frozenset(values)
+                            pre_launch_complete = True
+                        break
+                running = _Running(
+                    key=marker.placeholder_key,
+                    tmux_name=name,
+                    label=(f"{project.display_name}/"
+                           f"({'launch interrupted' if marker.phase == 'launching' else 'unresolved'})"),
+                    project=project,
+                    placeholder_path=marker.cwd,
+                    created_at=marker.created_at,
+                    pre_launch_ids=pre_launch_ids,
+                    allow_heuristic_resolution=pre_launch_complete,
+                    status="blocked",
+                    session_type=mode.session_type,
+                )
+            running.orphan = marker
+            if running.key in self._running:
+                continue
+            self._running[running.key] = running
+            claimed_tmux.add(name)
+            found += 1
+
         # A tmux-local stamp is the primary source: it has the same lifetime as
         # the live agent session and works on platforms without procfs.
         for name, raw in sorted(
                 stamps.items(), key=lambda item: (live[item[0]][1], item[0])):
+            if name in marker_governed:
+                continue
             enriched = raw
             # An unresolved stamp identifies the process, while the runtime
             # state carries its potentially-large pre-launch exclusion set.
@@ -2287,7 +2526,8 @@ class App:
         if state_bindings:
             for raw in state_bindings:
                 running = self._valid_running_binding(raw, live, projects)
-                if running is None or running.tmux_name in claimed_tmux:
+                if (running is None or running.tmux_name in claimed_tmux
+                        or running.tmux_name in marker_governed):
                     continue
                 # A valid persisted binding is authoritative.  Duplicate state
                 # entries cannot replace an already-restored real id.
@@ -2304,7 +2544,7 @@ class App:
         # original placeholder writer was still working.
         for name, (cwd, _created) in sorted(
                 live.items(), key=lambda item: (item[1][1], item[0])):
-            if name in claimed_tmux:
+            if name in claimed_tmux or name in marker_governed:
                 continue
             mode = self._modes().for_tmux_name(name)
             if mode is None:
@@ -3253,6 +3493,8 @@ class App:
                 provider_label=mode.label,
                 status=r.status,
                 attention=r.attention,
+                identity_token=(r.orphan.creation_token
+                                if r.orphan is not None else None),
             )
             for r in self._running.values()
             if r.tmux_name.startswith(prefix)
@@ -3314,7 +3556,15 @@ class App:
             # staggered race where an UNRELATED codex wrote a rollout to the same
             # cwd first (which the "exactly one new rollout" heuristic mis-binds).
             candidate = None
-            if r.session_type == "codex":
+            if (r.orphan is not None
+                    and r.orphan.phase == "resolved"
+                    and r.orphan.session_id is not None):
+                exact = [s for s in candidates
+                         if s.session_id == r.orphan.session_id]
+                if len(exact) != 1:
+                    continue
+                candidate = exact[0]
+            elif r.session_type == "codex":
                 open_ids = self._correlate_codex_rollout(r)
                 if open_ids is not None:
                     # procfs available → correlation is AUTHORITATIVE, and we
@@ -3343,6 +3593,14 @@ class App:
                 if len(candidates) != 1:
                     continue
                 candidate = candidates[0]
+            # Marker-first commit makes a crash between persistence and the
+            # in-memory re-key idempotent: startup adopts a resolved marker
+            # directly under its validated UUID.
+            if r.orphan is not None:
+                resolved_marker = r.orphan.resolved(candidate.session_id)
+                if not self._write_orphan_marker(resolved_marker):
+                    continue
+                r.orphan = resolved_marker
             # Re-key the entry from the placeholder to the real session_id.
             del self._running[r.key]
             r.key = candidate.session_id
@@ -3372,7 +3630,10 @@ class App:
             sessions_dir = self._codex_home_path() / "sessions"
             return tmux_ctl.session_rollout_ids(r.tmux_name, sessions_dir)
         except Exception:
-            return None
+            # On a procfs platform an inspection failure is ambiguity, not
+            # evidence that procfs is unavailable. Falling back here could
+            # adopt an external same-cwd writer.
+            return set() if tmux_ctl.proc_fs_available() else None
 
     def _currently_focused_session_meta(self) -> SessionMeta | None:
         if not self._sessions_pane._walker:
@@ -3433,14 +3694,8 @@ class App:
             if r is None:
                 self._set_status("Session not found in registry.")
                 return
-            if not tmux_ctl.session_exists(r.tmux_name):
-                self._set_status(f"tmux session already gone: {r.tmux_name}")
-                return
-            if not self._return_agent_before_kill(r.tmux_name):
-                return
-            tmux_ctl.kill_session(r.tmux_name)
-            del self._running[r.key]
-            self._set_status(f"Killed: {r.label}  (file kept)")
+            self._kill_tmux_session(
+                r.tmux_name, r.label, focus_w.entry.identity_token)
             return
 
         # Sessions pane (pos 1 or default).
@@ -3452,14 +3707,9 @@ class App:
         if r is None:
             self._set_status(f"'{session.display_title}' is not running.")
             return
-        if not tmux_ctl.session_exists(r.tmux_name):
-            self._set_status(f"tmux session already gone: {r.tmux_name}")
-            return
-        if not self._return_agent_before_kill(r.tmux_name):
-            return
-        tmux_ctl.kill_session(r.tmux_name)
-        del self._running[session.session_id]
-        self._set_status(f"Killed: {session.display_title}  (file kept)")
+        self._kill_tmux_session(
+            r.tmux_name, session.display_title,
+            r.orphan.creation_token if r.orphan is not None else None)
 
     def _on_delete_session(self) -> None:
         """Delete the focused session from the current pane (with confirmation)."""
@@ -3508,7 +3758,9 @@ class App:
             modal = DeleteConfirmModal(
                 title=f"Kill '{label}'?",
                 detail=detail,
-                on_confirm=lambda: self._do_kill_running(entry.tmux_name, session_id, project),
+                on_confirm=lambda: self._do_kill_running(
+                    entry.tmux_name, session_id, project,
+                    entry.identity_token),
                 on_cancel=self._close_modal,
             )
             self._show_overlay(modal, width=54, height=30)
@@ -3529,7 +3781,8 @@ class App:
         )
 
     def _do_kill_running(self, tmux_name: str, session_id: str | None,
-                         project: Project | None) -> None:
+                         project: Project | None,
+                         identity_token: str | None = None) -> None:
         """Kill a detached tmux session; delete its backing store if known.
 
         The provider comes from the registry entry (``cx-*`` vs ``cc-*``), never
@@ -3548,6 +3801,7 @@ class App:
         self._cleanup_session(
             session_id=session_id, jsonl_path=jsonl_path,
             tmux_name=tmux_name, label=tmux_name, session_type=session_type,
+            identity_token=identity_token,
         )
 
     def _forget_running(self, session_id: str | None,
@@ -3564,7 +3818,8 @@ class App:
                          jsonl_path: Path | None = None,
                          tmux_name: str | None = None,
                          label: str = "",
-                         session_type: str = "claude") -> None:
+                         session_type: str = "claude",
+                         identity_token: str | None = None) -> None:
         """Provider-aware session cleanup: kill tmux → remove backing store →
         refresh UI.
 
@@ -3576,15 +3831,40 @@ class App:
             r = self._running.get(session_id)
             tmux_name = r.tmux_name if r else None
         writer_pids: tuple[int, ...] = ()
-        if tmux_name and tmux_ctl.session_exists(tmux_name):
+        owned = self._by_tmux(tmux_name) if tmux_name is not None else None
+        exact_pane = None
+        if owned is not None and owned.orphan is not None:
+            if not self._running_action_valid(owned, identity_token):
+                self._set_status(
+                    "Kill refused: the marked tmux identity changed", "error")
+                return
+            exact_pane = self._exact_running_pane(owned)
+        if tmux_name and (exact_pane is not None
+                          or (owned is None or owned.orphan is None)
+                          and tmux_ctl.session_exists(tmux_name)):
             if not self._return_agent_before_kill(tmux_name):
                 return
             writer_pids = tmux_ctl.session_process_ids(tmux_name)
-            killed = tmux_ctl.kill_session(tmux_name)
+            if exact_pane is not None:
+                # Returning a swap-displayed pane changes its current session;
+                # refresh and require the recorded home identity before kill.
+                exact_pane = self._exact_running_pane(owned)
+                killed = bool(
+                    exact_pane is not None
+                    and orphan_marker.same_live_tmux(owned.orphan, exact_pane)
+                    and tmux_ctl.kill_session_identity(exact_pane)
+                )
+            else:
+                killed = tmux_ctl.kill_session(tmux_name)
             # Never remove a rollout while its writer may still be alive. A
             # concurrent exit is fine; a session that still exists after the
             # failed kill is a hard stop for both Claude and Codex deletion.
-            if not killed and tmux_ctl.session_exists(tmux_name):
+            still_alive = (
+                self._exact_running_pane(owned) is not None
+                if owned is not None and owned.orphan is not None
+                else tmux_ctl.session_exists(tmux_name)
+            )
+            if not killed and still_alive:
                 self._set_status(
                     f"failed to stop {tmux_name}; nothing was deleted", "error")
                 return
@@ -3835,6 +4115,11 @@ class App:
         r = self._by_tmux(entry.tmux_name)
         if r is None:
             return
+        if (r.orphan is not None
+                and not self._running_action_valid(r, entry.identity_token)):
+            self._set_status(
+                "Action refused: the unresolved tmux identity changed", "error")
+            return
         self._running_pane.set_selected(entry.tmux_name)
         # Ensure tmux focus is on our pane so the 200 ms poll doesn't
         # auto-close the menu (can happen if focus was on the right pane).
@@ -3845,10 +4130,12 @@ class App:
             # running tmux session or switch to it.
             tmux = r.tmux_name
             label = r.label
+            token = r.orphan.creation_token if r.orphan is not None else None
             items: list[tuple[str, Callable[[], None]]] = [
-                (" Open      ↵", lambda: self._attach_in_right_pane(tmux,
-                                         steal_focus=True)),
-                (" Kill       k", lambda: self._kill_tmux_session(tmux, label)),
+                (" Open      ↵", lambda: self._open_running_identity(
+                    tmux, token)),
+                (" Kill       k", lambda: self._kill_tmux_session(
+                    tmux, label, token)),
             ]
             path = (r.project.real_path if r.project is not None
                     else r.placeholder_path)
@@ -3922,14 +4209,50 @@ class App:
 
     def _do_context_kill(self, session: SessionMeta) -> None:
         r = self._running.get(session.session_id)
-        if r and tmux_ctl.session_exists(r.tmux_name):
-            tmux_ctl.kill_session(r.tmux_name)
-        self._running.pop(session.session_id, None)
-        self._set_status(f"Killed: {session.display_title}  (file kept)")
+        if r is not None:
+            self._kill_tmux_session(
+                r.tmux_name, session.display_title,
+                r.orphan.creation_token if r.orphan is not None else None)
 
-    def _kill_tmux_session(self, tmux_name: str, label: str) -> None:
+    def _open_running_identity(
+        self, tmux_name: str, identity_token: str | None,
+    ) -> None:
+        running = self._by_tmux(tmux_name)
+        if not self._running_action_valid(running, identity_token):
+            self._set_status(
+                "Open refused: the unresolved tmux identity changed", "error")
+            return
+        self._attach_in_right_pane(tmux_name, steal_focus=True)
+
+    def _kill_tmux_session(
+        self, tmux_name: str, label: str,
+        identity_token: str | None = None,
+    ) -> None:
         """Kill a running tmux session by name (no SessionMeta needed)."""
-        if tmux_ctl.session_exists(tmux_name):
+        running = self._by_tmux(tmux_name)
+        if running is not None and running.orphan is not None:
+            pane = (self._exact_running_pane(running)
+                    if self._running_action_valid(running, identity_token)
+                    else None)
+            if pane is None:
+                self._set_status(
+                    "Kill refused: the unresolved tmux identity changed",
+                    "error",
+                )
+                return
+            if not self._return_agent_before_kill(tmux_name):
+                return
+            pane = self._exact_running_pane(running)
+            if (pane is None
+                    or not orphan_marker.same_live_tmux(running.orphan, pane)):
+                self._set_status(
+                    "Kill refused: the marked pane did not return home", "error")
+                return
+            if not tmux_ctl.kill_session_identity(pane):
+                self._set_status(
+                    "Kill failed: exact tmux session is still live", "error")
+                return
+        elif tmux_ctl.session_exists(tmux_name):
             tmux_ctl.kill_session(tmux_name)
         # Remove any _running entry keyed by this tmux name.
         for key in [k for k, r in self._running.items() if r.tmux_name == tmux_name]:

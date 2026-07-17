@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add in-memory Running-pane filtering with plain fuzzy search, an optional
   `project:<name>` restriction, provider-aware empty states, per-mode queries,
   and exact tmux-identity focus retention across refreshes and sorting.
+- Persist a bounded, versioned tmux marker before each new provider process
+  starts. If Railmux exits before the provider exposes its UUID, restart now
+  restores an explicit unresolved Running entry whose exact pane can be opened
+  or stopped without guessing at or deleting provider history.
 - Split soft-restart persistence into a portable per-mode sidebar view and
   exact-owner runtime recovery files, including isolated real-tmux coverage for
   multiple windows, sessions, and same-named sessions on private servers.
@@ -68,6 +72,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reserved demo-GIF slot.
 
 ### Fixed
+
+- Close the crash window in which a new provider could outlive Railmux before
+  receiving recovery metadata. Placeholder resolution now uses Linux rollout
+  file-descriptor correlation when available, stays unresolved on ambiguity,
+  commits the exact UUID to tmux before re-keying memory, and revalidates
+  immutable tmux identity before unresolved attach or kill actions.
 
 - Prevent simultaneous Railmux instances from overwriting or restoring one
   another's right pane and running bindings. Local state is namespaced by the

@@ -3,6 +3,21 @@
 This is a set of design candidates, not a release commitment. Architecture
 invariants already agreed are recorded in `docs/ARCHITECTURE.md`.
 
+## Proven: unresolved new-session recovery
+
+New provider launches now receive a versioned tmux marker before the provider
+process starts. The marker records bounded identity facts only: provider mode,
+immutable tmux session/pane IDs, outer owner, normalized cwd, creation token,
+transaction phase, and the exact provider UUID once proven. A crash before UUID
+discovery leaves a visible unresolved Running entry rather than an invisible
+live agent. Linux uses exact open-rollout correlation; no-procfs ambiguity stays
+unresolved. Unknown provider history is never deleted.
+
+Private-socket tmux coverage proves marker-before-provider ordering and that an
+old identity cannot kill a newly created session reusing the same name. The
+macOS/no-procfs path deliberately favors a recoverable unresolved entry over a
+heuristic adoption when its complete pre-launch fence is unavailable.
+
 ## Under discussion
 
 ### Dual-agent workspace

@@ -28,6 +28,9 @@ class RunningEntry:
     attention: AttentionState | None = None
     project_label: str = ""
     provider_label: str = "Agent"
+    # Immutable launch token carried by callbacks so a stale row cannot act on
+    # a different tmux session that later reused the same human-readable name.
+    identity_token: str | None = None
 
 
 class _RunningRow(ClickableRow):

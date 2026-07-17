@@ -176,6 +176,10 @@ state is isolated to the exact outer tmux pane, so separate Railmux windows or
 private tmux servers cannot restore one another's display. Mode, project, and
 sidebar filters are also saved as non-process view preferences for use on a
 later login; those portable preferences never authorize an attach or kill.
+If Railmux stops while a new provider is still creating its session UUID, the
+Running pane restores it as an explicit unresolved entry. It can be reopened or
+stopped by exact tmux identity, but Railmux will not guess at or delete an
+unknown provider history file.
 
 ## Configuration
 

@@ -58,6 +58,29 @@ Detached-session tmux stamps and swap-transport markers retain their own exact
 lifetimes and validation. Runtime JSON is a cache and must not become a
 competing authority for adopting, killing, or replacing an agent pane.
 
+New-session recovery uses `@railmux_orphan_v2`, a bounded session option written
+onto an inert, finite-lifetime holder before the provider command is respawned
+into its exact pane. Its schema contains only mode, placeholder key, immutable
+tmux session/pane IDs, exact outer owner, normalized cwd, timestamp/random
+token, resolution phase, and (after proof) provider UUID. Commands,
+environment, prompts, transcripts, and credentials are forbidden.
+
+The lifecycle is `launching -> unresolved -> resolved`. Startup may adopt only
+a marker whose live immutable tmux objects and supported mode validate. A live
+different outer owner fences concurrent Railmux windows; if that exact owner
+pane is absent from a successful full-server snapshot, a new instance may take
+over only after a crash-safe compare/write/readback owner claim. Snapshot or
+claim failure stays unresolved, and concurrent claimants cannot both adopt. Linux
+resolution requires descendant/open-rollout correlation where available; a
+procfs error is ambiguity, not permission to guess. Without exact correlation,
+only one candidate fenced by a complete pre-launch snapshot may resolve.
+
+Resolution commits the marker's UUID before changing the in-memory registry,
+so interruption is idempotent. Until that commit, attach and stop callbacks
+carry the marker token and recheck live session/pane identity. Stopping an
+unresolved entry may kill only that exact tmux identity and cannot delete a
+provider file because no provider UUID is authorized.
+
 ## The agent workspace is independent of the sidebar mode
 
 `AgentWorkspace` owns at most two `AgentSlot` objects: `primary` and

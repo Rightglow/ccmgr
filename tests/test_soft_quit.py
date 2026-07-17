@@ -12,7 +12,7 @@ import pytest
 import urwid
 
 from railmux.models import Project, SessionMeta
-from railmux import restart_state
+from railmux import restart_state, tmux_ctl
 from railmux.restart_state import OuterTmuxIdentity
 from railmux.ui.app import App, _Running
 from railmux.ui.modals import QuitConfirmModal
@@ -1519,13 +1519,13 @@ def test_resolve_placeholders_empty_correlation_waits_not_fallback(monkeypatch):
     assert unrelated not in app._running            # heuristic did NOT fire
 
 
-def test_correlate_codex_rollout_degrades_without_config():
-    """The helper must never raise into the UI: a bare App (no _config) yields
-    None so resolution falls back to the heuristic."""
+def test_correlate_codex_rollout_fails_closed_without_config(monkeypatch):
+    """A helper failure on procfs must wait, never unlock the heuristic."""
+    monkeypatch.setattr(tmux_ctl, "proc_fs_available", lambda: True)
     app = App.__new__(App)
     r = _Running(key="__new__-tok-1", tmux_name="cx-x", label="l",
                  session_type="codex")
-    assert app._correlate_codex_rollout(r) is None
+    assert app._correlate_codex_rollout(r) == set()
 
 
 def test_launch_snapshots_pre_existing_ids(monkeypatch):
@@ -1545,6 +1545,18 @@ def test_launch_snapshots_pre_existing_ids(monkeypatch):
     app._ensure_detached_agent = lambda *a, **k: (True, None)
     app._attach_in_right_pane = lambda *a, **k: True
     app._session_name = lambda key: "cx-abc"
+    app._restart_identity = OuterTmuxIdentity(
+        server_digest="a" * 64, server_pid=123, pane_id="%1",
+        session_id="$1", window_id="@1")
+    holder = tmux_ctl.PaneIdentity(
+        pane_id="%9", pane_pid=999, session_name="cx-abc",
+        session_id="$9", window_id="@9", dead=False,
+        width=80, height=24)
+    monkeypatch.setattr(tmux_ctl, "create_detached_holder",
+                        lambda *a, **k: (holder, None))
+    monkeypatch.setattr(tmux_ctl, "start_detached_holder",
+                        lambda *a, **k: (True, None))
+    app._write_orphan_marker = lambda marker: True
 
     assert app._launch("__new__-tok-1", ["codex"], proj.real_path, "l", proj,
                        placeholder_path=proj.real_path, session_type="codex")
