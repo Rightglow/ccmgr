@@ -2,9 +2,10 @@
 
 This document records the evidence for Railmux's experimental `swap` display
 transport. It is deliberately not the default: lifecycle safety is proven on
-Linux with tmux 2.7 and 3.4, but real-provider responsiveness, SSH wheel
-behavior, long Codex transcript reflow, and the macOS CI run still need enough
-evidence to justify changing the default.
+Linux with tmux 2.7 and 3.4, and a reproducible local server-side benchmark now
+shows a narrow pipeline improvement on tmux 3.4. Real-provider terminal paint,
+SSH wheel behavior, long Codex transcript reflow, and the macOS CI run still
+need enough evidence to justify changing the default.
 
 ## Result
 
@@ -106,10 +107,84 @@ metadata rather than respawning or killing either recorded pane.
 
 ## Performance observations
 
-A local synthetic test used tmux 3.4, a 112x40 display, seven bursts of 2,500
-lines, and the same shell producer for nested and swap paths. Marker arrival
-included generation, tmux processing, pipe capture, and 5 ms polling, so these
-numbers are comparative smoke data, not a provider latency claim:
+### Reproducible Phase 6 benchmark
+
+Run the source-tree-only harness (it is not installed in the wheel) with:
+
+```bash
+python tools/denested_transport_benchmark.py \
+  --runs 7 --lines 2500 --line-width 96 \
+  --columns 112 --rows 40 --switch-iterations 20 \
+  --output denested-results.json
+```
+
+The harness creates a mode-0700 short directory under `/tmp`, starts a private
+tmux server with an explicit `-S` socket on every command, and destroys only
+that server in `finally`. It never uses the ambient `TMUX` socket. Its JSON
+contains the environment, dataset, measurement scope, raw samples, summaries,
+and a deterministic scheduling model.
+
+The output metric begins before a synthetic producer command is dispatched and
+ends when `capture-pane` on the private server contains its final marker. It
+includes command dispatch, producer startup/generation, tmux processing, and
+2 ms polling. It does **not** observe SSH packets or paint in the user's local
+terminal. Likewise, switch timing is server-command plus identity-observation
+latency, not a perceived UI switch. The sought marker is read from a private
+out-of-band file and shell input echo is disabled, so the typed producer command
+cannot satisfy the marker check before the final output is emitted.
+
+On 2026-07-17, three independent batches ran on Linux 6.11, Python 3.12.3,
+tmux 3.4, 112x40 geometry, with an SSH environment detected. Each batch used
+seven 2,500-line bursts per path and 20 A/B switches per transport:
+
+| Batch | Direct marker median | Nested marker median | Swap marker median | Nested switch median | Swap switch median |
+|---|---:|---:|---:|---:|---:|
+| 1 | 58.980 ms | 70.147 ms | 58.000 ms | 9.848 ms | 8.468 ms |
+| 2 | 56.933 ms | 69.306 ms | 56.984 ms | 10.333 ms | 8.532 ms |
+| 3 | 57.839 ms | 70.005 ms | 58.279 ms | 10.099 ms | 8.566 ms |
+
+Raw marker-observation samples, in milliseconds:
+
+- Batch 1 — direct `[77.364, 57.036, 63.053, 62.917, 56.495, 58.980, 56.380]`; nested `[78.734, 73.178, 69.309, 70.147, 67.923, 67.279, 75.849]`; swap `[59.954, 57.745, 59.065, 58.360, 56.346, 57.489, 58.000]`.
+- Batch 2 — direct `[68.228, 56.665, 59.198, 56.933, 57.649, 56.437, 53.814]`; nested `[75.794, 80.427, 69.306, 68.404, 69.959, 68.120, 69.057]`; swap `[56.984, 59.254, 58.975, 56.124, 56.368, 56.735, 57.535]`.
+- Batch 3 — direct `[74.184, 58.929, 57.387, 57.600, 57.999, 57.827, 57.839]`; nested `[75.777, 73.880, 69.717, 69.910, 70.005, 70.414, 67.847]`; swap `[58.178, 59.105, 59.173, 58.279, 56.910, 59.676, 57.189]`.
+
+All observations retained the requested 112x40 pane/window geometry. Direct
+used one path pane; nested and swap each used two, because swap replaces the
+visible nested client with a hidden home placeholder rather than eliminating a
+PTY. The consistent marker gap shows that the nested client adds measurable
+work to this local synthetic server pipeline, while swap remains close to the
+direct path. This is enough evidence to retain and continue supporting the
+opt-in experiment; it is not evidence of first-visible-paint improvement.
+
+Linux `/proc` CPU totals use a 100 Hz clock and include polling overhead. Across
+the three batches, tmux-server ticks were direct `15/14/13`, nested `24/23/22`,
+and swap `12/12/14`; synthetic producer-tree ticks were indistinguishable
+(`12`--`14`). Nested-client totals were below one clock tick and render as zero,
+which means “below 10 ms resolution,” not zero CPU. Railmux and real-provider
+CPU were not present in this harness and were not inferred.
+
+The deterministic 31-event/240 ms scheduler trace produced:
+
+| Policy | Modeled updates | Leading delay | Modeled tail delay |
+|---|---:|---:|---:|
+| Disabled | 31 | 0 ms | 0 ms |
+| Fixed 100 ms (current) | 4 | 0 ms | 60 ms |
+| Fixed 50 ms | 6 | 0 ms | 10 ms |
+| Fixed 33 ms | 9 | 0 ms | 24 ms |
+| Adaptive prototype | 9 | 0 ms | 24 ms |
+
+Tail values depend on where the burst ends relative to a deadline; the fixed
+policies bound tail by their interval. These are scheduler decisions, not
+measured frames. They show the expected update-count/tail tradeoff but do not
+justify a new setting, an adaptive implementation, or changing the conservative
+100 ms default without real terminal-paint evidence.
+
+### Earlier feasibility smoke
+
+The original prototype smoke used the same 112x40 shape and seven 2,500-line
+bursts, but its one-off harness was not retained. Marker arrival included
+generation, tmux processing, pipe capture, and 5 ms polling:
 
 | Path | Median burst marker | Max | Median tmux server CPU ticks |
 |---|---:|---:|---:|
@@ -119,14 +194,10 @@ numbers are comparative smoke data, not a provider latency claim:
 
 Twenty A/B switches measured 10.35 ms median (11.49 ms p95) for nested
 respawn/attach and 5.48 ms median (6.83 ms p95) for two `swap-pane` commands.
-CPU resolution was too coarse to distinguish the paths. Synthetic sustained
-output did **not** demonstrate a useful overall responsiveness gain.
-
-With two background agents the nested and swap setups each had four unique
-tmux panes in the benchmark. Swap replaces the visible nested-client pane with
-a hidden home placeholder, so total PTY count does not fall. The visible update
-path does remove the nested client, its terminal parser, and one composition
-hop; a direct launch has only sidebar plus provider panes.
+CPU resolution was too coarse to distinguish the paths. That earlier smoke did
+not demonstrate a useful overall responsiveness gain. The reproducible Phase 6
+run does show a consistent narrow server-pipeline gain; neither run measures
+perceived responsiveness.
 
 The current environment could not validly measure first remote wheel paint,
 queued-frame drain after a wheel burst, real Claude/Codex sustained output,
@@ -134,13 +205,29 @@ clipboard/mouse behavior through an actual terminal client, or long inline
 Codex transcript resize over the same SSH link. Those measurements, plus a
 confirmed macOS smoke run, remain gates for changing the default.
 
+## Phase 6 product decision
+
+Keep `swap` supported, experimental, and opt-in. Do not make it the default,
+remove it, or add user-facing frame controls from this evidence alone. The new
+benchmark demonstrates that its intended de-nested server path is measurably
+shorter than nested in a controlled synthetic workload, so immediate removal
+would discard a plausible gain before measuring the actual user-visible target.
+
+This decision is falsifiable: if same-link SSH client-paint measurements show
+parity or regression for both Codex inline/copy-mode behavior and Claude
+alternate-screen behavior, remove the swap transport rather than carry its
+lifecycle complexity indefinitely. A default change still requires every gate
+in the project task, including real providers, Linux and macOS, minimum tmux
+versions, reflow, direct-kill/SIGKILL recovery, independent-client fallback,
+and mouse/copy/resize/detach/reconnect smoke.
+
 ## Unresolved limitations
 
 - tmux 2.7/2.8 cannot pre-size a home window with `resize-window`; switching
   uses native tmux reflow and may be visibly disruptive for a long inline TUI.
 - A user who directly kills the *real display pane* still kills that provider;
   controlled Railmux close/preview/quit paths always return it home first.
-- Synthetic output and switch timings are not evidence that Claude or Codex
-  feels faster over SSH.
+- Synthetic marker and switch timings are not evidence that Claude or Codex
+  feels faster over SSH or that a local terminal painted sooner.
 - The public dual-agent layout and its focus/border interaction remain separate
   roadmap work even though transport ownership is two-slot safe.

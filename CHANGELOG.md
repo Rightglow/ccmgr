@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   multiple windows, sessions, and same-named sessions on private servers.
   On the one-time upgrade from the ownerless legacy file, only view preferences
   migrate; recovery bindings remain untouched and are not treated as authority.
+- Add a source-tree-only, repeatable private-tmux benchmark for direct, nested,
+  and swap output pipelines, A/B server-side switch timing, aggregate Linux CPU
+  ticks, and diagnostic scroll-scheduling models. Document raw local results
+  and their strict limitation: marker observation is not terminal paint or a
+  real-provider/SSH measurement.
 - Add an experimental, default-off de-nested agent display transport using
   transactional cross-session pane swaps, durable tmux recovery markers, and a
   zero-extra-pane session-group keeper. It returns real panes before preview,

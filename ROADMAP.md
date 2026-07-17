@@ -96,8 +96,12 @@ Remaining gates before considering a default change:
 - How much Claude Code improves when de-nested, since its alternate-screen,
   application-owned mouse path cannot use Codex's copy-mode batching unchanged.
 - Same-link SSH measurements for first wheel paint, burst drain, sustained
-  output, clipboard/mouse behavior, and CPU. Local synthetic output did not
-  demonstrate a useful overall responsiveness gain, so nested remains default.
+  output, clipboard/mouse behavior, and CPU. A reproducible local synthetic
+  server benchmark now places swap close to direct and consistently ahead of
+  nested marker observation, supporting continued opt-in testing. It cannot
+  observe client terminal paint or real providers, so nested remains default.
+  If same-link client-paint results show parity or regression for both Codex
+  and Claude, remove swap rather than carry its lifecycle complexity forever.
 
 ### Codex interrupt transcript replay
 
