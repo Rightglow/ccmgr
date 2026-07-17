@@ -219,8 +219,11 @@ def test_real_marked_holder_persists_identity_before_provider_runs(
     assert f"{holder.session_name}\t{raw}" in listed
 
     observed = tmp_path / "provider-observed-marker"
+    # Query by the same immutable session ID used by runtime marker reads.
+    # Older tmux releases do not consistently resolve a pane target for a
+    # session-scoped user option after respawn-pane.
     script = (
-        f'tmux show-options -v -t "$TMUX_PANE" '
+        f'tmux show-options -v -t {shlex.quote(holder.session_id)} '
         f'{shlex.quote(orphan_marker.OPTION_NAME)} > '
         f'{shlex.quote(str(observed))}; sleep 60'
     )
