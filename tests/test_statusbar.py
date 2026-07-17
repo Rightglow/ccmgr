@@ -15,7 +15,8 @@ def app(tmp_path, monkeypatch):
     # App startup normally re-adopts real detached tmux sessions. Status tests
     # must not inherit the developer machine's external tmux/Codex state or
     # depend on which optional command-line tools the test runner installed.
-    monkeypatch.setattr(app_mod.App, "_discover_orphans", lambda self: None)
+    monkeypatch.setattr(
+        app_mod.App, "_discover_orphans", lambda self, state=None: None)
     monkeypatch.setattr(app_mod.tmux_ctl, "has_tmux", lambda: True)
     real_which = app_mod.shutil.which
     monkeypatch.setattr(

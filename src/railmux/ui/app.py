@@ -7,6 +7,7 @@ session-info popup.
 """
 from __future__ import annotations
 
+import math
 import shutil
 import threading
 import time
@@ -164,6 +165,11 @@ _TMUX_LEVEL_STYLE = {
 # would make rows jump under the cursor mid-click, so it's throttled to this.
 _RUNNING_SORT_INTERVAL = 60.0
 
+# Cross-platform identity stamp stored on each detached agent tmux session.
+# Unlike the short-lived runtime state file, a session option lives exactly as
+# long as the tmux session and survives Railmux restarts without renaming it.
+_SESSION_BINDING_OPTION = "@railmux_binding_v1"
+
 
 @dataclass
 class _Running:
@@ -184,6 +190,11 @@ class _Running:
     # launched. A placeholder must only ever bind a session id NOT in this set,
     # so a rollout another process wrote to the same cwd can't be mis-bound (#12).
     pre_launch_ids: frozenset[str] = frozenset()
+    # False for stamp-only unresolved recovery: without the complete launch
+    # snapshot and without procfs, an exactly-one heuristic could bind a
+    # pre-existing same-cwd rollout. Such entries wait for authoritative
+    # correlation or a later state-enriched restart.
+    allow_heuristic_resolution: bool = True
     status: str = "idle"                   # "idle" | "busy" | "blocked"
     last_mtime: float = 0.0                # session JSONL mtime, for recency sort
     session_type: str = "claude"           # "claude" | "codex" — which CLI owns it
@@ -627,11 +638,14 @@ class App:
         # prevent a new App process from launching.
         if tmux_ctl.in_tmux():
             recover_interrupted_swaps()
-        # Recover sessions left alive from a previous soft-quit.
-        self._discover_orphans()
+        state = self._load_state()
+        # Recover sessions left alive from a previous soft-quit.  Load the
+        # state first: a resolved session may intentionally retain its
+        # ``cx-new---*`` tmux name, so the tmux name alone is not enough to
+        # reconstruct the real session id on platforms without procfs.
+        self._running_recovery_ok = self._discover_orphans(state)
         # Restore the view from a previous soft-quit, or auto-select the
         # most recent project as usual.
-        state = self._load_state()
         # Restore the mode BEFORE choosing a project so selection resolves
         # against the correct provider source. ``codex_mode`` remains a read-only
         # migration path for state files written by Railmux <= 0.1.1.
@@ -893,7 +907,9 @@ class App:
         self._pending_restore_state = None
         if state is None:
             return
-        self._restore_right_pane(state)
+        restored = self._restore_right_pane(state)
+        if not restored or not getattr(self, "_running_recovery_ok", True):
+            return
         try:
             self._state_path().unlink(missing_ok=True)
         except OSError:
@@ -1397,6 +1413,17 @@ class App:
         """
         existing = self._running.get(key)
         tmux_name = existing.tmux_name if existing else self._session_name(key)
+        # Never adopt an untracked pre-existing tmux session merely because its
+        # deterministic name collides.  Resume discovery must validate and
+        # register it first; otherwise stamping/reusing it here could hijack an
+        # unrelated or duplicate writer in the click-to-launch race window.
+        if existing is None and tmux_ctl.session_exists(tmux_name):
+            msg = (
+                f"Launch refused: untracked live tmux session '{tmux_name}'"
+            )
+            self._set_status(msg, "error")
+            self._show_error(msg)
+            return False
         # #12: snapshot the session ids already present in the launch cwd BEFORE
         # starting the child, so placeholder resolution only ever binds a NEWLY
         # appeared id — never a rollout another process wrote to the same cwd.
@@ -1422,6 +1449,7 @@ class App:
             session_type=session_type,
             pre_launch_ids=pre_launch_ids,
         )
+        self._stamp_running(self._running[key])
         if not self._attach_in_right_pane(tmux_name, steal_focus=steal_focus):
             msg = "Launch failed: could not attach to agent pane"
             self._set_status(msg, "error")
@@ -1432,6 +1460,54 @@ class App:
 
     def _launch_resume(self, session_meta: SessionMeta,
                         *, steal_focus: bool = True) -> None:
+        # Revalidate at action time.  A row can be stale, and an older Railmux
+        # may have left a live placeholder writer that startup could not adopt.
+        # Discover once more before ever running ``codex resume``/``claude
+        # --resume`` so a click cannot create a second writer for one session.
+        registry = getattr(self, "_running", None)
+        running = registry.get(session_meta.session_id) if registry is not None else None
+        if (registry is not None
+                and (running is None
+                     or not self._agent_session_alive(running.tmux_name))):
+            self._discover_orphans()
+            # Discovery may restore a still-unresolved placeholder under its
+            # placeholder key. Promote it synchronously before deciding the
+            # real UUID is stopped; waiting for the next poll recreates the
+            # exact click-to-duplicate window this guard is meant to close.
+            self._resolve_placeholders([session_meta.project])
+            running = self._running.get(session_meta.session_id)
+        if (running is not None
+                and self._agent_session_alive(running.tmux_name)):
+            self._on_running_select(
+                RunningEntry(
+                    tmux_name=running.tmux_name,
+                    label=running.label,
+                    status=running.status,
+                ),
+                steal_focus=steal_focus,
+            )
+            return
+
+        if registry is not None:
+            target_path = self._path_key(session_meta.project.real_path)
+            ambiguous_live_placeholder = any(
+                candidate.is_placeholder
+                and candidate.session_type == session_meta.session_type
+                and candidate.placeholder_path is not None
+                and self._path_key(candidate.placeholder_path) == target_path
+                and session_meta.session_id not in candidate.pre_launch_ids
+                and self._agent_session_alive(candidate.tmux_name)
+                for candidate in self._running.values()
+            )
+            if ambiguous_live_placeholder:
+                msg = (
+                    "Resume deferred: a live initializing agent in this "
+                    "project could own this session"
+                )
+                self._set_status(msg, "error")
+                self._show_error(msg)
+                return
+
         cwd = session_meta.project.real_path
         env: dict[str, str] | None = None
         if session_meta.session_type == "codex":
@@ -1714,6 +1790,10 @@ class App:
 
     def _soft_quit(self) -> None:
         """Soft quit: set flag so ``_teardown_tmux`` skips session kill."""
+        # Save again at the point of commitment.  The confirmation modal may
+        # have been open for a while and placeholder bindings can resolve in
+        # the meantime.
+        self._save_state()
         self._soft_quit_flag = True
         self._close_modal()
         raise urwid.ExitMainLoop()
@@ -1755,6 +1835,35 @@ class App:
             data["right_tmux"] = slot.agent_tmux_name
         else:
             data["right_kind"] = "empty"
+        # Persist the registry binding, not just the right-pane target.  A
+        # placeholder tmux name is deliberately process-unique and is retained
+        # even after ``_Running.key`` becomes the real UUID; without this map a
+        # restart cannot recover that UUID safely on macOS (no /proc), and the
+        # Sessions row appears non-running despite a live agent.
+        bindings: list[dict] = []
+        for running in self._running.values():
+            cwd = (
+                running.placeholder_path
+                if running.is_placeholder
+                else running.project.real_path if running.project is not None
+                else None
+            )
+            if cwd is None:
+                continue
+            item = {
+                "key": running.key,
+                "tmux_name": running.tmux_name,
+                "session_type": running.session_type,
+                "cwd": str(cwd),
+            }
+            if running.is_placeholder:
+                item["created_at"] = running.created_at
+                item["pre_launch_ids"] = sorted(running.pre_launch_ids)
+                item["pre_launch_complete"] = True
+            bindings.append(item)
+        if bindings:
+            data["running_bindings_version"] = 1
+            data["running_bindings"] = bindings
         import json
         path = self._state_path()
         try:
@@ -1768,9 +1877,10 @@ class App:
         import json
         path = self._state_path()
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
+        return data if isinstance(data, dict) else None
 
     def _mode_key_from_state(self, state: dict | None) -> str:
         """Resolve new registry state, then the <=0.1.1 Codex boolean."""
@@ -1784,12 +1894,34 @@ class App:
             return registry.resolve(CODEX_MODE.key).key
         return registry.default_key
 
-    def _restore_right_pane(self, state: dict) -> None:
+    def _restore_right_pane(self, state: dict) -> bool:
         """Re-open the right pane to its state at soft-quit time."""
         kind = state.get("right_kind")
         if kind in ("agent", "claude"):  # "claude" written by <=0.1.1
             tmux_name = state.get("right_tmux")
             if tmux_name and tmux_ctl.session_exists(tmux_name):
+                running = self._by_tmux(tmux_name)
+                if running is None:
+                    # If the requested tmux was a historical duplicate, a
+                    # validated state binding may lead to the canonical writer
+                    # selected during discovery. Never attach an unrepresented
+                    # live process directly.
+                    for raw in state.get("running_bindings", []):
+                        if (isinstance(raw, dict)
+                                and raw.get("tmux_name") == tmux_name
+                                and isinstance(raw.get("key"), str)):
+                            running = self._running.get(raw["key"])
+                            if running is not None:
+                                tmux_name = running.tmux_name
+                            break
+                if running is None:
+                    msg = (
+                        "Restore deferred: previous agent could not be "
+                        "validated"
+                    )
+                    self._set_status(msg, "error")
+                    self._show_error(msg)
+                    return False
                 ok = self._attach_in_right_pane(tmux_name, steal_focus=False)
                 if not ok:
                     msg = (
@@ -1798,6 +1930,8 @@ class App:
                     )
                     self._set_status(msg, "error")
                     self._show_error(msg)
+                    return False
+            return True
         elif kind == "preview":
             sess_id = state.get("right_session")
             if sess_id and self._selected_project is not None:
@@ -1810,8 +1944,168 @@ class App:
                         meta.jsonl_path, session_type=meta.session_type):
                     self._primary_slot.in_history_mode = True
                     self._set_active_target(meta.session_id, None)
+                    return True
+                return False
+        return True
 
-    def _discover_orphans(self) -> None:
+    @staticmethod
+    def _path_key(path: Path) -> Path:
+        try:
+            return path.resolve()
+        except OSError:
+            return path
+
+    @staticmethod
+    def _placeholder_tmux_key(name: str, mode: AgentMode) -> str | None:
+        """Reverse a generated placeholder tmux name to its registry key.
+
+        ``_safe_name('__new__-abc-1')`` is ``'new---abc-1'`` because the two
+        underscores become dashes and leading dashes are stripped.  The old
+        recovery check looked for the impossible literal ``'__new__-'`` in a
+        tmux name, so it neither identified nor recovered real placeholders.
+        """
+        if not name.startswith(mode.tmux_prefix):
+            return None
+        remainder = name[len(mode.tmux_prefix):]
+        if not remainder.startswith("new---"):
+            return None
+        key = "__new__-" + remainder[len("new---"):]
+        return key if App._safe_name(key, len(key)) == remainder else None
+
+    def _valid_running_binding(
+        self,
+        raw: object,
+        live: dict[str, tuple[Path, int]],
+        projects: dict[Path, Project],
+    ) -> _Running | None:
+        """Validate one state-file binding against current tmux and metadata.
+
+        The runtime file is a cache, not authority: every string is bounded,
+        the tmux session/provider/cwd must still agree, and real ids must still
+        resolve to metadata in that cwd.  On Linux a positive rollout-fd probe
+        also vetoes a stale mapping that points at a different live writer.
+        """
+        if not isinstance(raw, dict):
+            return None
+        key = raw.get("key")
+        tmux_name = raw.get("tmux_name")
+        session_type = raw.get("session_type")
+        cwd_raw = raw.get("cwd")
+        if not all(isinstance(v, str) for v in
+                   (key, tmux_name, session_type, cwd_raw)):
+            return None
+        if (not key or len(key) > 256 or not tmux_name or len(tmux_name) > 256
+                or session_type not in {"claude", "codex"}
+                or not cwd_raw or len(cwd_raw) > 4096):
+            return None
+        cwd = Path(cwd_raw)
+        if not cwd.is_absolute() or tmux_name not in live:
+            return None
+        live_cwd, _created = live[tmux_name]
+        if self._path_key(cwd) != self._path_key(live_cwd):
+            return None
+        mode = self._modes().for_tmux_name(tmux_name)
+        if mode is None or mode.session_type != session_type:
+            return None
+        project = projects.get(self._path_key(cwd))
+        if project is None:
+            return None
+
+        if key.startswith("__new__-"):
+            if self._placeholder_tmux_key(tmux_name, mode) != key:
+                return None
+            created_at = raw.get("created_at", 0.0)
+            if (not isinstance(created_at, (int, float))
+                    or isinstance(created_at, bool)
+                    or not math.isfinite(float(created_at))
+                    or float(created_at) < 0):
+                return None
+            pre_raw = raw.get("pre_launch_ids", [])
+            if (not isinstance(pre_raw, list) or len(pre_raw) > 100000
+                    or any(not isinstance(item, str) or len(item) > 256
+                           for item in pre_raw)):
+                return None
+            pre_launch_complete = raw.get(
+                "pre_launch_complete", "pre_launch_ids" in raw)
+            if not isinstance(pre_launch_complete, bool):
+                return None
+            return _Running(
+                key=key,
+                tmux_name=tmux_name,
+                label=f"{project.display_name}/(new)",
+                project=project,
+                placeholder_path=cwd,
+                created_at=float(created_at),
+                pre_launch_ids=frozenset(pre_raw),
+                allow_heuristic_resolution=pre_launch_complete,
+                session_type=session_type,
+            )
+
+        if session_type == "codex":
+            meta = self._codex_index.get(key, refresh=False)
+            if (meta is None
+                    or self._path_key(meta.project.real_path) != self._path_key(cwd)):
+                return None
+            try:
+                open_ids = tmux_ctl.session_rollout_ids(
+                    tmux_name, self._codex_home_path() / "sessions")
+            except Exception:
+                open_ids = None
+            # An empty set is a transient/permission failure and does not
+            # disprove the persisted mapping.  A non-empty set naming other
+            # rollouts but not this id does disprove it.
+            if open_ids and key not in open_ids:
+                return None
+        else:
+            meta = self._session_cache.get(project, key)
+            if meta is None:
+                return None
+        return _Running(
+            key=key,
+            tmux_name=tmux_name,
+            label=f"{project.display_name}/{meta.display_title}",
+            project=project,
+            status=meta.status,
+            last_mtime=meta.last_mtime,
+            session_type=session_type,
+        )
+
+    def _running_binding_data(self, running: _Running) -> dict | None:
+        cwd = (
+            running.placeholder_path
+            if running.is_placeholder
+            else running.project.real_path if running.project is not None
+            else None
+        )
+        if cwd is None:
+            return None
+        data = {
+            "key": running.key,
+            "tmux_name": running.tmux_name,
+            "session_type": running.session_type,
+            "cwd": str(cwd),
+        }
+        if running.is_placeholder:
+            data["created_at"] = running.created_at
+            # The potentially-large exclusion set lives in the atomic runtime
+            # state, not in a tmux command argument. A stamp alone therefore
+            # identifies the process but must not authorize heuristic binding.
+            data["pre_launch_complete"] = False
+        return data
+
+    def _stamp_running(self, running: _Running) -> bool:
+        """Best-effort identity stamp for cross-platform orphan recovery."""
+        import json
+        data = self._running_binding_data(running)
+        if data is None:
+            return False
+        return tmux_ctl.set_session_user_option(
+            running.tmux_name,
+            _SESSION_BINDING_OPTION,
+            json.dumps(data, separators=(",", ":"), sort_keys=True),
+        )
+
+    def _discover_orphans(self, state: dict | None = None) -> bool:
         """Find registered agent tmux sessions and rebuild ``_running``.
 
         Called at startup so a soft-quit → restart cycle picks up every
@@ -1826,19 +2120,14 @@ class App:
         try:
             out = _sp.check_output(
                 ["tmux", "list-sessions", "-F",
-                 "#{session_name}\t#{pane_current_path}"],
+                 "#{session_name}\t#{pane_current_path}\t#{session_created}"
+                 f"\t#{{{_SESSION_BINDING_OPTION}}}"],
                 stderr=_sp.DEVNULL, text=True,
             )
         except (OSError, _sp.CalledProcessError):
-            return
-        def _path_key(path: Path) -> Path:
-            try:
-                return path.resolve()
-            except OSError:
-                return path
-
+            return False
         projects = {
-            _path_key(p.real_path): p
+            self._path_key(p.real_path): p
             for p in list_projects(self._claude_home)
         }
         # A Codex-only cwd has no Claude project directory. Include synthetic
@@ -1852,40 +2141,138 @@ class App:
         if has_codex_session:
             for cwd, count in self._codex_index.all_cwds().items():
                 projects.setdefault(
-                    _path_key(cwd), self._synthesise_codex_project(cwd, count))
+                    self._path_key(cwd), self._synthesise_codex_project(cwd, count))
+
+        live: dict[str, tuple[Path, int]] = {}
+        stamps: dict[str, object] = {}
+        for line in out.splitlines():
+            parts = line.split("\t", 3)
+            if len(parts) not in (2, 3, 4) or not parts[0] or not parts[1]:
+                continue
+            try:
+                created = int(parts[2]) if len(parts) >= 3 and parts[2] else 0
+            except ValueError:
+                created = 0
+            live[parts[0]] = (Path(parts[1]), created)
+            if len(parts) == 4 and parts[3]:
+                try:
+                    import json
+                    stamps[parts[0]] = json.loads(parts[3])
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
         found = 0
-        for line in out.strip().splitlines():
-            if not line.strip():
+        # Discovery is also called as a resume-time race guard, not only on an
+        # empty startup registry. Never re-adopt a tmux already represented by
+        # a placeholder key under a second real-id key.
+        claimed_tmux: set[str] = {
+            running.tmux_name for running in self._running.values()
+        }
+        state_bindings = (
+            state.get("running_bindings", [])
+            if (isinstance(state, dict)
+                and state.get("running_bindings_version") == 1
+                and isinstance(state.get("running_bindings"), list))
+            else []
+        )
+        # A tmux-local stamp is the primary source: it has the same lifetime as
+        # the live agent session and works on platforms without procfs.
+        for name, raw in sorted(
+                stamps.items(), key=lambda item: (live[item[0]][1], item[0])):
+            enriched = raw
+            # An unresolved stamp identifies the process, while the runtime
+            # state carries its potentially-large pre-launch exclusion set.
+            # Merge the latter so macOS heuristic resolution stays fenced.
+            if isinstance(raw, dict) and str(raw.get("key", "")).startswith(
+                    "__new__-"):
+                for saved in state_bindings:
+                    if (isinstance(saved, dict)
+                            and saved.get("tmux_name") == name
+                            and saved.get("key") == raw.get("key")):
+                        enriched = dict(raw)
+                        if "pre_launch_ids" in saved:
+                            enriched["pre_launch_ids"] = saved["pre_launch_ids"]
+                            enriched["pre_launch_complete"] = True
+                        break
+            running = self._valid_running_binding(enriched, live, projects)
+            if running is None or running.tmux_name != name:
                 continue
-            parts = line.split("\t", 1)
-            if len(parts) != 2:
+            if running.key in self._running:
                 continue
-            name, cwd_str = parts
+            self._running[running.key] = running
+            claimed_tmux.add(name)
+            found += 1
+
+        if state_bindings:
+            for raw in state_bindings:
+                running = self._valid_running_binding(raw, live, projects)
+                if running is None or running.tmux_name in claimed_tmux:
+                    continue
+                # A valid persisted binding is authoritative.  Duplicate state
+                # entries cannot replace an already-restored real id.
+                if running.key in self._running:
+                    continue
+                self._running[running.key] = running
+                claimed_tmux.add(running.tmux_name)
+                self._stamp_running(running)
+                found += 1
+
+        # Oldest writer wins among unpersisted duplicates.  This is important
+        # for recovery from the historical bug: clicking a falsely non-running
+        # row created a newer stable-name writer for the same rollout while the
+        # original placeholder writer was still working.
+        for name, (cwd, _created) in sorted(
+                live.items(), key=lambda item: (item[1][1], item[0])):
+            if name in claimed_tmux:
+                continue
             mode = self._modes().for_tmux_name(name)
             if mode is None:
                 continue
             truncated = name[len(mode.tmux_prefix):]
-            # A session still on its __new__-* placeholder name (soft-quit
-            # before its real UUID resolved) is dropped here — full orphan
-            # re-adoption of placeholders stays deferred. The dangerous part
-            # (#11 — a fresh process reusing an old placeholder name and
-            # attaching to a surviving orphan) is already removed: placeholder
-            # names are namespaced with a per-process token (_new_placeholder_key),
-            # so a restart can no longer regenerate a previous placeholder name.
-            if truncated.startswith("__new__-"):
-                continue
-            cwd = Path(cwd_str)
-            project = projects.get(_path_key(cwd))
+            project = projects.get(self._path_key(cwd))
             if project is None:
                 continue
-            # Resolve the truncated key back to the full session_id.
-            if mode.project_source == ProjectSource.CODEX:
-                # For Codex sessions, look up in the codex index.
-                full_id = self._resolve_truncated_codex_id(truncated, cwd)
+
+            placeholder_key = self._placeholder_tmux_key(name, mode)
+            if placeholder_key is not None:
+                # State-free recovery is exact on Linux: the live Codex process
+                # tells us which rollout(s) it has open.  Restrict matches to
+                # indexed metadata in this cwd; ambiguity is never guessed.
+                if mode.project_source != ProjectSource.CODEX:
+                    continue
+                try:
+                    open_ids = tmux_ctl.session_rollout_ids(
+                        name, self._codex_home_path() / "sessions")
+                except Exception:
+                    open_ids = None
+                if not open_ids:
+                    continue
+                matches = [
+                    session_id for session_id in open_ids
+                    if (meta := self._codex_index.get(session_id, refresh=False))
+                    is not None
+                    and self._path_key(meta.project.real_path) == self._path_key(cwd)
+                ]
+                if len(matches) != 1:
+                    continue
+                full_id = matches[0]
             else:
-                full_id = self._resolve_truncated_id(truncated, project)
+                # Resolve the truncated key back to the full session_id.
+                if mode.project_source == ProjectSource.CODEX:
+                    full_id = self._resolve_truncated_codex_id(truncated, cwd)
+                else:
+                    full_id = self._resolve_truncated_id(truncated, project)
             if full_id is None:
                 continue
+            if (mode.project_source == ProjectSource.CODEX
+                    and placeholder_key is None):
+                try:
+                    writer_ids = tmux_ctl.session_rollout_ids(
+                        name, self._codex_home_path() / "sessions")
+                except Exception:
+                    writer_ids = None
+                if writer_ids and full_id not in writer_ids:
+                    continue
             if full_id in self._running:
                 continue
             self._running[full_id] = _Running(
@@ -1895,10 +2282,24 @@ class App:
                 project=project,
                 session_type=mode.session_type,
             )
+            claimed_tmux.add(name)
+            self._stamp_running(self._running[full_id])
             found += 1
         if found:
             self._set_status(
                 f"Found {found} running session(s)")
+        expected_live = {
+            raw.get("tmux_name")
+            for raw in state_bindings
+            if (isinstance(raw, dict)
+                and isinstance(raw.get("tmux_name"), str)
+                and raw.get("tmux_name") in live
+                and self._modes().for_tmux_name(raw["tmux_name"]) is not None)
+        }
+        # Retain the state file when a live persisted agent was left unclaimed;
+        # a transient index/project read failure must not destroy the only
+        # no-procfs recovery record.
+        return expected_live <= claimed_tmux
 
     @staticmethod
     def _resolve_truncated_id(truncated: str, project: Project) -> str | None:
@@ -2815,6 +3216,8 @@ class App:
                 # did, a concurrent codex/railmux is writing the same cwd and we
                 # can't tell which is ours — leave the placeholder rather than
                 # risk binding (and later resuming/deleting) the wrong one (#12).
+                if not r.allow_heuristic_resolution:
+                    continue
                 if len(candidates) != 1:
                     continue
                 candidate = candidates[0]
@@ -2826,6 +3229,7 @@ class App:
             r.placeholder_path = None
             r.created_at = 0.0
             self._running[candidate.session_id] = r
+            self._stamp_running(r)
             claimed.add(candidate.session_id)
             if self._primary_slot.agent_tmux_name == r.tmux_name:
                 self._set_active_target(candidate.session_id, r.tmux_name)

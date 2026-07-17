@@ -18,6 +18,14 @@ from railmux.ui.modals import QuitConfirmModal
 
 # ── helpers ──────────────────────────────────────────────────────────────
 
+@pytest.fixture(autouse=True)
+def _isolate_tmux_identity_stamps(monkeypatch):
+    """Unit tests never write options into the developer's real tmux server."""
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.set_session_user_option",
+        lambda *_args, **_kwargs: True,
+    )
+
 def _project(name: str = "test-proj", claude_dir: Path | None = None) -> Project:
     return Project(
         real_path=Path(f"/tmp/{name}"),
@@ -168,6 +176,64 @@ def test_save_state_persists_codex_mode(tmp_path, monkeypatch):
     assert data["codex_mode"] is True
 
 
+def test_save_state_persists_real_binding_with_placeholder_tmux_name(
+        tmp_path, monkeypatch):
+    """Resolution re-keys the registry but intentionally keeps cx-new---*.
+
+    The soft-restart state must retain that otherwise-invisible association.
+    """
+    monkeypatch.setattr(
+        App, "_state_path", staticmethod(lambda: tmp_path / "state.json"))
+    project = _project("codex-proj")
+    session_id = "12345678-1234-1234-1234-1234567890ab"
+    app = _minimal_app(selected_project=project)
+    app._running[session_id] = _Running(
+        key=session_id,
+        tmux_name="cx-new---abcdef-1",
+        label="codex-proj/resolved",
+        project=project,
+        session_type="codex",
+    )
+
+    app._save_state()
+
+    data = app._load_state()
+    assert data["running_bindings_version"] == 1
+    assert data["running_bindings"] == [{
+        "key": session_id,
+        "tmux_name": "cx-new---abcdef-1",
+        "session_type": "codex",
+        "cwd": str(project.real_path),
+    }]
+
+
+def test_save_state_persists_unresolved_placeholder_context(
+        tmp_path, monkeypatch):
+    """macOS needs launch context to resume safe heuristic resolution."""
+    monkeypatch.setattr(
+        App, "_state_path", staticmethod(lambda: tmp_path / "state.json"))
+    project = _project("codex-proj")
+    key = "__new__-abcdef-1"
+    app = _minimal_app(selected_project=project)
+    app._running[key] = _Running(
+        key=key,
+        tmux_name="cx-new---abcdef-1",
+        label="codex-proj/(new)",
+        project=project,
+        placeholder_path=project.real_path,
+        created_at=1234.5,
+        pre_launch_ids=frozenset({"old-b", "old-a"}),
+        session_type="codex",
+    )
+
+    app._save_state()
+
+    binding = app._load_state()["running_bindings"][0]
+    assert binding["key"] == key
+    assert binding["created_at"] == 1234.5
+    assert binding["pre_launch_ids"] == ["old-a", "old-b"]
+
+
 def test_load_state_without_codex_mode_defaults_falsy(tmp_path, monkeypatch):
     """Backward-compat: an old state file lacking codex_mode restores as Claude."""
     p = tmp_path / "state.json"
@@ -248,6 +314,14 @@ def test_load_state_invalid_json_returns_none(tmp_path):
         assert app._load_state() is None
 
 
+def test_load_state_rejects_non_object_json(tmp_path):
+    p = tmp_path / "bad-shape.json"
+    p.write_text("[]")
+    app = _minimal_app()
+    with patch.object(App, "_state_path", return_value=p):
+        assert app._load_state() is None
+
+
 # ── _discover_orphans parsing ────────────────────────────────────────────
 
 def test_discover_orphans_finds_cc_sessions():
@@ -289,6 +363,404 @@ def test_discover_orphans_finds_codex_only_project():
     assert running.session_type == "codex"
     assert running.project.real_path == cwd
     assert running.project.claude_dir == Path()
+
+
+def _codex_meta(project: Project, session_id: str) -> SessionMeta:
+    return SessionMeta(
+        project=project,
+        session_id=session_id,
+        jsonl_path=Path("/tmp/rollout.jsonl"),
+        title="Recovered",
+        message_count=1,
+        token_total=1,
+        last_mtime=1000.0,
+        status="idle",
+        session_type="codex",
+    )
+
+
+def test_discover_orphans_recovers_codex_placeholder_from_procfs(monkeypatch):
+    """A state-free Linux restart re-adopts the exact live rollout writer."""
+    cwd = Path("/tmp/codex-only")
+    project = _project("codex-only")
+    session_id = "12345678-1234-1234-1234-1234567890ab"
+    meta = _codex_meta(project, session_id)
+    app = _minimal_app()
+    app._codex_mode = True
+    app._codex_index = MagicMock()
+    app._codex_index.all_cwds.return_value = {cwd: 1}
+    app._codex_index.get.side_effect = (
+        lambda candidate, refresh=False: meta if candidate == session_id else None)
+    app._codex_home_path = lambda: Path("/tmp/codex-home")
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.session_rollout_ids",
+        lambda name, root: {session_id},
+    )
+
+    with patch(
+            "subprocess.check_output",
+            return_value=f"cx-new---abcdef-1\t{cwd}\t100\n"), patch(
+            "railmux.ui.app.list_projects", return_value=[]):
+        app._discover_orphans()
+
+    assert app._running[session_id].tmux_name == "cx-new---abcdef-1"
+    assert not app._running[session_id].is_placeholder
+
+
+def test_discover_orphans_restores_persisted_binding_without_procfs(
+        monkeypatch):
+    """A validated state binding is the cross-platform soft-restart path."""
+    cwd = Path("/tmp/codex-only")
+    project = _project("codex-only")
+    session_id = "12345678-1234-1234-1234-1234567890ab"
+    meta = _codex_meta(project, session_id)
+    app = _minimal_app()
+    app._codex_index = MagicMock()
+    app._codex_index.all_cwds.return_value = {cwd: 1}
+    app._codex_index.get.return_value = meta
+    app._codex_home_path = lambda: Path("/tmp/codex-home")
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.session_rollout_ids", lambda *a: None)
+    state = {
+        "running_bindings_version": 1,
+        "running_bindings": [{
+            "key": session_id,
+            "tmux_name": "cx-new---abcdef-1",
+            "session_type": "codex",
+            "cwd": str(cwd),
+        }],
+    }
+
+    with patch(
+            "subprocess.check_output",
+            return_value=f"cx-new---abcdef-1\t{cwd}\t100\n"), patch(
+            "railmux.ui.app.list_projects", return_value=[]):
+        app._discover_orphans(state)
+
+    assert app._running[session_id].tmux_name == "cx-new---abcdef-1"
+    assert app._running[session_id].label.endswith("/Recovered")
+
+
+def test_discover_orphans_prefers_valid_tmux_stamp_without_procfs(monkeypatch):
+    """The live session-local stamp is the primary cross-platform identity."""
+    cwd = Path("/tmp/codex-only")
+    project = _project("codex-only")
+    session_id = "12345678-1234-1234-1234-1234567890ab"
+    meta = _codex_meta(project, session_id)
+    app = _minimal_app()
+    app._codex_index = MagicMock()
+    app._codex_index.all_cwds.return_value = {cwd: 1}
+    app._codex_index.get.return_value = meta
+    app._codex_home_path = lambda: Path("/tmp/codex-home")
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.session_rollout_ids", lambda *a: None)
+    stamp = json.dumps({
+        "key": session_id,
+        "tmux_name": "cx-new---abcdef-1",
+        "session_type": "codex",
+        "cwd": str(cwd),
+    }, separators=(",", ":"), sort_keys=True)
+
+    with patch(
+            "subprocess.check_output",
+            return_value=f"cx-new---abcdef-1\t{cwd}\t100\t{stamp}\n"), patch(
+            "railmux.ui.app.list_projects", return_value=[]):
+        app._discover_orphans()
+
+    assert app._running[session_id].tmux_name == "cx-new---abcdef-1"
+
+
+def test_stamp_running_writes_session_local_identity(monkeypatch):
+    project = _project("codex-only")
+    running = _Running(
+        key="12345678-1234-1234-1234-1234567890ab",
+        tmux_name="cx-new---abcdef-1",
+        label="label",
+        project=project,
+        session_type="codex",
+    )
+    app = _minimal_app()
+    set_option = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.set_session_user_option", set_option)
+
+    assert app._stamp_running(running) is True
+
+    tmux_name, option, raw = set_option.call_args.args
+    assert tmux_name == running.tmux_name
+    assert option == "@railmux_binding_v1"
+    assert json.loads(raw)["key"] == running.key
+
+
+def test_discover_orphans_restores_unresolved_placeholder_state(monkeypatch):
+    """Launch snapshots survive restart until normal polling can resolve them."""
+    cwd = Path("/tmp/codex-only")
+    key = "__new__-abcdef-1"
+    app = _minimal_app()
+    app._codex_index = MagicMock()
+    app._codex_index.all_cwds.return_value = {cwd: 1}
+    state = {
+        "running_bindings_version": 1,
+        "running_bindings": [{
+            "key": key,
+            "tmux_name": "cx-new---abcdef-1",
+            "session_type": "codex",
+            "cwd": str(cwd),
+            "created_at": 123.0,
+            "pre_launch_ids": ["old-session"],
+        }],
+    }
+
+    with patch(
+            "subprocess.check_output",
+            return_value=f"cx-new---abcdef-1\t{cwd}\t100\n"), patch(
+            "railmux.ui.app.list_projects", return_value=[]):
+        app._discover_orphans(state)
+
+    running = app._running[key]
+    assert running.is_placeholder
+    assert running.created_at == 123.0
+    assert running.pre_launch_ids == frozenset({"old-session"})
+
+
+def test_unresolved_stamp_merges_state_pre_launch_fence(monkeypatch):
+    """Stamp identity must not discard the macOS anti-misbinding snapshot."""
+    cwd = Path("/tmp/codex-only")
+    key = "__new__-abcdef-1"
+    app = _minimal_app()
+    app._codex_index = MagicMock()
+    app._codex_index.all_cwds.return_value = {cwd: 1}
+    stamp = json.dumps({
+        "key": key,
+        "tmux_name": "cx-new---abcdef-1",
+        "session_type": "codex",
+        "cwd": str(cwd),
+        "created_at": 123.0,
+    }, separators=(",", ":"), sort_keys=True)
+    state = {
+        "running_bindings_version": 1,
+        "running_bindings": [{
+            "key": key,
+            "tmux_name": "cx-new---abcdef-1",
+            "session_type": "codex",
+            "cwd": str(cwd),
+            "created_at": 123.0,
+            "pre_launch_ids": ["old-session"],
+        }],
+    }
+
+    with patch(
+            "subprocess.check_output",
+            return_value=f"cx-new---abcdef-1\t{cwd}\t100\t{stamp}\n"), patch(
+            "railmux.ui.app.list_projects", return_value=[]):
+        app._discover_orphans(state)
+
+    assert app._running[key].pre_launch_ids == frozenset({"old-session"})
+
+
+def test_discover_orphans_rejects_persisted_binding_with_wrong_cwd(
+        monkeypatch):
+    """A stale/untrusted state file cannot bind a live tmux from another cwd."""
+    live_cwd = Path("/tmp/live")
+    saved_cwd = Path("/tmp/saved")
+    session_id = "12345678-1234-1234-1234-1234567890ab"
+    app = _minimal_app()
+    app._codex_index = MagicMock()
+    app._codex_index.all_cwds.return_value = {live_cwd: 1, saved_cwd: 1}
+    app._codex_index.get.return_value = None
+    app._codex_home_path = lambda: Path("/tmp/codex-home")
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.session_rollout_ids", lambda *a: set())
+    state = {
+        "running_bindings_version": 1,
+        "running_bindings": [{
+            "key": session_id,
+            "tmux_name": "cx-new---abcdef-1",
+            "session_type": "codex",
+            "cwd": str(saved_cwd),
+        }],
+    }
+
+    with patch(
+            "subprocess.check_output",
+            return_value=f"cx-new---abcdef-1\t{live_cwd}\t100\n"), patch(
+            "railmux.ui.app.list_projects", return_value=[]):
+        complete = app._discover_orphans(state)
+
+    assert app._running == {}
+    assert complete is False
+
+
+def test_discover_orphans_duplicate_uuid_keeps_oldest_writer(monkeypatch):
+    """Historical duplicate resumes never replace the original live writer."""
+    cwd = Path("/tmp/codex-only")
+    project = _project("codex-only")
+    session_id = "12345678-1234-1234-1234-1234567890ab"
+    meta = _codex_meta(project, session_id)
+    app = _minimal_app()
+    app._codex_index = MagicMock()
+    app._codex_index.all_cwds.return_value = {cwd: 1}
+    app._codex_index.get.side_effect = (
+        lambda candidate, refresh=False: meta if candidate == session_id else None)
+    app._resolve_truncated_codex_id = MagicMock(return_value=session_id)
+    app._codex_home_path = lambda: Path("/tmp/codex-home")
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.session_rollout_ids",
+        lambda name, root: {session_id},
+    )
+    stable = f"cx-{App._safe_name(session_id, 16)}"
+    output = (
+        f"{stable}\t{cwd}\t200\n"
+        f"cx-new---abcdef-1\t{cwd}\t100\n"
+    )
+
+    with patch("subprocess.check_output", return_value=output), patch(
+            "railmux.ui.app.list_projects", return_value=[]):
+        app._discover_orphans()
+
+    assert app._running[session_id].tmux_name == "cx-new---abcdef-1"
+
+
+def test_restore_right_pane_refuses_unrepresented_live_tmux(monkeypatch):
+    """Pane restoration cannot bypass the exactly-once running registry."""
+    app = _minimal_app()
+    app._attach_in_right_pane = MagicMock(return_value=True)
+    app._set_status = MagicMock()
+    app._show_error = MagicMock()
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.session_exists", lambda _name: True)
+
+    restored = app._restore_right_pane({
+        "right_kind": "agent",
+        "right_tmux": "cx-untracked",
+    })
+
+    assert restored is False
+    app._attach_in_right_pane.assert_not_called()
+
+
+def test_pending_restore_retains_state_after_incomplete_running_recovery(
+        tmp_path, monkeypatch):
+    state_path = tmp_path / "state.json"
+    state_path.write_text("{}")
+    app = _minimal_app()
+    app._pending_restore_state = {"right_kind": "empty"}
+    app._running_recovery_ok = False
+    app._restore_right_pane = MagicMock(return_value=True)
+    monkeypatch.setattr(App, "_state_path", staticmethod(lambda: state_path))
+
+    app._restore_pending_right_pane(None, None)
+
+    assert state_path.exists()
+
+
+def test_launch_resume_attaches_recovered_writer_instead_of_resuming_again():
+    project = _project("codex-only")
+    session_id = "12345678-1234-1234-1234-1234567890ab"
+    meta = _codex_meta(project, session_id)
+    running = _Running(
+        key=session_id,
+        tmux_name="cx-new---abcdef-1",
+        label="codex-only/Recovered",
+        project=project,
+        session_type="codex",
+    )
+    app = App.__new__(App)
+    app._running = {session_id: running}
+    app._agent_session_alive = MagicMock(return_value=True)
+    app._on_running_select = MagicMock()
+    app._launch = MagicMock()
+
+    app._launch_resume(meta)
+
+    app._on_running_select.assert_called_once()
+    app._launch.assert_not_called()
+
+
+def test_launch_resume_promotes_recovered_placeholder_before_resume():
+    """Linux exact correlation closes the pre-poll duplicate-writer window."""
+    project = _project("codex-only")
+    session_id = "12345678-1234-1234-1234-1234567890ab"
+    meta = _codex_meta(project, session_id)
+    key = "__new__-abcdef-1"
+    app = _minimal_app(selected_project=project)
+    app._running[key] = _Running(
+        key=key,
+        tmux_name="cx-new---abcdef-1",
+        label="codex-only/(new)",
+        project=project,
+        placeholder_path=project.real_path,
+        created_at=999.0,
+        session_type="codex",
+    )
+    app._codex_index = MagicMock()
+    app._codex_index.sessions_for_cwd.return_value = [meta]
+    app._correlate_codex_rollout = lambda _running: {session_id}
+    app._discover_orphans = MagicMock(return_value=True)
+    app._agent_session_alive = MagicMock(return_value=True)
+    app._on_running_select = MagicMock()
+    app._launch = MagicMock()
+
+    app._launch_resume(meta)
+
+    assert session_id in app._running and key not in app._running
+    app._on_running_select.assert_called_once()
+    app._launch.assert_not_called()
+
+
+def test_launch_resume_refuses_ambiguous_live_placeholder_without_procfs():
+    """When exact identity is unknowable, fail closed instead of duplicating."""
+    project = _project("codex-only")
+    session_id = "12345678-1234-1234-1234-1234567890ab"
+    meta = _codex_meta(project, session_id)
+    key = "__new__-abcdef-1"
+    app = _minimal_app(selected_project=project)
+    app._running[key] = _Running(
+        key=key,
+        tmux_name="cx-new---abcdef-1",
+        label="codex-only/(new)",
+        project=project,
+        placeholder_path=project.real_path,
+        created_at=999.0,
+        session_type="codex",
+        allow_heuristic_resolution=False,
+    )
+    app._codex_index = MagicMock()
+    app._codex_index.sessions_for_cwd.return_value = [meta]
+    app._correlate_codex_rollout = lambda _running: None
+    app._discover_orphans = MagicMock(return_value=True)
+    app._agent_session_alive = MagicMock(return_value=True)
+    app._launch = MagicMock()
+    app._set_status = MagicMock()
+    app._show_error = MagicMock()
+
+    app._launch_resume(meta)
+
+    assert key in app._running and session_id not in app._running
+    app._launch.assert_not_called()
+    app._show_error.assert_called_once()
+
+
+def test_launch_refuses_untracked_preexisting_tmux(monkeypatch):
+    """The final launch gate cannot stamp or reuse an identity collision."""
+    project = _project("codex-only")
+    session_id = "12345678-1234-1234-1234-1234567890ab"
+    app = App.__new__(App)
+    app._running = {}
+    app._session_name = lambda _key: "cx-12345678-1234-12"
+    app._set_status = MagicMock()
+    app._show_error = MagicMock()
+    app._ensure_detached_agent = MagicMock()
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.session_exists", lambda _name: True)
+
+    launched = app._launch(
+        session_id, ["codex"], project.real_path, "label", project,
+        session_type="codex",
+    )
+
+    assert launched is False
+    app._ensure_detached_agent.assert_not_called()
 
 
 def test_discover_orphans_skips_placeholder():
