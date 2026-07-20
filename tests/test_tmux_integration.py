@@ -5,6 +5,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -98,6 +99,13 @@ def _wait_until(predicate, timeout: float = 3.0) -> bool:
             return True
         time.sleep(0.05)
     return False
+
+
+def _script_command(command: str) -> list[str]:
+    """Run *command* under a PTY with the platform's script(1) syntax."""
+    if sys.platform == "darwin":
+        return ["script", "-q", "/dev/null", "sh", "-c", command]
+    return ["script", "-qefc", command, "/dev/null"]
 
 
 def test_real_swap_preserves_sidebar_focus(isolated_tmux):
@@ -867,12 +875,10 @@ def test_real_tmux_binding_manager_round_trip_and_user_reload(
     subprocess.run(
         ["tmux", "select-pane", "-t", other_pane], check=True)
     client_process = subprocess.Popen(
-        [
-            "script", "-qefc",
+        _script_command(
             f"env TERM=xterm-256color tmux -S {shlex.quote(_socket_path)} "
-            f"attach-session -t {shlex.quote(_display_session)}",
-            "/dev/null",
-        ],
+            f"attach-session -t {shlex.quote(_display_session)}"
+        ),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
