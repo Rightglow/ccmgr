@@ -297,9 +297,11 @@ stacked with P1/P2 targeted. Do not substitute “active pane / 活动窗格”,
 “selected pane / 选中窗格”, or “last pane / 上一个窗格”: each conflates target
 routing with focus, selection, or history.
 
-- F8 creates an inert secondary slot before any session is chosen and cycles
-  layouts. If side-by-side cannot meet the minimum size, it skips directly to
-  stacked instead of trapping the cycle on single.
+- F8 creates an inert secondary slot before any session is chosen and advances
+  through the layout cycle by selecting the next orientation that meets the
+  minimum size. An unavailable side-by-side or stacked layout is skipped. If
+  neither split fits when starting from single, F8 keeps single-pane layout and
+  reports the size limit.
 - Single-click, `␣`, and context Preview share one action: preview a stopped
   row, or switch a running row while sidebar focus stays put. Enter and
   double-click share the focus-transferring open action. Every path uses the
@@ -329,8 +331,10 @@ routing with focus, selection, or history.
   agent borders become gray. The status brand's one-cell workspace map remains
   visible across focus changes and its filled half names the Target pane without
   presenting it as current input focus. A single layout uses `▣` because P1 is
-  the only possible target. Teardown restores the exact inherited or explicit
-  `pane-border-indicators` window option.
+  the only possible target. While side-by-side Pane 1 has keyboard focus, the
+  hint bar includes `C-b → Pane 2`; Pane 2 shows `C-b ← Pane 1`. Direct P1/P2
+  focus changes refresh that hint with the workspace map. Teardown restores the
+  exact inherited or explicit `pane-border-indicators` window option.
 
 Attach/resume, replacement, display-transport ownership, duplicate prevention,
 close/rotate, per-pane size checks, preview/restore, terminal placement,

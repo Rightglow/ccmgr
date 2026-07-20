@@ -29,10 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider message and include reported cache creation/read tokens.
 - Add a second agent pane through `F8`, which can create an empty
   Pane 2 and cycles single, side-by-side, and stacked layouts globally while
-  keeping the collapsed Pane 2 agent running. Unusable side-by-side geometry is
-  skipped instead of leaving F8 stuck on single. Empty agent panes now use a
-  centered, resize-aware Railmux surface with compact interaction guidance;
-  startup restoration uses the same visual language.
+  keeping the collapsed Pane 2 agent running. Any split orientation that cannot
+  meet the minimum pane size is skipped, so the cycle uses only the layouts the
+  current window supports. Empty agent panes now use a centered, resize-aware
+  Railmux surface with compact interaction guidance; startup restoration uses
+  the same visual language.
 - Keep the sidebar at roughly 30% in single-agent layout and compact it to 20%
   in either dual-agent layout, with a 30-column floor. Returning to single
   restores the wider navigator, and ratio updates remain best-effort.
@@ -57,7 +58,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Disambiguate the shared green border in the side-by-side layout with inward
   tmux arrows that point at the exact focused agent pane. Directional markers
   are limited to agent focus, restore the prior window option on teardown, and
-  degrade to colour-only borders on tmux versions older than 3.3.
+  degrade to colour-only borders on tmux versions older than 3.3. When Pane 1
+  has focus, the hint bar shows `C-b → Pane 2`; Pane 2 names the matching
+  `C-b ← Pane 1` route instead of calling it a direct return to Railmux.
 - Retry a failed tmux focus-border update instead of caching it, preventing the
   old half-gray/half-green dual-pane style from surviving after returning to a
   single agent pane.

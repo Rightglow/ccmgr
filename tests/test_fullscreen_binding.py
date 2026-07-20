@@ -181,6 +181,71 @@ def test_f8_skips_unusable_columns_and_opens_stacked(monkeypatch):
         WorkspaceLayout.STACKED, None)
 
 
+def test_f8_skips_unusable_stacked_and_returns_to_single():
+    app = _bare_app()
+    workspace = app._agent_workspace()
+    workspace.layout = WorkspaceLayout.SIDE_BY_SIDE
+    workspace.primary.pane_id = "%1"
+    workspace.secondary.pane_id = "%2"
+    app._agent_region_size = MagicMock(return_value=(160, 20))
+    app._layout_fits = MagicMock(return_value=False)
+
+    def close_secondary():
+        workspace.layout = WorkspaceLayout.SINGLE
+        return True
+
+    app._close_secondary_split = MagicMock(side_effect=close_secondary)
+
+    app._rotate_split()
+
+    assert workspace.layout is WorkspaceLayout.SINGLE
+    app._layout_fits.assert_called_once_with(
+        (160, 20), WorkspaceLayout.STACKED)
+    app._close_secondary_split.assert_called_once_with()
+
+
+def test_f8_keeps_dual_layout_when_pane_size_is_temporarily_unknown():
+    app = _bare_app()
+    workspace = app._agent_workspace()
+    workspace.layout = WorkspaceLayout.SIDE_BY_SIDE
+    workspace.primary.pane_id = "%1"
+    workspace.secondary.pane_id = "%2"
+    app._agent_region_size = MagicMock(return_value=None)
+    app._close_secondary_split = MagicMock()
+    app._set_status = MagicMock()
+
+    app._rotate_split()
+
+    assert workspace.layout is WorkspaceLayout.SIDE_BY_SIDE
+    app._close_secondary_split.assert_not_called()
+    app._set_status.assert_called_once_with(
+        "Cannot rotate: available pane size is unknown.", "warn")
+
+
+def test_f8_keeps_single_when_no_split_layout_fits():
+    app = _bare_app()
+    workspace = app._agent_workspace()
+    workspace.primary.pane_id = "%1"
+    app._agent_session_alive = MagicMock(return_value=False)
+    app._resize_sidebar_for_layout = MagicMock(return_value=True)
+    app._agent_region_size = MagicMock(return_value=(80, 20))
+    app._layout_fits = MagicMock(return_value=False)
+    app._rebuild_secondary = MagicMock()
+    app._set_status = MagicMock()
+
+    app._rotate_split()
+
+    assert workspace.layout is WorkspaceLayout.SINGLE
+    assert [item.args[1] for item in app._layout_fits.call_args_list] == [
+        WorkspaceLayout.SIDE_BY_SIDE,
+        WorkspaceLayout.STACKED,
+    ]
+    app._rebuild_secondary.assert_not_called()
+    app._set_status.assert_called_once()
+    assert app._set_status.call_args.args[1] == "warn"
+    assert "neither split layout" in app._set_status.call_args.args[0]
+
+
 def test_f8_keeps_dual_layout_when_secondary_cannot_close():
     app = _bare_app()
     workspace = app._agent_workspace()

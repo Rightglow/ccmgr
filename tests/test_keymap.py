@@ -5,6 +5,8 @@ from unittest.mock import MagicMock
 from railmux.ui.app import App
 from railmux.ui.keymap import (
     CTX_AGENT,
+    CTX_AGENT_P1_SIDE_BY_SIDE,
+    CTX_AGENT_P2_SIDE_BY_SIDE,
     CTX_PROJECTS,
     CTX_RUNNING,
     CTX_SESSIONS,
@@ -112,7 +114,15 @@ def test_hint_text_legacy_returns_all_keys():
 
 
 def test_hint_text_for_always_has_two_lines():
-    for ctx in (CTX_PROJECTS, CTX_SESSIONS, CTX_RUNNING, CTX_AGENT, None):
+    for ctx in (
+        CTX_PROJECTS,
+        CTX_SESSIONS,
+        CTX_RUNNING,
+        CTX_AGENT,
+        CTX_AGENT_P1_SIDE_BY_SIDE,
+        CTX_AGENT_P2_SIDE_BY_SIDE,
+        None,
+    ):
         text = hint_text_for(ctx)
         lines = text.split("\n")
         assert len(lines) == 2, f"Context {ctx!r} produced {len(lines)} lines"
@@ -158,6 +168,22 @@ def test_hint_text_for_agent_shows_only_back_and_fullscreen():
     # Trailing items must not appear.
     assert "help" not in text
     assert "quit" not in text
+
+
+def test_side_by_side_primary_agent_hint_includes_pane_2_route():
+    text = hint_text_for(CTX_AGENT_P1_SIDE_BY_SIDE)
+
+    assert "C-b ← back" in text
+    assert "C-b → Pane 2" in text
+    assert "F9 fullscreen" in text
+
+
+def test_side_by_side_secondary_agent_hint_names_pane_1():
+    text = hint_text_for(CTX_AGENT_P2_SIDE_BY_SIDE)
+
+    assert "C-b ← Pane 1" in text
+    assert "back" not in text
+    assert "F9 fullscreen" in text
 
 
 def test_agent_context_trail_is_empty():

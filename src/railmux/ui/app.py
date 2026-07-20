@@ -1002,6 +1002,9 @@ class App:
             # Target pane actually changes, so ordinary polling never jitters
             # the status line or an agent's input preedit.
             self._apply_tmux_bar(self._tmux_error_bar)
+            if (hasattr(self, "_hint_bar")
+                    and not self._railmux_has_focus):
+                self._hint_bar.set_context(self._help_context())
         return slot
 
     def _schedule_right_pane_focus_after_double(self) -> None:
@@ -1873,6 +1876,21 @@ class App:
         min_width, min_height = self._MINIMUM_AGENT_PANE_SIZE
         return width >= min_width and height >= min_height
 
+    def _next_available_layout(
+        self,
+        current: WorkspaceLayout,
+        region: tuple[int, int],
+    ) -> WorkspaceLayout | None:
+        """Return the next usable layout without stopping at an invalid split."""
+        candidate = next_workspace_layout(current)
+        while candidate is not current:
+            if candidate is WorkspaceLayout.SINGLE:
+                return candidate
+            if self._layout_fits(region, candidate):
+                return candidate
+            candidate = next_workspace_layout(candidate)
+        return None
+
     def _focused_pane_menu_target(
         self,
     ) -> tuple[str, SessionMeta | RunningEntry, str] | None:
@@ -1969,27 +1987,21 @@ class App:
                 agent_tmux_name = None
             self._resize_sidebar_for_layout(new_layout)
             region = self._agent_region_size()
-            if (region is not None
-                    and not self._layout_fits(region, new_layout)):
-                # F8 must remain useful on ordinary-width terminals. If the
-                # first dual orientation is unusable, skip directly to the
-                # other one instead of trapping the cycle on SINGLE forever.
-                alternate = next_workspace_layout(new_layout)
-                if (alternate is not WorkspaceLayout.SINGLE
-                        and self._layout_fits(region, alternate)):
-                    new_layout = alternate
-            if region is None or not self._layout_fits(region, new_layout):
+            if region is None:
                 self._resize_sidebar_for_layout(WorkspaceLayout.SINGLE)
-                detail = "unknown"
-                if region is not None:
-                    width, height = projected_agent_size(region, new_layout)
-                    detail = f"{width}×{height}"
                 self._set_status(
-                    f"Cannot switch to {new_layout.value}: each pane would be "
-                    f"{detail}; minimum is 50×12.",
+                    "Cannot open Pane 2: available size is unknown.", "warn")
+                return
+            available_layout = self._next_available_layout(old_layout, region)
+            if available_layout is None:
+                self._resize_sidebar_for_layout(WorkspaceLayout.SINGLE)
+                self._set_status(
+                    "Cannot open Pane 2: neither split layout meets the "
+                    "minimum pane size of 50×12.",
                     "warn",
                 )
                 return
+            new_layout = available_layout
             sidebar_focused = self._railmux_has_focus
             if not self._rebuild_secondary(new_layout, agent_tmux_name):
                 self._display_transport().close_slot(secondary)
@@ -2021,18 +2033,15 @@ class App:
             return
 
         region = self._agent_region_size()
-        if region is None or not self._layout_fits(region, new_layout):
-            if region is None:
-                detail = "unknown"
-            else:
-                width, height = projected_agent_size(region, new_layout)
-                detail = f"{width}×{height}"
+        if region is None:
             self._set_status(
-                f"Cannot rotate: {new_layout.value} would give each pane {detail}; "
-                "minimum is 50×12.",
-                "warn",
-            )
+                "Cannot rotate: available pane size is unknown.", "warn")
             return
+        available_layout = self._next_available_layout(old_layout, region)
+        if available_layout is WorkspaceLayout.SINGLE:
+            self._close_secondary_split()
+            return
+        new_layout = available_layout
 
         primary_id = workspace.primary.pane_id
         old_secondary_id = secondary.pane_id
@@ -5102,10 +5111,15 @@ class App:
     def _help_context(self) -> str:
         """Map the focused sidebar pane (0/1/2) to a keymap context name.
 
-        When the right-hand agent pane has focus (via Ctrl-B →), return the
-        agent context so the help bar shows only the two keys that matter:
-        Ctrl-B ← (back to sidebar) and F9 (fullscreen)."""
+        Agent focus uses a compact tmux-navigation context. In side-by-side
+        Pane 1, include the direct right-arrow route to Pane 2."""
         if not self._railmux_has_focus:
+            workspace = self._agent_workspace()
+            if (workspace.layout is WorkspaceLayout.SIDE_BY_SIDE
+                    and workspace.secondary.is_open):
+                if workspace.target_slot_key == AgentWorkspace.PRIMARY:
+                    return keymap.CTX_AGENT_P1_SIDE_BY_SIDE
+                return keymap.CTX_AGENT_P2_SIDE_BY_SIDE
             return keymap.CTX_AGENT
         pos = self._sidebar.focus_position
         if 0 <= pos < len(self._HELP_CONTEXTS):

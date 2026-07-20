@@ -19,6 +19,8 @@ CTX_PROJECTS = "projects"
 CTX_SESSIONS = "sessions"
 CTX_RUNNING = "running"
 CTX_AGENT = "agent"  # right-hand agent pane has focus
+CTX_AGENT_P1_SIDE_BY_SIDE = "agent-p1-side-by-side"
+CTX_AGENT_P2_SIDE_BY_SIDE = "agent-p2-side-by-side"
 _ALL_CTX = (CTX_PROJECTS, CTX_SESSIONS, CTX_RUNNING)
 
 
@@ -79,9 +81,13 @@ BINDINGS: list[Binding] = [
     Binding((), "F8", "layout"),
     # Display-only: handled by a tmux root binding, not railmux.
     Binding((), "F9", "fullscreen"),
-    # Agent pane — shown only when the right-hand agent has focus.
+    # Agent panes — tmux owns these navigation keys, so they are hints only.
     Binding((), "C-b ←", "back",
-            contexts=(CTX_AGENT,)),
+            contexts=(CTX_AGENT, CTX_AGENT_P1_SIDE_BY_SIDE)),
+    Binding((), "C-b →", "Pane 2",
+            contexts=(CTX_AGENT_P1_SIDE_BY_SIDE,)),
+    Binding((), "C-b ←", "Pane 1",
+            contexts=(CTX_AGENT_P2_SIDE_BY_SIDE,)),
 ]
 
 _TRAILING: list[Binding] = [

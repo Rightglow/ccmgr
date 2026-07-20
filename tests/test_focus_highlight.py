@@ -9,6 +9,7 @@ import urwid
 
 from railmux.models import Project, SessionMeta
 from railmux.display_transport import AttachOutcome
+from railmux.ui import keymap
 from railmux.ui.app import App, _FocusAwareFrame
 from railmux.ui.modals import DeleteConfirmModal, RenameModal
 from railmux.ui.projects_pane import ProjectsPane
@@ -154,17 +155,30 @@ def test_agent_to_agent_click_repaints_layout_indicator(monkeypatch):
     app._railmux_pane_id = "%1"
     app._railmux_has_focus = False
     app._apply_tmux_bar = MagicMock()
+    app._hint_bar = MagicMock()
+    focused = ["%3"]
     monkeypatch.setattr(
-        "railmux.ui.app.tmux_ctl.active_pane_id", lambda _target: "%3")
+        "railmux.ui.app.tmux_ctl.active_pane_id", lambda _target: focused[0])
 
     app._sync_target_slot_from_tmux()
 
     assert app._workspace.target_slot_key == AgentWorkspace.SECONDARY
     app._apply_tmux_bar.assert_called_once_with(app._tmux_error_bar)
+    app._hint_bar.set_context.assert_called_once_with(
+        keymap.CTX_AGENT_P2_SIDE_BY_SIDE)
 
     app._apply_tmux_bar.reset_mock()
+    app._hint_bar.set_context.reset_mock()
     app._sync_target_slot_from_tmux()
     app._apply_tmux_bar.assert_not_called()
+    app._hint_bar.set_context.assert_not_called()
+
+    focused[0] = "%2"
+    app._sync_target_slot_from_tmux()
+
+    assert app._workspace.target_slot_key == AgentWorkspace.PRIMARY
+    app._hint_bar.set_context.assert_called_once_with(
+        keymap.CTX_AGENT_P1_SIDE_BY_SIDE)
 
 
 def test_dual_workspace_keeps_inactive_borders_gray(monkeypatch):
