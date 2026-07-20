@@ -170,6 +170,15 @@ only changed files. Moving that bounded per-project source to another worker is
 not required by the Codex whole-tree invariant, but any future worker must use
 the same last-known-good generation rules.
 
+`SessionMeta.message_count` is a provider-normalized logical conversation
+count, not a raw JSONL-record count: exclude tool results and harness-injected
+user context, and deduplicate provider records that share one assistant message
+identity. `token_total` follows provider-reported usage. Codex token events are
+cumulative, so the last valid total wins; Claude usage is summed once per
+unique assistant message and includes reported input, output, cache-creation,
+and cache-read tokens. The sidebar may compact these integers for display but
+must retain the exact values in the immutable metadata snapshot.
+
 ## The agent workspace is independent of the sidebar mode
 
 `AgentWorkspace` owns at most two `AgentSlot` objects: `primary` and
@@ -185,8 +194,14 @@ close, or reinterpret an already displayed Claude agent. Do not put display
 pane fields back onto `App` as parallel scalars; the old `_right_pane_*`
 properties exist only as compatibility shims backed by the primary slot.
 
-Current releases intentionally expose only the primary slot. Code should keep
-that behavior until the dual-agent interaction below is approved and tested.
+Exact-owner local restart state serializes the layout, both slot contents,
+Target pane, keyboard focus, preview rollback target, and any live collapsed
+secondary agent. Restoration validates every agent against current discovery,
+then rebuilds primary, layout, secondary, Target, and focus in that order. A
+content failure degrades to the branded empty surface without falsely claiming
+the old agent; an unusable split degrades to single while retaining a validated
+secondary agent in Running. Portable restoration deliberately remains a single
+stable Target display wish and never carries tmux identity or process authority.
 
 ## Agent display transports preserve one ownership model
 
@@ -203,6 +218,15 @@ It is the placeholder while idle/previewing and the real provider pane while
 displayed. `SwapState` owns the immutable real-pane/PID, home window,
 placeholder, display window, outer session, keeper, slot, and transaction phase.
 The same real pane may be owned by only one slot.
+
+An intentional session kill is a display transaction, not a raw
+`kill-session`: the transport first returns a swap-owned real pane home or
+replaces a nested attach client, then respawns the retained outer pane with the
+idle surface and clears only that slot's content state. The caller may remove
+the Running entry only after the exact tmux identity is confirmed dead. A
+failed kill therefore leaves a truthful empty display slot and a still-live
+Running entry that can be reopened; it must not collapse an explicitly chosen
+dual layout.
 
 Before a real pane moves, a detached tmux session group shares the outer window.
 This keeper adds no pane or PTY and prevents a direct kill of the original outer
@@ -247,23 +271,92 @@ alternate-screen behavior. Full evidence and remaining gates are in
 The first version should remain bounded to two slots and preserve all existing
 single-pane behavior:
 
-- Enter opens/replaces the primary slot, exactly as today.
-- `Open in split` creates or replaces the secondary slot.
-- `Close split` removes only the outer secondary pane; it never kills the
-  detached background agent session.
+### Focus and target terminology
+
+These are separate state axes and their names are a durable product contract:
+
+- **Focused pane / 焦点窗格** is the pane currently receiving keyboard input.
+  When the sidebar is focused, neither agent pane is the Focused pane.
+- **Target pane / 目标窗格** is the remembered agent pane where actions started
+  from the sidebar take effect. Preview, open, running-session switching, F9,
+  terminal placement, status, and attention routing all use it.
+- While an agent pane is focused it is also the Target pane. Moving focus back
+  to the sidebar clears agent focus but does not change the Target pane.
+- `AgentWorkspace.target_slot_key`, `AgentWorkspace.target`, and `set_target()`
+  are the model names; code and documentation must not use “active” to mean the
+  remembered sidebar action target. The previously released `active_slot_key`,
+  `active`, and `activate()` names remain thin compatibility views only.
+
+User-facing English should say **Target pane** and Chinese documentation should
+say **目标窗格**. The compact status UI uses a workspace map rather than text:
+`▣` means single; `◧`/`◨` mean side-by-side with P1/P2 targeted; `⬒`/`⬓` mean
+stacked with P1/P2 targeted. Do not substitute “active pane / 活动窗格”,
+“selected pane / 选中窗格”, or “last pane / 上一个窗格”: each conflates target
+routing with focus, selection, or history.
+
+- F8 creates an inert secondary slot before any session is chosen and cycles
+  layouts. If side-by-side cannot meet the minimum size, it skips directly to
+  stacked instead of trapping the cycle on single.
+- Single-click, `␣`, and context Preview share one action: preview a stopped
+  row, or switch a running row while sidebar focus stays put. Enter and
+  double-click share the focus-transferring open action. Every path uses the
+  Target pane remembered from tmux focus.
+- Cycling back to single removes only the outer secondary pane, remembers its
+  exact instance-local tmux target, and never kills the detached agent session.
 - The same background tmux session should not be attached in both slots.
 - Layout names are `stacked` and `side-by-side`, avoiding ambiguous
   horizontal/vertical terminology.
-- Automatic orientation is chosen once when the split is created and must not
-  flip during terminal resize. Users can explicitly rotate it.
+- Orientation changes only through F8 and must not flip during terminal resize.
 - Narrow screens should prefer stacked panes because three side-by-side columns
   make agent TUIs unusably narrow.
+- The prototype globally routes `F8` to the sidebar controller and cycles
+  single → side-by-side → stacked even while an agent owns keyboard focus.
+  `F9` similarly reaches the controller and uses the Target pane resolved
+  from real tmux focus.
+- Each projected agent pane must be at least 50x12. Side-by-side is preferred
+  only when both projected panes reach 80x20; otherwise the best valid layout
+  wins, with stacked breaking a tie.
+- While an agent owns keyboard focus, native tmux borders show it in bright
+  green. A side-by-side agent focus also enables inward border arrows so the
+  shared Pane 1 / Pane 2 edge identifies its owner; arrows are omitted on tmux
+  versions before 3.3. When Railmux regains focus, arrows are removed and all
+  agent borders become gray. The status brand's one-cell workspace map remains
+  visible across focus changes and its filled half names the Target pane without
+  presenting it as current input focus. A single layout uses `▣` because P1 is
+  the only possible target. Teardown restores the exact inherited or explicit
+  `pane-border-indicators` window option.
 
-Preview, terminal placement, F9 fullscreen, focus styling, scroll management,
-liveness, teardown, and soft restart must all operate on an explicit slot when
-the secondary slot becomes user-visible.
+Attach/resume, replacement, display-transport ownership, duplicate prevention,
+close/rotate, per-pane size checks, preview/restore, terminal placement,
+liveness, status/attention targeting, scrolling, F9, persistence selection, and
+teardown operate on explicit slots. Direct agent focus is resolved from tmux's
+active pane while the sidebar is unfocused and from `pane_last` when focus
+returns. A direct P1/P2 focus change must repaint the workspace map when that
+resolution changes the Target pane; it must not wait for sidebar focus to
+return. Preview/open actions use that Target pane; the primary compatibility
+entry points remain only for established single-pane integrations.
 
-## Mouse routing preserves user tmux configuration
+If secondary disappears, restore its live target into the same orientation or
+collapse truthfully to single. If primary disappears while secondary survives,
+return secondary home before rebuilding primary or promoting the survivor; do
+not relabel slot-specific swap ownership in memory. A recovery ambiguity must
+leave the agent in Running rather than destroy a pane. Soft restart persists the
+full exact-owner workspace after bounded field validation; shared portable state
+continues to restore only one stable display wish into primary.
+
+## Global bindings preserve user tmux configuration
+
+F8/F9 are root-table bindings, so Railmux manages them as a server-wide,
+crash-safe transaction rather than unconditionally overwriting and unbinding
+them. The wrapper is shared by every Railmux instance on the server and reads a
+window-local `@railmux_controller_pane` option at keypress time. It forwards
+only inside a Railmux window; elsewhere it replays the exact captured command,
+or sends the function key through when it was originally unbound. Each owner
+sets and conditionally clears only its own controller option. The final live
+owner restores each original binding only while that key still carries the
+transaction marker, so a user tmux configuration reload takes precedence.
+Dead owners and interrupted installs are repaired by the next instance under a
+non-blocking, server-keyed runtime lock.
 
 tmux routes wheel events by pointer location rather than keyboard focus. Each
 sidebar pane therefore consumes buttons 4/5 at its outer widget boundary and
@@ -324,8 +417,15 @@ With exactly two outer tmux panes, tmux intentionally assigns the active-border
 colour to only half of their shared divider. The single-agent layout therefore
 sets active and inactive border styles to the same green while the agent is
 focused, producing one continuous line, and sets both gray for the sidebar.
-Do not assume `pane-active-border-style` can outline one future agent slot: the
-multi-agent layout needs an explicit border/focus design for shared edges.
+In a dual-agent layout, inactive borders stay gray and the active border turns
+green. Stacked panes use the resulting horizontal divider and matching left
+segment directly. Side-by-side Pane 1 necessarily colours both adjacent shared
+borders, so tmux 3.3+ adds arrows pointing inward at the exact active pane.
+When the sidebar owns focus, arrows are removed, every dual-agent border is
+gray, and the status brand's filled layout glyph names the remembered target.
+This remains a
+prototype visual contract: validate its glyph and colour rendering on each
+supported tmux/terminal combination before treating the geometry as final.
 
 ## Liveness, activity, and attention are separate axes
 

@@ -15,6 +15,7 @@ from railmux.ui.app import (
     _TMUX_LEVEL_STYLE,
     _tmux_status_left,
 )
+from railmux.ui.workspace import AgentWorkspace, WorkspaceLayout
 
 
 def _status_app(*, enabled=True, session="railmux", codex_mode=False):
@@ -224,6 +225,50 @@ def test_status_left_pure_function():
     third = _tmux_status_left(False, "Review Agent")
     assert third.endswith("· Review Agent #[default]")
     assert "bold" not in error
+
+    with_layout = _tmux_status_left(False, "Codex", "◨")
+    assert with_layout.endswith("· Codex · ◨ #[default]")
+
+
+def test_status_left_keeps_layout_and_target_visible_across_focus(monkeypatch):
+    run = MagicMock()
+    monkeypatch.setattr("subprocess.run", run)
+    app = _status_app()
+    app._workspace = AgentWorkspace()
+    app._workspace.layout = WorkspaceLayout.SIDE_BY_SIDE
+    app._workspace.primary.pane_id = "%2"
+    app._workspace.secondary.pane_id = "%3"
+    app._workspace.set_target(AgentWorkspace.SECONDARY)
+    app._railmux_has_focus = True
+
+    app._apply_tmux_bar(error=False)
+    assert "· Claude Code · ◨" in _style_calls(run, "status-left")[-1]
+
+    run.reset_mock()
+    app._railmux_has_focus = False
+    app._apply_tmux_bar(error=False)
+    assert "· Claude Code · ◨" in _style_calls(run, "status-left")[-1]
+
+
+def test_layout_indicator_maps_orientation_and_target():
+    app = _status_app()
+    app._workspace = AgentWorkspace()
+    workspace = app._workspace
+
+    assert app._status_layout_indicator() is None
+    workspace.primary.pane_id = "%2"
+    assert app._status_layout_indicator() == "▣"
+
+    workspace.secondary.pane_id = "%3"
+    workspace.layout = WorkspaceLayout.SIDE_BY_SIDE
+    assert app._status_layout_indicator() == "◧"
+    workspace.set_target(AgentWorkspace.SECONDARY)
+    assert app._status_layout_indicator() == "◨"
+
+    workspace.layout = WorkspaceLayout.STACKED
+    assert app._status_layout_indicator() == "⬓"
+    workspace.set_target(AgentWorkspace.PRIMARY)
+    assert app._status_layout_indicator() == "⬒"
 
 
 def test_apply_bar_noop_when_disabled(monkeypatch):

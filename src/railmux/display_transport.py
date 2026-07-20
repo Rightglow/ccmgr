@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import sys
 import uuid
 from dataclasses import asdict, dataclass
 
@@ -19,6 +20,7 @@ from railmux.ui.workspace import (
     AgentWorkspace,
     DisplayTransportKind,
     SwapState,
+    WorkspaceLayout,
 )
 
 
@@ -29,6 +31,14 @@ _MARKERS = {
 }
 _KEEPER_MARKER = "@railmux_swap_keeper"
 _PLACEHOLDER_COMMAND = "while :; do sleep 3600; done"
+
+
+def _empty_slot_command(slot: AgentSlot) -> str:
+    pane_number = 2 if slot.key == AgentWorkspace.SECONDARY else 1
+    return (
+        f"{shlex.quote(sys.executable)} -m railmux.pane_surface "
+        f"--empty {pane_number}"
+    )
 
 
 @dataclass(frozen=True)
@@ -45,6 +55,17 @@ class RecoveryReport:
     skipped_active: int = 0
     unresolved: int = 0
     messages: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class KillPreparation:
+    """Whether a displayed agent is safe to kill, with a truthful failure."""
+
+    ok: bool
+    error: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.ok
 
 
 def _marker_for(slot_key: str) -> str:
@@ -196,6 +217,7 @@ class NestedDisplayTransport:
             )
         slot.transport_kind = DisplayTransportKind.NESTED
         slot.swap_state = None
+        slot.agent_tmux_name = agent_tmux_name
         return AttachOutcome(True, DisplayTransportKind.NESTED)
 
 
@@ -282,6 +304,53 @@ class AgentDisplayTransport:
         topology = tmux_ctl.session_topology(name)
         if topology is not None and topology.session_id == session_id:
             tmux_ctl.kill_session(name)
+
+    def create_primary(self) -> bool:
+        """Create the productized empty Pane 1 without attaching an agent."""
+        primary = self.workspace.primary
+        if (primary.pane_id is not None
+                and tmux_ctl.pane_alive(primary.pane_id)):
+            return True
+        primary.clear_display()
+        pane_id = tmux_ctl.split_window_h(
+            _empty_slot_command(primary), size_percent=70, detached=True)
+        if pane_id is None:
+            return False
+        primary.pane_id = pane_id
+        return True
+
+    def create_secondary(self, layout: WorkspaceLayout) -> bool:
+        """Create an inert secondary display pane beside the primary slot."""
+        primary = self.workspace.primary
+        secondary = self.workspace.secondary
+        if (secondary.pane_id is not None
+                and tmux_ctl.pane_alive(secondary.pane_id)):
+            return True
+        if (primary.pane_id is None
+                or not tmux_ctl.pane_alive(primary.pane_id)):
+            return False
+        secondary.clear_display()
+        if layout is WorkspaceLayout.STACKED:
+            pane_id = tmux_ctl.split_window_v(
+                _empty_slot_command(secondary),
+                target=primary.pane_id,
+                size_percent=50,
+                detached=True,
+            )
+        elif layout is WorkspaceLayout.SIDE_BY_SIDE:
+            pane_id = tmux_ctl.split_window_h(
+                _empty_slot_command(secondary),
+                target=primary.pane_id,
+                size_percent=50,
+                detached=True,
+            )
+        else:
+            return False
+        secondary.pane_id = pane_id
+        if pane_id is None:
+            return False
+        self.workspace.layout = layout
+        return True
 
     def _prepare_placeholder(self, slot: AgentSlot) -> str | None:
         old_agent = slot.agent_tmux_name
@@ -523,15 +592,59 @@ class AgentDisplayTransport:
             return False
         return slot.pane_id is None or tmux_ctl.pane_alive(slot.pane_id)
 
-    def prepare_kill(self, agent_tmux_name: str) -> bool:
+    def reset_slot(self, slot: AgentSlot) -> bool:
+        """Return any agent home and leave one truthful branded empty pane."""
+        if not self.return_home(slot):
+            return False
+        pane_id = slot.pane_id
+        if pane_id is None or not tmux_ctl.pane_alive(pane_id):
+            return False
+        if not tmux_ctl.respawn_pane(pane_id, _empty_slot_command(slot)):
+            return False
+        slot.clear_content()
+        return True
+
+    def prepare_kill(self, agent_tmux_name: str) -> KillPreparation:
         slot = self.workspace.slot_for_agent(agent_tmux_name)
-        return slot is None or self.return_home(slot)
+        if slot is None:
+            return KillPreparation(True)
+        was_swap = slot.swap_state is not None
+        if not self.return_home(slot):
+            return KillPreparation(
+                False,
+                f"could not safely return {agent_tmux_name} home; "
+                "nothing was killed",
+            )
+        pane_id = slot.pane_id
+        if pane_id is None or not tmux_ctl.pane_alive(pane_id):
+            slot.clear_display()
+            return KillPreparation(True)
+        if not tmux_ctl.respawn_pane(pane_id, _empty_slot_command(slot)):
+            if was_swap:
+                # return_home already detached the real pane. Keep the model
+                # truthful even though tmux could not paint the branded idle
+                # surface: this slot now displays only its inert placeholder.
+                slot.clear_content()
+                error = (
+                    f"{agent_tmux_name} returned home, but Pane "
+                    f"{2 if slot.key == AgentWorkspace.SECONDARY else 1} "
+                    "could not be reset; nothing was killed"
+                )
+            else:
+                error = (
+                    f"could not detach {agent_tmux_name} from its nested "
+                    "display; nothing was killed"
+                )
+            return KillPreparation(False, error)
+        slot.clear_content()
+        return KillPreparation(True)
 
     def close_slot(self, slot: AgentSlot) -> bool:
         if not self.return_home(slot):
             return False
         if slot.pane_id and tmux_ctl.pane_alive(slot.pane_id):
-            tmux_ctl.kill_pane(slot.pane_id)
+            if not tmux_ctl.kill_pane(slot.pane_id):
+                return False
         slot.clear_display()
         self._drop_keeper_if_idle()
         return True

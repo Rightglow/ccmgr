@@ -45,7 +45,7 @@ def _sidebar():
     running.set_running([RunningEntry("cx-one", "project/agent")])
     pile = StableWeightedPile([
         ("weight", 2, SidebarSection(projects, lambda: "Projects")),
-        ("weight", 3, SidebarSection(
+        ("weight", 4, SidebarSection(
             sessions, lambda: sessions.section_title)),
         ("weight", 2, SidebarSection(
             running, lambda: running.section_title)),
@@ -224,6 +224,7 @@ def test_weighted_section_heights_do_not_change_with_focus():
         allocations.append(pile.get_item_rows((30, 17), True))
 
     assert allocations[0] == allocations[1] == allocations[2]
+    assert allocations[0] == [4, 9, 4]
 
 
 def test_wheel_routes_by_pointer_section_including_shared_chrome():

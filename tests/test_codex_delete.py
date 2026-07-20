@@ -498,7 +498,7 @@ def _transcript_app(monkeypatch):
     app._less_mouse_flag = ""
     app._right_pane_id = "%1"
     app._set_status = lambda *a, **k: None
-    app._install_fullscreen_binding = lambda: None
+    app._install_function_key_bindings = lambda: None
     captured: dict = {}
     transport = MagicMock()
     transport.prepare_preview.side_effect = (

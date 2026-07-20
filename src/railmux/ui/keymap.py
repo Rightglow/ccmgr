@@ -70,6 +70,13 @@ BINDINGS: list[Binding] = [
     # All three — opens a shell in the active project's directory.
     Binding(("t", "T"), "t", "term", "_open_terminal_for_active_project",
             contexts=_ALL_CTX),
+    # Space is reliably distinct across traditional and extended terminals.
+    Binding((" ",), "␣", "preview",
+            "_preview_focused_target",
+            contexts=(CTX_SESSIONS, CTX_RUNNING)),
+    # F8 is a global tmux binding so layout cycling also works while an agent
+    # pane owns keyboard focus.
+    Binding((), "F8", "layout"),
     # Display-only: handled by a tmux root binding, not railmux.
     Binding((), "F9", "fullscreen"),
     # Agent pane — shown only when the right-hand agent has focus.

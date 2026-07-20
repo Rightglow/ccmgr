@@ -131,8 +131,11 @@ def test_startup_message_paints_and_flushes_only_on_a_tty(monkeypatch):
 
     _show_startup_message()
 
-    output.write.assert_called_once_with(
-        "\033[2J\033[HRestoring Railmux workspace...\n")
+    surface = output.write.call_args.args[0]
+    assert surface.startswith("\033[2J\033[H")
+    assert "RAILMUX" in surface
+    assert "Restoring your workspace" in surface
+    assert "Reconnecting sessions and panes…" in surface
     output.flush.assert_called_once_with()
 
     output.reset_mock()

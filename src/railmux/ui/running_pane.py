@@ -63,7 +63,8 @@ class _RunningRow(ClickableRow):
 class RunningSessionsPane(ScrollableSidebarPane, urwid.WidgetWrap):
     """Lists every agent session this Railmux instance has opened.
 
-    Enter on a row re-attaches the display pane to that detached agent session.
+    Single-click switches the remembered display; Enter/double-click also
+    transfers keyboard focus to the detached agent.
     """
 
     def __init__(self, on_select: Callable[[RunningEntry], None],
@@ -224,7 +225,8 @@ class RunningSessionsPane(ScrollableSidebarPane, urwid.WidgetWrap):
                 e,
                 is_selected=(e.tmux_name
                              == (self._selected_tmux_name or self._active_tmux_name)),
-                on_click=lambda e=e: self._on_select(e, steal_focus=False),
+                on_click=lambda e=e: self._on_select(
+                    e, steal_focus=False),
                 on_double_click=lambda e=e: self._on_double_select(e),
                 on_right_click=(lambda e=e: self._on_context(e))
                                if self._on_context else None,

@@ -12,8 +12,13 @@ from railmux.display_transport import AttachOutcome
 from railmux.ui.app import App, _FocusAwareFrame
 from railmux.ui.modals import DeleteConfirmModal, RenameModal
 from railmux.ui.projects_pane import ProjectsPane
+from railmux.ui.running_pane import RunningEntry
 from railmux.ui.sessions_pane import _SessionRow
-from railmux.ui.workspace import AgentWorkspace, DisplayTransportKind
+from railmux.ui.workspace import (
+    AgentWorkspace,
+    DisplayTransportKind,
+    WorkspaceLayout,
+)
 
 
 def _canvas_attrs(canvas) -> list[str | None]:
@@ -108,6 +113,287 @@ def test_focus_reports_are_consumed_and_update_divider(monkeypatch):
     assert app._filter_input(["focus in"], []) == []
     assert app._frame._window_active is True
     assert set_border.call_args.args == ("fg=colour240", "fg=colour240")
+
+
+def test_focus_return_activates_the_agent_tmux_reports_as_last(monkeypatch):
+    app = App.__new__(App)
+    app._workspace = AgentWorkspace()
+    app._workspace.layout = WorkspaceLayout.SIDE_BY_SIDE
+    app._workspace.primary.pane_id = "%2"
+    app._workspace.primary.active_session_id = "primary-session"
+    app._workspace.secondary.pane_id = "%3"
+    app._workspace.secondary.active_session_id = "secondary-session"
+    app._frame = _FocusAwareFrame(urwid.SolidFill(" "))
+    app._sessions_pane = MagicMock()
+    app._running_pane = MagicMock()
+    app._railmux_pane_id = "%1"
+    app._railmux_has_focus = False
+    app._divider_active = None
+    app._double_focus_visual_pending = False
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.last_pane_id", lambda _target: "%3")
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.set_window_border_styles", lambda *_a: True)
+
+    assert app._filter_input(["focus in"], []) == []
+
+    assert app._workspace.target_slot_key == AgentWorkspace.SECONDARY
+    app._sessions_pane.set_active_session.assert_called_once_with(
+        "secondary-session")
+
+
+def test_agent_to_agent_click_repaints_layout_indicator(monkeypatch):
+    app = App.__new__(App)
+    app._workspace = AgentWorkspace()
+    app._workspace.layout = WorkspaceLayout.SIDE_BY_SIDE
+    app._workspace.primary.pane_id = "%2"
+    app._workspace.secondary.pane_id = "%3"
+    app._frame = _FocusAwareFrame(urwid.SolidFill(" "))
+    app._sessions_pane = MagicMock()
+    app._running_pane = MagicMock()
+    app._railmux_pane_id = "%1"
+    app._railmux_has_focus = False
+    app._apply_tmux_bar = MagicMock()
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.active_pane_id", lambda _target: "%3")
+
+    app._sync_target_slot_from_tmux()
+
+    assert app._workspace.target_slot_key == AgentWorkspace.SECONDARY
+    app._apply_tmux_bar.assert_called_once_with(app._tmux_error_bar)
+
+    app._apply_tmux_bar.reset_mock()
+    app._sync_target_slot_from_tmux()
+    app._apply_tmux_bar.assert_not_called()
+
+
+def test_dual_workspace_keeps_inactive_borders_gray(monkeypatch):
+    app = App.__new__(App)
+    app._workspace = AgentWorkspace()
+    app._workspace.layout = WorkspaceLayout.STACKED
+    app._divider_active = None
+    set_border = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.set_window_border_styles", set_border)
+
+    app._set_divider_active(True)
+
+    assert set_border.call_args.args == ("fg=colour240", "fg=#5faf00")
+
+
+def test_side_by_side_agent_focus_adds_inward_border_arrows(monkeypatch):
+    app = App.__new__(App)
+    app._workspace = AgentWorkspace()
+    app._workspace.layout = WorkspaceLayout.SIDE_BY_SIDE
+    app._divider_active = None
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.tmux_version", lambda: (3, 4))
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.local_window_option",
+        lambda _name: (True, None),
+    )
+    set_option = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.set_window_option", set_option)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.set_window_border_styles",
+        lambda *_args: True,
+    )
+
+    app._set_divider_active(True)
+
+    set_option.assert_called_once_with("pane-border-indicators", "arrows")
+    assert app._border_indicators_arrows is True
+
+
+def test_side_by_side_sidebar_focus_removes_directional_arrows(monkeypatch):
+    app = App.__new__(App)
+    app._workspace = AgentWorkspace()
+    app._workspace.layout = WorkspaceLayout.SIDE_BY_SIDE
+    app._workspace.primary.pane_id = "%2"
+    app._divider_active = None
+    app._border_indicators_original_known = True
+    app._border_indicators_original = None
+    app._border_indicators_arrows = True
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.tmux_version", lambda: (3, 4))
+    set_option = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.set_window_option", set_option)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.set_window_border_styles",
+        lambda *_args: True,
+    )
+
+    app._set_divider_active(False)
+
+    set_option.assert_called_once_with("pane-border-indicators", "colour")
+    assert app._border_indicators_arrows is False
+
+
+def test_border_indicator_teardown_restores_inheritance(monkeypatch):
+    app = App.__new__(App)
+    app._border_indicators_original_known = True
+    app._border_indicators_original = None
+    app._border_indicators_arrows = False
+    set_option = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.set_window_option", set_option)
+
+    assert app._restore_border_indicators()
+
+    set_option.assert_called_once_with("pane-border-indicators", None)
+    assert app._border_indicators_original_known is False
+
+
+def test_failed_border_indicator_restore_stays_pending_for_retry(monkeypatch):
+    app = App.__new__(App)
+    app._border_indicators_original_known = True
+    app._border_indicators_original = "both"
+    app._border_indicators_arrows = True
+    set_option = MagicMock(side_effect=[False, True])
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.set_window_option", set_option)
+
+    assert not app._restore_border_indicators()
+    assert app._border_indicators_original_known is True
+    assert app._restore_border_indicators()
+
+    assert set_option.call_args_list[-1].args == (
+        "pane-border-indicators", "both")
+    assert app._border_indicators_original_known is False
+
+
+def test_failed_border_arrow_update_remains_retryable(monkeypatch):
+    app = App.__new__(App)
+    app._workspace = AgentWorkspace()
+    app._workspace.layout = WorkspaceLayout.SIDE_BY_SIDE
+    app._divider_active = None
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.tmux_version", lambda: (3, 4))
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.local_window_option",
+        lambda _name: (True, "both"),
+    )
+    set_option = MagicMock(side_effect=[False, True])
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.set_window_option", set_option)
+    set_border = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.set_window_border_styles", set_border)
+
+    app._set_divider_active(True)
+    app._set_divider_active(True)
+
+    assert set_option.call_count == 2
+    assert set_border.call_count == 2
+    assert app._divider_active == (
+        True, WorkspaceLayout.SIDE_BY_SIDE, None)
+
+
+def test_old_tmux_keeps_colour_only_focus_without_arrow_commands(monkeypatch):
+    app = App.__new__(App)
+    app._workspace = AgentWorkspace()
+    app._workspace.layout = WorkspaceLayout.SIDE_BY_SIDE
+    app._divider_active = None
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.tmux_version", lambda: (3, 2))
+    set_option = MagicMock()
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.set_window_option", set_option)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.set_window_border_styles",
+        lambda *_args: True,
+    )
+
+    app._set_divider_active(True)
+
+    set_option.assert_not_called()
+    assert app._divider_active == (
+        True, WorkspaceLayout.SIDE_BY_SIDE, None)
+
+
+def test_dual_sidebar_focus_removes_ambiguous_shared_highlight(monkeypatch):
+    app = App.__new__(App)
+    app._workspace = AgentWorkspace()
+    app._workspace.layout = WorkspaceLayout.STACKED
+    app._workspace.primary.pane_id = "%2"
+    app._workspace.secondary.pane_id = "%3"
+    app._workspace.set_target(AgentWorkspace.SECONDARY)
+    app._divider_active = None
+    set_border = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.set_window_border_styles", set_border)
+
+    app._set_divider_active(False)
+
+    assert set_border.call_args.args == ("fg=colour240", "fg=colour240")
+
+
+def test_session_open_targets_remembered_secondary_slot():
+    app = App.__new__(App)
+    app._workspace = AgentWorkspace()
+    app._workspace.layout = WorkspaceLayout.STACKED
+    app._workspace.primary.pane_id = "%2"
+    app._workspace.secondary.pane_id = "%3"
+    app._workspace.set_target(AgentWorkspace.SECONDARY)
+    app._cancel_pending_double_focus = MagicMock()
+    app._launch_resume = MagicMock()
+    session = MagicMock()
+
+    app._on_session_select(session, steal_focus=False, from_double=True)
+
+    app._launch_resume.assert_called_once_with(
+        session,
+        steal_focus=False,
+        from_double=True,
+        slot=app._workspace.secondary,
+    )
+
+
+def test_single_workspace_reapplies_one_continuous_green_border(monkeypatch):
+    app = App.__new__(App)
+    app._workspace = AgentWorkspace()
+    app._workspace.layout = WorkspaceLayout.STACKED
+    app._divider_active = None
+    set_border = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.set_window_border_styles", set_border)
+
+    app._set_divider_active(True)
+    app._workspace.layout = WorkspaceLayout.SINGLE
+    app._set_divider_active(True, force=True)
+
+    assert set_border.call_args.args == ("fg=#5faf00", "fg=#5faf00")
+
+
+def test_single_workspace_sidebar_focus_clears_old_dim_target_format(monkeypatch):
+    app = App.__new__(App)
+    app._workspace = AgentWorkspace()
+    app._workspace.primary.pane_id = "%2"
+    app._divider_active = None
+    set_border = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.set_window_border_styles", set_border)
+
+    app._set_divider_active(False)
+
+    assert set_border.call_args.args == ("fg=colour240", "fg=colour240")
+
+
+def test_failed_border_update_is_not_cached(monkeypatch):
+    app = App.__new__(App)
+    app._workspace = AgentWorkspace()
+    app._divider_active = None
+    set_border = MagicMock(return_value=False)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.set_window_border_styles", set_border)
+
+    app._set_divider_active(True)
+    app._set_divider_active(True)
+
+    assert set_border.call_count == 2
+    assert app._divider_active is None
 
 
 def test_resize_event_checks_workspace_but_ordinary_input_does_not():
@@ -293,7 +579,7 @@ def test_single_click_prepaints_sidebar_before_agent_transport_switch():
     app._set_active_tmux_target = MagicMock()
     app._set_railmux_focus = MagicMock()
     app._schedule_scroll_acceleration = MagicMock()
-    app._install_fullscreen_binding = MagicMock()
+    app._install_function_key_bindings = MagicMock()
     app._modes = MagicMock()
     app._modes.return_value.for_tmux_name.return_value = MagicMock(key="claude")
     app._running = {
@@ -607,6 +893,91 @@ def test_preview_reports_info_status():
     assert app._in_history_mode is True
     msg = app._set_status.call_args.args[0]
     assert "Previewing" in msg and "old chat" in msg
+
+
+def test_preview_targets_explicit_active_secondary_slot():
+    app = App.__new__(App)
+    app._workspace = AgentWorkspace()
+    app._workspace.layout = WorkspaceLayout.SIDE_BY_SIDE
+    app._workspace.primary.pane_id = "%2"
+    app._workspace.secondary.pane_id = "%3"
+    app._workspace.set_target(AgentWorkspace.SECONDARY)
+    app._running = {}
+    app._has_less = True
+    app._cancel_pending_double_focus = MagicMock()
+    app._save_restore_state = MagicMock()
+    app._show_transcript = MagicMock(return_value=True)
+    app._set_slot_active_target = MagicMock()
+    app._set_status = MagicMock()
+    app._show_attention_status = MagicMock(return_value=False)
+    app._current_mode_key = MagicMock(return_value="claude")
+    session = MagicMock()
+    session.display_title = "secondary preview"
+    session.session_id = "preview-id"
+    session.jsonl_path = Path("/tmp/preview.jsonl")
+    session.session_type = "claude"
+    session.project.encoded_name = "project"
+
+    app._on_session_preview(session)
+
+    app._save_restore_state.assert_called_once_with(app._workspace.secondary)
+    app._show_transcript.assert_called_once_with(
+        session.jsonl_path,
+        session_type="claude",
+        slot=app._workspace.secondary,
+    )
+    assert app._workspace.secondary.in_history_mode is True
+
+
+def test_session_context_menu_preview_uses_space_action():
+    app = App.__new__(App)
+    app._railmux_pane_id = None
+    app._sessions_pane = MagicMock()
+    app._running = {}
+    app._favorites = MagicMock()
+    app._favorites.get_ids.return_value = set()
+    app._close_modal = MagicMock()
+    app._show_overlay = MagicMock()
+    app._on_session_row_preview = MagicMock()
+    session = MagicMock()
+    session.session_id = "preview-id"
+
+    app._open_session_context_menu(session)
+
+    menu = app._show_overlay.call_args.args[0]
+    labels = [row._wrapped_widget.base_widget.text for row in menu._walker]
+    assert any("Preview" in label and "␣" in label for label in labels)
+    preview_row = next(
+        row for row in menu._walker
+        if "Preview" in row._wrapped_widget.base_widget.text)
+    preview_row._on_click()
+    app._on_session_row_preview.assert_called_once_with(session)
+
+
+def test_space_on_running_row_switches_without_focus_transfer():
+    app = App.__new__(App)
+    entry = RunningEntry(tmux_name="cx-live", label="project/session")
+    app._focused_pane_menu_target = MagicMock(
+        return_value=("running", entry, entry.label))
+    app._on_running_select = MagicMock()
+
+    app._preview_focused_target()
+
+    app._on_running_select.assert_called_once_with(
+        entry, steal_focus=False)
+
+
+def test_space_on_session_row_uses_same_live_aware_click_action():
+    app = App.__new__(App)
+    session = MagicMock(spec=SessionMeta)
+    session.display_title = "session"
+    app._focused_pane_menu_target = MagicMock(
+        return_value=("session", session, "session"))
+    app._on_session_row_preview = MagicMock()
+
+    app._preview_focused_target()
+
+    app._on_session_row_preview.assert_called_once_with(session)
 
 
 def test_preview_failure_sets_no_success_status():

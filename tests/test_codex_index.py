@@ -78,6 +78,45 @@ def test_scan_codex_session_basic(tmp_path: Path):
     assert meta.title == "Hello world"
     assert meta.message_count == 2
     assert meta.status == "idle"
+    assert meta.git_branch is None
+
+
+def test_scan_codex_session_previews_latest_user_message(tmp_path: Path):
+    path = tmp_path / "rollout-latest-user.jsonl"
+    _write_codex_session(
+        path, "sid-latest-user", "/home/testuser/project",
+        messages=[
+            {"role": "user", "text": "First request"},
+            {"role": "assistant", "text": "First response"},
+            {"role": "user", "text": "Latest request\nwith more detail"},
+            {"role": "assistant", "text": "Latest response"},
+        ],
+    )
+
+    meta = _scan_codex_session(path)
+
+    assert meta is not None
+    assert meta.title == "First request"
+    assert meta.last_user_message == "Latest request"
+
+
+def test_scan_codex_session_excludes_synthetic_user_messages_from_count(tmp_path: Path):
+    path = tmp_path / "rollout-real-message-count.jsonl"
+    _write_codex_session(
+        path, "sid-real-message-count", "/home/testuser/project",
+        messages=[
+            {"role": "user", "text": "<environment_context>internal</environment_context>"},
+            {"role": "user", "text": "# AGENTS.md instructions\ninternal"},
+            {"role": "user", "text": "Real request"},
+            {"role": "assistant", "text": "Real response"},
+        ],
+    )
+
+    meta = _scan_codex_session(path)
+
+    assert meta is not None
+    assert meta.message_count == 2
+    assert meta.title == "Real request"
 
 
 def test_scan_codex_session_busy(tmp_path: Path):

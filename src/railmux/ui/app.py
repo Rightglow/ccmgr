@@ -1,9 +1,8 @@
 """Top-level urwid app: provider sidebar + tmux agent workspace.
 
-Railmux runs in the left pane of a tmux window. The current release exposes one
-agent pane; its state already lives in a bounded two-slot workspace so a second
-pane can be enabled without duplicating provider/display state. Press `i` for a
-session-info popup.
+Railmux runs in the left pane of a tmux window beside a bounded workspace that
+can display one or two agents without duplicating provider state. Press `i` for
+a session-info popup.
 """
 from __future__ import annotations
 
@@ -43,6 +42,7 @@ from railmux.modes import (
     ProjectSource,
 )
 from railmux.models import AttentionState, Project, SessionMeta
+from railmux.function_key_manager import RootFunctionKeyManager
 from railmux.mouse_manager import RootWheelForwardingManager
 from railmux.renames import Renames
 from railmux import restart_state
@@ -74,6 +74,9 @@ from railmux.ui.workspace import (
     AgentSlot,
     AgentWorkspace,
     SlotRestoreState,
+    WorkspaceLayout,
+    next_workspace_layout,
+    projected_agent_size,
 )
 
 
@@ -102,6 +105,11 @@ PALETTE = [
     ("selected", "white,bold", "dark gray", "bold", "#ffffff,bold", _SLATE),
     ("title", "white,bold", ""),
     ("dim", "dark gray", ""),
+    # Session-row metadata remains visibly secondary even when its title is
+    # focused or selected. Deliberately omit bold from all three variants.
+    ("session_meta", "dark gray", "", "", "#808080", "default"),
+    ("session_meta_focus", "light gray", "dark green", "", "#b8b8b8", _DEEP_GRASS_GREEN),
+    ("session_meta_sel", "light gray", "dark gray", "", "#b0b0b0", _SLATE),
     ("modal_key", "yellow,bold", "", "bold", f"{_STATUS_YELLOW},bold", "default"),
     # ButtonBar — bright bold + underline reads as a clickable control.
     ("btn", "white,bold,underline", ""),
@@ -157,17 +165,23 @@ _TMUX_BRAND_NORMAL = "#[fg=colour0] Railmux #[default]"
 _TMUX_BRAND_ERROR = "#[fg=colour231] Railmux #[default]"
 
 
-def _tmux_status_left(error: bool, mode_label: str | bool) -> str:
+def _tmux_status_left(
+    error: bool,
+    mode_label: str | bool,
+    layout_indicator: str | None = None,
+) -> str:
     """The tmux status-left segment: the ``railmux`` brand plus a current-mode
-    indicator (``· Claude Code`` / ``· Codex``), rendered in the tips colour
-    (colour0 = black on green, or white on red)."""
+    indicator (``· Claude Code`` / ``· Codex``) and a compact workspace-layout
+    glyph. All are rendered in the tips colour (colour0 = black on green, or
+    white on red)."""
     brand = _TMUX_BRAND_ERROR if error else _TMUX_BRAND_NORMAL
     fg = "colour231" if error else "colour0"
     # Bool support is a compatibility bridge for callers from <=0.1.1. New
     # code passes the registered label so a third mode renders correctly.
     if isinstance(mode_label, bool):
         mode_label = "Codex" if mode_label else "Claude Code"
-    return f"{brand}#[fg={fg}]· {mode_label} #[default]"
+    layout = f" · {layout_indicator}" if layout_indicator else ""
+    return f"{brand}#[fg={fg}]· {mode_label}{layout} #[default]"
 
 # Per-level foreground for the status text (status-right). No pill backgrounds:
 # info/warn/tip sit directly on the green bar (info white, warn bold gold, tip
@@ -372,6 +386,12 @@ class App:
     # Whether the bar is currently in error mode (whole bar dark red). Tracked so
     # the style swap only fires on the normal↔error transition, not every render.
     _tmux_error_bar: bool = False
+    # tmux >= 3.3 can draw arrows into shared pane borders.  These fields keep
+    # the temporary side-by-side focus treatment reversible, including when
+    # the user's original window option was inherited rather than explicit.
+    _border_indicators_original_known: bool = False
+    _border_indicators_original: str | None = None
+    _border_indicators_arrows: bool = False
     # Static options railmux sets on the OUTER tmux status bar. The bar
     # background (status-style) and brand (status-left) are set dynamically per
     # error state (see _apply_tmux_bar / _TMUX_BAR_STYLE_OPTIONS). All are
@@ -552,15 +572,20 @@ class App:
         # hex chars, which survive ``_safe_name``'s 16-char truncation.
         import secrets
         self._proc_token: str = secrets.token_hex(3)
-        # Outer tmux display state. Only ``primary`` is rendered today; the
-        # bounded secondary slot is deliberately present so dual-agent support
-        # does not grow a second set of scalar fields throughout App.
+        # Outer tmux display state. The bounded primary/secondary workspace
+        # prevents dual-agent support from growing a second set of scalar
+        # display fields throughout App.
         self._workspace = AgentWorkspace()
         self._display_transport_manager: AgentDisplayTransport | None = None
         self._loop: urwid.MainLoop | None = None
         identity = self._restart_identity
         self._root_wheel_manager = (
             RootWheelForwardingManager(
+                identity.server_digest, identity.pane_id)
+            if identity is not None else None
+        )
+        self._root_function_key_manager = (
+            RootFunctionKeyManager(
                 identity.server_digest, identity.pane_id)
             if identity is not None else None
         )
@@ -585,7 +610,12 @@ class App:
         self._last_size_class: str | None = None
         self._railmux_pane_id: str | None = None  # set in run()
         self._railmux_has_focus: bool = True
-        self._divider_active: bool | None = None
+        self._divider_active: (
+            tuple[bool, WorkspaceLayout, str | None] | None
+        ) = None
+        self._border_indicators_original_known = False
+        self._border_indicators_original = None
+        self._border_indicators_arrows = False
         self._has_less: bool = shutil.which("less") is not None
         self._less_mouse_flag: str = self._detect_less_mouse()
         self._scroll_manager = ScrollManager(enabled=scroll_coalescing)
@@ -630,7 +660,7 @@ class App:
         )
         self._sessions_pane = SessionsPane(
             on_select=self._on_session_select,
-            on_preview=self._on_session_preview,
+            on_preview=self._on_session_row_preview,
             on_context=self._open_session_context_menu,
             on_double_detected=self._schedule_right_pane_focus_after_double,
             provider_label=initial_mode.label,
@@ -651,14 +681,15 @@ class App:
 
         # Three horizontal title rules replace the stacked boxes inside one
         # shared pair of vertical rails. The focused section owns a closed green
-        # outline, while stable weight rounding prevents a one-row jump when
-        # keyboard focus moves between sections.
+        # outline. Sessions receives half the available height because each
+        # session consumes two display rows; stable weight rounding prevents a
+        # one-row jump when keyboard focus moves between sections.
         self._sidebar = StableWeightedPile([
             ("weight", 2, SidebarSection(
                 self._projects_pane,
                 lambda: "Projects",
             )),
-            ("weight", 3, SidebarSection(
+            ("weight", 4, SidebarSection(
                 self._sessions_pane,
                 lambda: self._sessions_pane.section_title,
             )),
@@ -755,7 +786,7 @@ class App:
         mode_key: str | None = None,
         project_key: str | None = None,
     ) -> None:
-        """Update one slot, painting sidebar highlights only for the active slot."""
+        """Update one slot, painting sidebar highlights only for the Target."""
         slot.active_session_id = session_id
         if mode_key is not None:
             try:
@@ -794,7 +825,7 @@ class App:
         separate lets a click acknowledge its intended target immediately and
         still leaves the prior :class:`AgentSlot` state available for rollback.
         """
-        if slot.key == self._agent_workspace().active_slot_key:
+        if slot.key == self._agent_workspace().target_slot_key:
             self._sessions_pane.set_active_session(session_id)
             self._running_pane.set_active(tmux_name)
 
@@ -837,18 +868,91 @@ class App:
             tmux_name,
         )
 
-    def _set_divider_active(self, active: bool, *, force: bool = False) -> None:
-        """Highlight the whole shared divider when an agent pane has focus.
+    def _sync_border_indicators(self, arrows: bool) -> bool:
+        """Show exact focus direction on an ambiguous shared vertical rail.
 
-        With exactly two panes tmux intentionally applies active-border colour
-        to only half of their shared edge. Setting both border styles to the
-        same value is therefore required for one continuous divider.
+        tmux cannot colour only the left edge of an active pane.  In a
+        three-pane side-by-side window, inward arrows identify which side of
+        both green borders owns focus.  The option arrived in tmux 3.3; older
+        versions retain the existing colour-only treatment.
         """
-        if not force and self._divider_active == active:
+        if tmux_ctl.tmux_version() < (3, 3):
+            return True
+        current = getattr(self, "_border_indicators_arrows", False)
+        if current == arrows:
+            return True
+        known = getattr(
+            self, "_border_indicators_original_known", False)
+        if arrows and not known:
+            ok, original = tmux_ctl.local_window_option(
+                "pane-border-indicators")
+            if not ok:
+                return False
+            self._border_indicators_original = original
+            self._border_indicators_original_known = True
+        if arrows:
+            applied = tmux_ctl.set_window_option(
+                "pane-border-indicators", "arrows")
+        else:
+            # Keep arrows out of sidebar/single/stacked states even if the
+            # user's inherited option happens to request them.  The exact
+            # original local/inherited setting is restored on teardown.
+            applied = tmux_ctl.set_window_option(
+                "pane-border-indicators", "colour",
+            )
+        if applied:
+            self._border_indicators_arrows = arrows
+        return applied
+
+    def _restore_border_indicators(self) -> bool:
+        """Best-effort restoration for soft quit and interrupted layouts."""
+        if not getattr(self, "_border_indicators_original_known", False):
+            return True
+        restored = tmux_ctl.set_window_option(
+            "pane-border-indicators",
+            getattr(self, "_border_indicators_original", None),
+        )
+        if restored:
+            self._border_indicators_arrows = False
+            self._border_indicators_original_known = False
+            self._border_indicators_original = None
+        return restored
+
+    def _set_divider_active(self, active: bool, *, force: bool = False) -> None:
+        """Highlight the outer border owned by the focused workspace pane.
+
+        Agent focus uses tmux's bright active-border colour. Sidebar focus
+        keeps every tmux border gray: green always means actual keyboard focus,
+        while a dual workspace names its remembered Target pane in the status
+        brand.
+        """
+        workspace = self._agent_workspace()
+        layout = workspace.layout
+        target_pane = None if active else workspace.target.pane_id
+        state = (active, layout, target_pane)
+        if not force and self._divider_active == state:
             return
-        self._divider_active = active
-        style = f"fg={_GRASS_GREEN}" if active else "fg=colour240"
-        tmux_ctl.set_window_border_style(style)
+        gray = "fg=colour240"
+        green = f"fg={_GRASS_GREEN}"
+        if not active:
+            # Green means real keyboard focus. The old single-pane Target
+            # treatment used a per-pane dim-green format here; tmux owns shared
+            # border cells in segments, so after restart that format could
+            # colour only half of the center divider. A single workspace has no
+            # ambiguous target, and a dual workspace names P1/P2 in the status
+            # brand, so every sidebar-focused border can stay honestly gray.
+            applied = tmux_ctl.set_window_border_styles(gray, gray)
+        elif layout is WorkspaceLayout.SINGLE:
+            applied = tmux_ctl.set_window_border_styles(green, green)
+        else:
+            applied = tmux_ctl.set_window_border_styles(
+                gray, green if active else gray)
+        arrows = active and layout is WorkspaceLayout.SIDE_BY_SIDE
+        indicators_applied = self._sync_border_indicators(arrows)
+        # A failed tmux update must remain retryable. Caching an unapplied dual
+        # style is what can leave half of the single-pane divider green after
+        # Pane 2 is closed.
+        self._divider_active = state if applied and indicators_applied else None
 
     def _set_railmux_focus(self, active: bool, *, force_border: bool = False) -> None:
         """Synchronize urwid focus maps and the tmux center divider."""
@@ -857,6 +961,45 @@ class App:
         self._set_divider_active(not active, force=force_border)
         if hasattr(self, "_hint_bar"):
             self._hint_bar.set_context(self._help_context())
+        # The status brand carries a compact layout/Target-pane cue. It remains
+        # visible on either side of the focus transition because layout and
+        # Target pane are state, not focus decoration.
+        self._apply_tmux_bar(self._tmux_error_bar)
+
+    def _sync_target_slot_from_tmux(self, *, previous: bool = False) -> AgentSlot:
+        """Resolve actual tmux pane focus to the workspace Target.
+
+        ``previous`` is used when the sidebar has just received focus: tmux's
+        active pane is already Railmux, while ``pane_last`` still identifies
+        the agent the user came from.
+        """
+        workspace = self._agent_workspace()
+        target = getattr(self, "_railmux_pane_id", None)
+        if target is None:
+            target = workspace.primary.pane_id or workspace.secondary.pane_id
+        if target is None:
+            return workspace.target
+        pane_id = (
+            tmux_ctl.last_pane_id(target)
+            if previous else tmux_ctl.active_pane_id(target)
+        )
+        slot = workspace.slot_for_pane(pane_id) if pane_id else None
+        if slot is None:
+            return workspace.target
+        if slot.key != workspace.target_slot_key:
+            workspace.set_target(slot.key)
+            self._paint_slot_active_target(
+                slot, slot.active_session_id, slot.agent_tmux_name)
+            # While focus stays somewhere in the agent region, tmux does not
+            # send another focus event to the already-unfocused sidebar when a
+            # mouse click moves directly between P1 and P2. The refresh loop
+            # still resolves the new active pane through this method; repaint
+            # the compact layout glyph at the same state transition rather than
+            # waiting for focus to return to Railmux. This runs only when the
+            # Target pane actually changes, so ordinary polling never jitters
+            # the status line or an agent's input preedit.
+            self._apply_tmux_bar(self._tmux_error_bar)
+        return slot
 
     def _schedule_right_pane_focus_after_double(self) -> None:
         """Show the right-focus state now, then move tmux focus once settled."""
@@ -874,7 +1017,7 @@ class App:
 
     def _apply_right_pane_focus_after_double(self, _loop, _user_data) -> None:
         self._double_focus_alarm = None
-        pane_id = self._primary_slot.pane_id
+        pane_id = self._agent_workspace().target.pane_id
         if pane_id is None or not tmux_ctl.select_pane(pane_id):
             self._double_focus_visual_pending = False
             self._set_railmux_focus(True)
@@ -1002,8 +1145,10 @@ class App:
                 # Ignore the late left-pane report while a double-click transfer
                 # is pending; cancellation restores it for newer sidebar input.
                 if not self._double_focus_visual_pending:
+                    self._sync_target_slot_from_tmux(previous=True)
                     self._set_railmux_focus(True)
             elif key == "focus out":
+                self._sync_target_slot_from_tmux()
                 self._set_railmux_focus(False)
                 # Belt-and-suspenders: if the paste-end marker was lost the
                 # sidebar would swallow every key forever.  Focus leaving the
@@ -1038,11 +1183,45 @@ class App:
         """Restore persisted state, retaining its file if restoration raises."""
         state = self._pending_restore_state
         right_mode = state.get("right_mode") if state is not None else None
+        workspace_slots: tuple[dict, ...] = ()
+        if state is not None:
+            workspace = state.get("workspace")
+            raw_slots = workspace.get("slots") if isinstance(workspace, dict) else None
+            if isinstance(raw_slots, dict):
+                workspace_slots = tuple(
+                    item for item in raw_slots.values()
+                    if isinstance(item, dict)
+                )
+
+        def workspace_codex_metadata_pending() -> bool:
+            for item in workspace_slots:
+                if item.get("mode") != CODEX_MODE.key:
+                    continue
+                if item.get("kind") == "preview":
+                    return True
+                if item.get("kind") != "agent":
+                    continue
+                tmux_name = item.get("tmux")
+                session_id = item.get("session")
+                represented = (
+                    isinstance(tmux_name, str)
+                    and any(running.tmux_name == tmux_name
+                            for running in self._running.values())
+                ) or (
+                    isinstance(session_id, str)
+                    and session_id in self._running
+                )
+                if not represented:
+                    return True
+            return False
+
         codex_snapshot_ready = True
         index = getattr(self, "_codex_index", None)
         if isinstance(index, BackgroundCodexIndex):
             codex_snapshot_ready = index.current_snapshot().generation > 0
         if getattr(self, "_codex_recovery_pending", False) and state is not None:
+            if workspace_codex_metadata_pending():
+                return
             # Exact live targets adopted from stamps are safe to display even
             # while the first filesystem generation is still pending. A
             # metadata-dependent target waits and is retried after settlement.
@@ -1065,6 +1244,8 @@ class App:
                             and self._active_mode().key == CODEX_MODE.key)):
                     return
         if state is not None and not codex_snapshot_ready:
+            if workspace_codex_metadata_pending():
+                return
             kind = state.get("right_kind")
             uses_codex_metadata = (
                 kind == "preview"
@@ -1109,7 +1290,8 @@ class App:
         claude_tmux_name = self._pending_scroll_session
         self._pending_scroll_session = None
         if (claude_tmux_name is not None
-                and self._primary_slot.agent_tmux_name == claude_tmux_name):
+                and self._agent_workspace().target.agent_tmux_name
+                == claude_tmux_name):
             self._configure_scroll_acceleration(claude_tmux_name)
 
     # --- project / session selection callbacks ---
@@ -1214,20 +1396,37 @@ class App:
             self._cancel_pending_double_focus()
         # Opening a real session (or creating a new one) — clear any
         # history-preview state so the launch takes over the right pane.
-        self._primary_slot.in_history_mode = False
-        self._primary_slot.restore_state = None
+        slot = self._agent_workspace().target
+        slot.in_history_mode = False
+        slot.restore_state = None
         if session is None:
-            self._launch_new_session()
+            if slot is self._primary_slot:
+                self._launch_new_session()
+            else:
+                self._launch_new_session(slot=slot)
             return
-        self._launch_resume(
-            session,
-            steal_focus=steal_focus,
-            from_double=from_double,
-        )
+        if slot is self._primary_slot:
+            self._launch_resume(
+                session,
+                steal_focus=steal_focus,
+                from_double=from_double,
+            )
+        else:
+            self._launch_resume(
+                session,
+                steal_focus=steal_focus,
+                from_double=from_double,
+                slot=slot,
+            )
 
     def _on_running_select(self, entry: RunningEntry,
                             steal_focus: bool = True,
-                            from_double: bool = False) -> None:
+                            from_double: bool = False,
+                            slot: AgentSlot | None = None) -> bool:
+        if slot is None:
+            slot = (self._agent_workspace().slot_for_agent(entry.tmux_name)
+                    or self._agent_workspace().target)
+        self._agent_workspace().set_target(slot.key)
         if not from_double:
             self._cancel_pending_double_focus()
         selected = self._by_tmux(entry.tmux_name)
@@ -1236,17 +1435,25 @@ class App:
                     selected, entry.identity_token)):
             msg = "Open refused: the unresolved tmux identity changed"
             self._set_status(msg, "error")
-            return
+            return False
         # Re-attach the agent pane to this already-running session AND
         # sync the Projects/Sessions panes to that session's project, so the
         # sidebar reflects what's actually showing on the right.
-        self._primary_slot.in_history_mode = False
-        self._primary_slot.restore_state = None
-        ok = self._attach_in_right_pane(entry.tmux_name, steal_focus=steal_focus)
+        slot.in_history_mode = False
+        slot.restore_state = None
+        if slot is self._primary_slot:
+            # Preserve the long-standing primary compatibility entry point;
+            # integrations may wrap it while secondary goes through the new
+            # explicit-slot path.
+            ok = self._attach_in_right_pane(
+                entry.tmux_name, steal_focus=steal_focus)
+        else:
+            ok = self._attach_agent_slot(
+                slot, entry.tmux_name, steal_focus=steal_focus)
         if not ok:
             msg = "Re-attach failed: could not connect to agent pane"
             self._set_status(msg, "error")
-            return
+            return False
         r = self._by_tmux(entry.tmux_name)
         project = r.project if r else None
         if project is not None:
@@ -1275,21 +1482,12 @@ class App:
                 )
         if not self._show_attention_status(entry.attention):
             self._set_status(f"→ {entry.label}")
+        return True
 
     # --- history preview (display pane shows a transcript, not an agent session) ---
 
-    def _on_session_preview(self, session: SessionMeta) -> None:
-        """Show session history in the right pane without launching Claude.
-
-        Stopped-session clicks preview immediately. On a double-click the first
-        press may briefly preview before the second press opens the session;
-        both operations reuse the same right pane.
-        """
-        # Rows bind their click callback from a periodically-refreshed snapshot.
-        # The registry can become live between render and click (or a click can
-        # land on an old row instance preserved across a rebuild). Revalidate
-        # the tmux identity at action time so a stale "preview" callback never
-        # replaces a live agent display with transcript history.
+    def _on_session_row_preview(self, session: SessionMeta) -> None:
+        """Apply click semantics after rechecking whether the row is live."""
         running = getattr(self, "_running", {}).get(session.session_id)
         if (running is not None
                 and self._agent_session_alive(running.tmux_name)):
@@ -1302,28 +1500,53 @@ class App:
                 steal_focus=False,
             )
             return
+        self._on_session_preview(session)
+
+    def _on_session_preview(self, session: SessionMeta) -> None:
+        """Show session history in the right pane without launching Claude.
+
+        Stopped-row clicks, Space, and the context action preview history. Live
+        rows are filtered by _on_session_row_preview before reaching this path.
+        """
+        slot = self._agent_workspace().target
         self._cancel_pending_double_focus()
         if not self._has_less:
             self._set_status("'less' not installed — cannot preview history")
             return
-        if not self._primary_slot.in_history_mode:
-            self._save_restore_state()
-        if self._show_transcript(session.jsonl_path,
-                                 session_type=session.session_type):
-            self._primary_slot.in_history_mode = True
-            self._set_active_target(
-                session.session_id,
-                None,
-                mode_key=self._current_mode_key(),
-                project_key=session.project.encoded_name,
+        if not slot.in_history_mode:
+            if slot is self._primary_slot:
+                self._save_restore_state()
+            else:
+                self._save_restore_state(slot)
+        shown = (
+            self._show_transcript(
+                session.jsonl_path, session_type=session.session_type)
+            if slot is self._primary_slot
+            else self._show_transcript(
+                session.jsonl_path,
+                session_type=session.session_type,
+                slot=slot,
             )
+        )
+        if shown:
+            slot.in_history_mode = True
+            target_kwargs = {
+                "mode_key": self._current_mode_key(),
+                "project_key": session.project.encoded_name,
+            }
+            if slot is self._primary_slot:
+                self._set_active_target(
+                    session.session_id, None, **target_kwargs)
+            else:
+                self._set_slot_active_target(
+                    slot, session.session_id, None, **target_kwargs)
             if not self._show_attention_status(session.attention):
                 self._set_status(
                     f"≡ Previewing {session.display_title} (history)")
 
-    def _save_restore_state(self) -> None:
+    def _save_restore_state(self, slot: AgentSlot | None = None) -> None:
         """Remember what's in the right pane before taking it over for history."""
-        slot = self._primary_slot
+        slot = slot or self._agent_workspace().target
         if slot.pane_id and tmux_ctl.pane_alive(slot.pane_id):
             if (slot.agent_tmux_name
                     and tmux_ctl.session_exists(slot.agent_tmux_name)):
@@ -1348,7 +1571,8 @@ class App:
         return ""
 
     def _show_transcript(self, jsonl_path: Path,
-                         session_type: str = "claude") -> bool:
+                         session_type: str = "claude",
+                         slot: AgentSlot | None = None) -> bool:
         """Create or respawn the right pane with a ``less`` transcript viewer.
 
         Mouse-wheel scrolling works after focusing the right pane (double-click
@@ -1376,7 +1600,7 @@ class App:
                f"{python} -m railmux.transcript --format {fmt} "
                f"--preview-limit 2000 - | "
                f"{less_env} less -R +G {mouse}").rstrip()
-        slot = self._primary_slot
+        slot = slot or self._agent_workspace().target
         # In swap mode ``slot.pane_id`` is the real provider pane. Return it
         # home before the destructive ``respawn-pane -k`` below; only the
         # display placeholder may be replaced by the transcript viewer.
@@ -1400,43 +1624,33 @@ class App:
         # The display pane is now showing a transcript, not an agent session.
         slot.agent_tmux_name = None
         slot.mode_key = self._current_mode_key()
-        self._install_fullscreen_binding()
+        self._set_divider_active(
+            not getattr(self, "_railmux_has_focus", True), force=True)
+        self._install_function_key_bindings()
         return True
 
-    def _restore_from_history_mode(self) -> None:
-        """Restore whatever was in the right pane before we entered history mode."""
-        slot = self._primary_slot
-        restore = slot.restore_state
-        slot.restore_state = None
-        if restore is None or restore.kind == "empty":
+    def _sync_sidebar_to_agent_project(self, tmux_name: str | None) -> None:
+        """Restore sidebar project/session context for one displayed agent."""
+        if tmux_name is None:
             return
-        if restore.kind in ("agent", "claude") and restore.tmux_name:
-            if tmux_ctl.session_exists(restore.tmux_name):
-                running = self._by_tmux(restore.tmux_name)
-                if (running is not None and running.orphan is not None
-                        and not self._running_action_valid(running)):
-                    self._set_status(
-                        "Restore refused: marked tmux identity changed", "error")
-                    return
-                self._attach_in_right_pane(restore.tmux_name)
-                # Sync the sidebar to the restored session's project so the
-                # user doesn't see a stale project after less exits.
-                r = self._by_tmux(restore.tmux_name)
-                if r is not None and r.project is not None:
-                    proj = self._project_in_current_view(r.project)
-                    if (self._selected_project is None
-                            or self._selected_project.encoded_name != proj.encoded_name):
-                        self._set_current_project(proj)
-                        # #9: a synthetic Codex project (empty claude_dir) must
-                        # never reach the Claude cache — ``_pane_sessions`` routes
-                        # Codex/Claude and skips the empty case.
-                        sessions = self._pane_sessions(
-                            proj, refresh=not self._mode_refresh_pending())
-                        self._sessions_pane.set_sessions(
-                            proj, sessions,
-                            running_ids=set(self._running),
-                            favorite_ids=self._favorites.get_ids(),
-                        )
+        running = self._by_tmux(tmux_name)
+        if running is None or running.project is None:
+            return
+        project = self._project_in_current_view(running.project)
+        if (self._selected_project is not None
+                and self._selected_project.encoded_name == project.encoded_name):
+            return
+        self._set_current_project(project)
+        # A synthetic Codex project (empty claude_dir) must never reach the
+        # Claude cache; _pane_sessions owns the provider-specific routing.
+        sessions = self._pane_sessions(
+            project, refresh=not self._mode_refresh_pending())
+        self._sessions_pane.set_sessions(
+            project,
+            sessions,
+            running_ids=set(self._running),
+            favorite_ids=self._favorites.get_ids(),
+        )
 
     # --- tmux integration (detached session per agent + display-pane attach) ---
 
@@ -1542,9 +1756,9 @@ class App:
         if outcome.fell_back and outcome.reason:
             self._set_status(
                 f"Using nested agent display: {outcome.reason}", "warn")
-        if slot.key == self._agent_workspace().active_slot_key:
+        if slot.key == self._agent_workspace().target_slot_key:
             self._schedule_scroll_acceleration(agent_tmux_name)
-        self._install_fullscreen_binding()
+        self._install_function_key_bindings()
         return True
 
     def _reconcile_failed_attach_target(
@@ -1580,24 +1794,465 @@ class App:
         return self._attach_agent_slot(
             self._primary_slot, claude_tmux_name, steal_focus=steal_focus)
 
-    def _install_fullscreen_binding(self) -> None:
-        """(Re)bind F9 to fullscreen-toggle the *agent* (right) pane.
+    def _install_function_key_bindings(self) -> None:
+        """Ensure the shared F8/F9 forwarding transaction is active."""
+        manager = getattr(self, "_root_function_key_manager", None)
+        if manager is not None:
+            manager.open()
 
-        Unlike tmux's built-in ``Ctrl-B z`` — which zooms whichever pane is
-        active and can therefore fullscreen the railmux sidebar by mistake — this
-        targets the right pane's current id explicitly, so F9 always zooms the
-        agent pane regardless of focus. Rebound whenever the right pane is
-        (re)created because its id changes. Copy workflow: F9 → Shift-drag to
-        select → Cmd/Ctrl+C → F9 to exit.
-        """
-        pane_id = self._agent_workspace().active.pane_id
-        if not pane_id:
+    def _toggle_agent_fullscreen(self) -> None:
+        """Zoom the focused agent, or the last active agent from the sidebar."""
+        slot = self._sync_target_slot_from_tmux()
+        pane_id = slot.pane_id
+        if pane_id is None or not tmux_ctl.pane_alive(pane_id):
+            self._set_status("No agent pane to fullscreen.", "tip")
             return
-        import subprocess as _sp
-        _sp.run(
-            ["tmux", "bind-key", "-n", "F9", "resize-pane", "-Z", "-t", pane_id],
-            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+        if not tmux_ctl.toggle_pane_zoom(pane_id):
+            self._set_status("Could not toggle agent fullscreen.", "error")
+
+    def _agent_region_size(self) -> tuple[int, int] | None:
+        """Size of the agent area before its optional 50/50 inner split."""
+        workspace = self._agent_workspace()
+        primary_id = workspace.primary.pane_id
+        if primary_id is None:
+            return None
+        primary_size = tmux_ctl.pane_size(primary_id)
+        if primary_size is None:
+            return None
+        if workspace.layout is WorkspaceLayout.SINGLE:
+            return primary_size
+        secondary_id = workspace.secondary.pane_id
+        secondary_size = (
+            tmux_ctl.pane_size(secondary_id) if secondary_id else None)
+        if secondary_size is None:
+            return None
+        pw, ph = primary_size
+        sw, sh = secondary_size
+        if workspace.layout is WorkspaceLayout.SIDE_BY_SIDE:
+            return pw + sw + 1, max(ph, sh)
+        return max(pw, sw), ph + sh + 1
+
+    def _layout_fits(
+        self, region: tuple[int, int], layout: WorkspaceLayout,
+    ) -> bool:
+        width, height = projected_agent_size(region, layout)
+        min_width, min_height = self._MINIMUM_AGENT_PANE_SIZE
+        return width >= min_width and height >= min_height
+
+    def _focused_pane_menu_target(
+        self,
+    ) -> tuple[str, SessionMeta | RunningEntry, str] | None:
+        position = self._sidebar.focus_position
+        if position == 1:
+            session = self._currently_focused_session_meta()
+            if session is not None:
+                return "session", session, session.display_title
+        elif position == 2 and self._running_pane._walker:
+            focus_w, _ = self._running_pane._walker.get_focus()
+            from railmux.ui.running_pane import _RunningRow
+            if isinstance(focus_w, _RunningRow):
+                return "running", focus_w.entry, focus_w.entry.label
+        return None
+
+    def _preview_focused_target(self) -> None:
+        """Mirror a single-click for the focused Sessions/Running target."""
+        target = self._focused_pane_menu_target()
+        if target is None:
+            self._set_status(
+                "Select a Sessions or Running row to preview or switch it.",
+                "tip")
+            return
+        kind, value, _label = target
+        if kind == "session" and isinstance(value, SessionMeta):
+            self._on_session_row_preview(value)
+        elif kind == "running" and isinstance(value, RunningEntry):
+            self._on_running_select(value, steal_focus=False)
+
+    def _close_secondary_split(self, *, announce: bool = True) -> bool:
+        workspace = self._agent_workspace()
+        secondary = workspace.secondary
+        if not secondary.is_open:
+            if announce:
+                self._set_status("Pane 2 is not open.", "tip")
+            return False
+        remembered_agent = secondary.agent_tmux_name
+        sidebar_focused = self._railmux_has_focus
+        if not self._display_transport().close_slot(secondary):
+            self._set_status(
+                "Could not safely return Pane 2's agent home.", "error")
+            return False
+        if remembered_agent is not None:
+            workspace.collapsed_secondary_agent = remembered_agent
+        workspace.layout = WorkspaceLayout.SINGLE
+        workspace.set_target(AgentWorkspace.PRIMARY)
+        if not sidebar_focused and workspace.primary.pane_id:
+            tmux_ctl.select_pane(workspace.primary.pane_id)
+        self._paint_slot_active_target(
+            workspace.primary,
+            workspace.primary.active_session_id,
+            workspace.primary.agent_tmux_name,
         )
+        self._install_function_key_bindings()
+        self._set_railmux_focus(sidebar_focused, force_border=True)
+        if announce:
+            if remembered_agent is None:
+                self._set_status("Single pane; empty Pane 2 closed.")
+            else:
+                self._set_status(
+                    "Single pane; Pane 2's agent continues in Running.")
+        return True
+
+    def _rebuild_secondary(
+        self, layout: WorkspaceLayout, agent_tmux_name: str | None,
+    ) -> bool:
+        workspace = self._agent_workspace()
+        if not self._display_transport().create_secondary(layout):
+            return False
+        if agent_tmux_name is None:
+            return True
+        return self._attach_agent_slot(
+            workspace.secondary, agent_tmux_name, steal_focus=False)
+
+    def _rotate_split(self) -> None:
+        workspace = self._agent_workspace()
+        secondary = workspace.secondary
+        old_layout = workspace.layout
+        new_layout = next_workspace_layout(old_layout)
+
+        if new_layout is WorkspaceLayout.SINGLE:
+            self._close_secondary_split()
+            return
+
+        if old_layout is WorkspaceLayout.SINGLE:
+            agent_tmux_name = workspace.collapsed_secondary_agent
+            if (agent_tmux_name is None
+                    or not self._agent_session_alive(agent_tmux_name)):
+                workspace.collapsed_secondary_agent = None
+                agent_tmux_name = None
+            if workspace.primary.agent_tmux_name == agent_tmux_name:
+                workspace.collapsed_secondary_agent = None
+                agent_tmux_name = None
+            region = self._agent_region_size()
+            if (region is not None
+                    and not self._layout_fits(region, new_layout)):
+                # F8 must remain useful on ordinary-width terminals. If the
+                # first dual orientation is unusable, skip directly to the
+                # other one instead of trapping the cycle on SINGLE forever.
+                alternate = next_workspace_layout(new_layout)
+                if (alternate is not WorkspaceLayout.SINGLE
+                        and self._layout_fits(region, alternate)):
+                    new_layout = alternate
+            if region is None or not self._layout_fits(region, new_layout):
+                detail = "unknown"
+                if region is not None:
+                    width, height = projected_agent_size(region, new_layout)
+                    detail = f"{width}×{height}"
+                self._set_status(
+                    f"Cannot switch to {new_layout.value}: each pane would be "
+                    f"{detail}; minimum is 50×12.",
+                    "warn",
+                )
+                return
+            sidebar_focused = self._railmux_has_focus
+            if not self._rebuild_secondary(new_layout, agent_tmux_name):
+                self._display_transport().close_slot(secondary)
+                workspace.layout = WorkspaceLayout.SINGLE
+                workspace.set_target(AgentWorkspace.PRIMARY)
+                self._set_railmux_focus(sidebar_focused, force_border=True)
+                self._set_status(
+                    "Could not create Pane 2; any remembered agent remains "
+                    "in Running.",
+                    "error",
+                )
+                return
+            workspace.set_target(AgentWorkspace.PRIMARY)
+            if not sidebar_focused and workspace.primary.pane_id:
+                tmux_ctl.select_pane(workspace.primary.pane_id)
+            self._install_function_key_bindings()
+            self._set_railmux_focus(sidebar_focused, force_border=True)
+            self._set_status(f"Layout → {new_layout.value}")
+            return
+
+        if not secondary.is_open:
+            workspace.layout = WorkspaceLayout.SINGLE
+            self._set_railmux_focus(
+                self._railmux_has_focus, force_border=True)
+            self._set_status(
+                "Pane 2 disappeared; returned to single-pane layout.", "warn")
+            return
+
+        region = self._agent_region_size()
+        if region is None or not self._layout_fits(region, new_layout):
+            if region is None:
+                detail = "unknown"
+            else:
+                width, height = projected_agent_size(region, new_layout)
+                detail = f"{width}×{height}"
+            self._set_status(
+                f"Cannot rotate: {new_layout.value} would give each pane {detail}; "
+                "minimum is 50×12.",
+                "warn",
+            )
+            return
+
+        primary_id = workspace.primary.pane_id
+        old_secondary_id = secondary.pane_id
+        if primary_id is None or old_secondary_id is None:
+            return
+        active_before = tmux_ctl.active_pane_id(primary_id)
+        sidebar_focused = self._railmux_has_focus
+        target_slot_before = workspace.target_slot_key
+        agent_tmux_name = secondary.agent_tmux_name
+
+        if not self._display_transport().close_slot(secondary):
+            self._set_status("Rotate stopped: Pane 2 could not return home.", "error")
+            return
+        workspace.layout = WorkspaceLayout.SINGLE
+        if not self._rebuild_secondary(new_layout, agent_tmux_name):
+            self._display_transport().close_slot(secondary)
+            workspace.layout = WorkspaceLayout.SINGLE
+            if not self._rebuild_secondary(old_layout, agent_tmux_name):
+                self._display_transport().close_slot(secondary)
+                workspace.layout = WorkspaceLayout.SINGLE
+                workspace.set_target(AgentWorkspace.PRIMARY)
+                self._set_status(
+                    "Rotate failed; Pane 2's agent continues in Running.", "error")
+            else:
+                self._set_status("Rotate failed; restored the previous layout.", "error")
+            self._set_railmux_focus(sidebar_focused, force_border=True)
+            return
+
+        if active_before == old_secondary_id and secondary.pane_id:
+            workspace.set_target(AgentWorkspace.SECONDARY)
+            tmux_ctl.select_pane(secondary.pane_id)
+        elif active_before == primary_id:
+            workspace.set_target(AgentWorkspace.PRIMARY)
+            tmux_ctl.select_pane(primary_id)
+        else:
+            workspace.set_target(target_slot_before)
+        self._install_function_key_bindings()
+        self._set_railmux_focus(sidebar_focused, force_border=True)
+        self._set_status(f"Layout → {new_layout.value}")
+
+    def _slot_reopen_target(
+        self, slot: AgentSlot, session_is_alive: Callable[[str], bool],
+    ) -> str | None:
+        """Agent target that should survive loss of one outer display pane."""
+        if slot.in_history_mode:
+            restore = slot.restore_state
+            if (restore is not None and restore.kind in ("agent", "claude")
+                    and restore.tmux_name
+                    and session_is_alive(restore.tmux_name)
+                    and self._validated_preview_restore_agent(
+                        restore.tmux_name, already_alive=True) is not None):
+                return restore.tmux_name
+            return None
+        agent = slot.agent_tmux_name
+        return agent if agent and session_is_alive(agent) else None
+
+    def _reap_dead_display_slots(
+        self, transport: AgentDisplayTransport,
+    ) -> set[str]:
+        """Reap dead swap displays and clear the active sidebar selection."""
+        dead_agents: set[str] = set()
+        for slot in self._agent_workspace().slots:
+            agent = transport.reap_dead_display(slot)
+            if agent is None:
+                continue
+            dead_agents.add(agent)
+            # The transport clears the slot before reconciliation. Paint the
+            # shared sidebar state here because a single layout then has no
+            # missing pane left for _reconcile_display_slots to discover.
+            self._paint_slot_active_target(slot, None, None)
+        return dead_agents
+
+    def _reconcile_display_slots(
+        self,
+        session_is_alive: Callable[[str], bool],
+        pane_is_alive: Callable[[str], bool],
+    ) -> None:
+        """Make the two-slot model match outer panes after exits or user kills.
+
+        A missing secondary collapses cleanly to primary. A missing primary is
+        rebuilt first; if it cannot be restored, the surviving secondary agent
+        is promoted through a safe return-home/reattach transaction rather than
+        relabelling slot-specific swap ownership in memory.
+        """
+        workspace = self._agent_workspace()
+        transport = self._display_transport()
+        old_layout = workspace.layout
+        old_target_key = workspace.target_slot_key
+        targets: dict[str, str | None] = {}
+        lost: set[str] = set()
+
+        for slot in workspace.slots:
+            pane_id = slot.pane_id
+            if pane_id is None:
+                if old_layout is not WorkspaceLayout.SINGLE:
+                    lost.add(slot.key)
+                continue
+            agent_dead = (
+                slot.agent_tmux_name is not None
+                and not session_is_alive(slot.agent_tmux_name)
+            )
+            pane_dead = not pane_is_alive(pane_id)
+            if not (agent_dead or pane_dead):
+                continue
+            if slot.swap_state is not None:
+                self._set_status(
+                    "A swap-owned agent pane needs marker recovery; "
+                    "automatic layout cleanup was deferred.",
+                    "error",
+                )
+                continue
+            targets[slot.key] = (
+                None if agent_dead
+                else self._slot_reopen_target(slot, session_is_alive)
+            )
+            # A nested display pane contains only Railmux's attach client and is
+            # safe to remove after the owned agent is proven dead. Swap panes
+            # require marker-based recovery and are handled by reap_dead_display.
+            if agent_dead and slot.swap_state is None:
+                tmux_ctl.kill_pane(pane_id)
+            lost.add(slot.key)
+
+        if not lost:
+            return
+
+        history_was_lost = any(
+            slot.key in lost and slot.in_history_mode
+            for slot in workspace.slots
+        )
+
+        primary = workspace.primary
+        secondary = workspace.secondary
+        sidebar_focused = self._railmux_has_focus
+
+        # Preserve the established single-pane lifecycle. Closing an ordinary
+        # display pane means "return to the full-width sidebar", not "rebuild
+        # Pane 1". A transcript preview is the sole exception: if its saved
+        # agent is still alive, restore it silently just as the legacy path did.
+        if (old_layout is WorkspaceLayout.SINGLE
+                and AgentWorkspace.PRIMARY in lost):
+            restore_target = (
+                targets.get(AgentWorkspace.PRIMARY)
+                if primary.in_history_mode else None
+            )
+            primary.clear_display()
+            workspace.set_target(AgentWorkspace.PRIMARY)
+            if restore_target is not None:
+                if not self._attach_agent_slot(
+                        primary, restore_target, steal_focus=False):
+                    restore_target = None
+            self._paint_slot_active_target(
+                primary,
+                primary.active_session_id,
+                primary.agent_tmux_name,
+            )
+            if history_was_lost and restore_target is not None:
+                self._sync_sidebar_to_agent_project(restore_target)
+            if not sidebar_focused and primary.pane_id is not None:
+                tmux_ctl.select_pane(primary.pane_id)
+            self._install_function_key_bindings()
+            self._set_railmux_focus(
+                sidebar_focused or primary.pane_id is None,
+                force_border=True,
+            )
+            return
+
+        if AgentWorkspace.PRIMARY in lost:
+            primary_target = targets.get(AgentWorkspace.PRIMARY)
+            secondary_target = (
+                self._slot_reopen_target(secondary, session_is_alive)
+                if secondary.pane_id is not None else None
+            )
+            if secondary.pane_id is not None:
+                if not transport.close_slot(secondary):
+                    self._set_status(
+                        "Pane 1 disappeared, but Pane 2 could not be returned "
+                        "home safely.",
+                        "error",
+                    )
+                    return
+            primary.clear_display()
+            secondary.clear_display()
+            workspace.layout = WorkspaceLayout.SINGLE
+            workspace.set_target(AgentWorkspace.PRIMARY)
+
+            # Restore the former Pane 1 when possible. Otherwise promote the
+            # surviving Pane 2 agent into a freshly-owned primary slot.
+            promoted = primary_target or secondary_target
+            if promoted is not None:
+                if not self._attach_agent_slot(
+                        primary, promoted, steal_focus=False):
+                    promoted = None
+            if (promoted is not None and primary_target is not None
+                    and secondary_target is not None
+                    and secondary_target != primary_target):
+                if (transport.create_secondary(old_layout)
+                        and self._attach_agent_slot(
+                            secondary, secondary_target, steal_focus=False)):
+                    workspace.collapsed_secondary_agent = secondary_target
+                else:
+                    transport.close_slot(secondary)
+                    workspace.layout = WorkspaceLayout.SINGLE
+                    workspace.collapsed_secondary_agent = secondary_target
+
+            if (old_target_key == AgentWorkspace.SECONDARY
+                    and secondary.pane_id is not None):
+                workspace.set_target(AgentWorkspace.SECONDARY)
+            else:
+                workspace.set_target(AgentWorkspace.PRIMARY)
+            self._paint_slot_active_target(
+                workspace.target,
+                workspace.target.active_session_id,
+                workspace.target.agent_tmux_name,
+            )
+            if history_was_lost:
+                self._sync_sidebar_to_agent_project(
+                    workspace.target.agent_tmux_name)
+            if not sidebar_focused and workspace.target.pane_id:
+                tmux_ctl.select_pane(workspace.target.pane_id)
+            self._install_function_key_bindings()
+            self._set_railmux_focus(sidebar_focused, force_border=True)
+            self._set_status(
+                "Pane 1 disappeared; surviving agent panes were rebuilt.",
+                "warn",
+            )
+            return
+
+        # Only Pane 2 was lost. Recreate it when its agent/preview restore target
+        # is still alive; otherwise collapse to one truthful primary pane.
+        secondary_target = targets.get(AgentWorkspace.SECONDARY)
+        secondary.clear_display()
+        if (secondary_target is not None
+                and transport.create_secondary(old_layout)
+                and self._attach_agent_slot(
+                    secondary, secondary_target, steal_focus=False)):
+            workspace.collapsed_secondary_agent = secondary_target
+            workspace.set_target(old_target_key)
+        else:
+            transport.close_slot(secondary)
+            workspace.layout = WorkspaceLayout.SINGLE
+            workspace.set_target(AgentWorkspace.PRIMARY)
+            if (workspace.collapsed_secondary_agent is not None
+                    and not session_is_alive(
+                        workspace.collapsed_secondary_agent)):
+                workspace.collapsed_secondary_agent = None
+        self._paint_slot_active_target(
+            workspace.target,
+            workspace.target.active_session_id,
+            workspace.target.agent_tmux_name,
+        )
+        if history_was_lost:
+            self._sync_sidebar_to_agent_project(
+                workspace.target.agent_tmux_name)
+        if not sidebar_focused and workspace.target.pane_id:
+            tmux_ctl.select_pane(workspace.target.pane_id)
+        self._install_function_key_bindings()
+        self._set_railmux_focus(sidebar_focused, force_border=True)
+        self._set_status(
+            "Pane 2 disappeared; workspace layout was reconciled.", "warn")
 
     def _by_tmux(self, tmux_name: str) -> "_Running | None":
         """Find the running session backed by a given tmux session name."""
@@ -1653,6 +2308,7 @@ class App:
     def _launch(self, key: str, cmd: list[str], cwd: Path, label: str,
                 project: Project | None, placeholder_path: Path | None = None,
                 *, steal_focus: bool = True,
+                slot: AgentSlot | None = None,
                 env: dict[str, str] | None = None,
                 login_shell: bool = False,
                 session_type: str = "claude") -> bool:
@@ -1668,6 +2324,7 @@ class App:
         injected by railmux at all — the login+interactive shell ($SHELL -li)
         that runs Codex sources the user's profile and loads the key itself.
         """
+        slot = slot or self._primary_slot
         existing = self._running.get(key)
         tmux_name = existing.tmux_name if existing else self._session_name(key)
         # Never adopt an untracked pre-existing tmux session merely because its
@@ -1745,7 +2402,13 @@ class App:
             allow_heuristic_resolution=pre_launch_complete,
         )
         self._stamp_running(self._running[key])
-        if not self._attach_in_right_pane(tmux_name, steal_focus=steal_focus):
+        attached = (
+            self._attach_in_right_pane(tmux_name, steal_focus=steal_focus)
+            if slot is self._primary_slot
+            else self._attach_agent_slot(
+                slot, tmux_name, steal_focus=steal_focus)
+        )
+        if not attached:
             msg = "Launch failed: could not attach to agent pane"
             self._set_status(msg, "error")
             return False
@@ -1753,7 +2416,10 @@ class App:
 
     def _launch_resume(self, session_meta: SessionMeta,
                         *, steal_focus: bool = True,
-                        from_double: bool = False) -> None:
+                        from_double: bool = False,
+                        slot: AgentSlot | None = None) -> bool:
+        explicit_slot = slot
+        slot = slot or self._primary_slot
         # Revalidate at action time.  A row can be stale, and an older Railmux
         # may have left a live placeholder writer that startup could not adopt.
         # Discover once more before ever running ``codex resume``/``claude
@@ -1772,16 +2438,23 @@ class App:
             running = self._running.get(session_meta.session_id)
         if (running is not None
                 and self._agent_session_alive(running.tmux_name)):
-            self._on_running_select(
-                RunningEntry(
-                    tmux_name=running.tmux_name,
-                    label=running.label,
-                    status=running.status,
-                ),
+            entry = RunningEntry(
+                tmux_name=running.tmux_name,
+                label=running.label,
+                status=running.status,
+            )
+            if explicit_slot is None:
+                return self._on_running_select(
+                    entry,
+                    steal_focus=steal_focus,
+                    from_double=from_double,
+                )
+            return self._on_running_select(
+                entry,
                 steal_focus=steal_focus,
                 from_double=from_double,
+                slot=slot,
             )
-            return
 
         if registry is not None:
             target_path = self._path_key(session_meta.project.real_path)
@@ -1800,7 +2473,7 @@ class App:
                     "project could own this session"
                 )
                 self._set_status(msg, "error")
-                return
+                return False
 
         cwd = session_meta.project.real_path
         env: dict[str, str] | None = None
@@ -1821,9 +2494,12 @@ class App:
         label = f"{session_meta.project.display_name}/{session_meta.display_title}"
         if self._launch(session_meta.session_id, cmd, cwd,
                         label, session_meta.project, steal_focus=steal_focus,
+                        slot=slot,
                         env=env, login_shell=session_meta.session_type == "codex",
                         session_type=session_meta.session_type):
             self._set_status(f"→ {session_meta.display_title}")
+            return True
+        return False
 
     def _new_placeholder_key(self) -> str:
         """Return a fresh ``__new__-<proc-token>-N`` placeholder key.
@@ -1835,7 +2511,8 @@ class App:
         self._new_session_counter += 1
         return f"__new__-{self._proc_token}-{self._new_session_counter}"
 
-    def _launch_new_session(self) -> None:
+    def _launch_new_session(self, slot: AgentSlot | None = None) -> None:
+        slot = slot or self._agent_workspace().target
         if self._selected_project is None:
             self._set_status("Pick a project first.")
             return
@@ -1855,10 +2532,15 @@ class App:
                 claude_binary=self._config.claude_binary,
                 cwd=proj.real_path,
             )
-        if self._launch(placeholder, cmd, proj.real_path, f"{proj.display_name}/(new)",
-                        proj, placeholder_path=proj.real_path, env=env,
-                        login_shell=mode.login_shell,
-                        session_type=mode.session_type):
+        slot_kwargs = (
+            {} if slot is self._primary_slot else {"slot": slot})
+        if self._launch(
+                placeholder, cmd, proj.real_path,
+                f"{proj.display_name}/(new)", proj,
+                placeholder_path=proj.real_path, env=env,
+                login_shell=mode.login_shell,
+                session_type=mode.session_type,
+                **slot_kwargs):
             self._set_status(f"→ new session in {proj.display_name}")
 
     def _on_new_project_submit(self, path: Path) -> None:
@@ -1888,10 +2570,16 @@ class App:
         else:
             cmd = build_new_session_command(
                 claude_binary=self._config.claude_binary, cwd=path)
+        target_slot = self._agent_workspace().target
+        slot_kwargs = (
+            {} if target_slot is self._primary_slot
+            else {"slot": target_slot})
         if self._launch(
                 placeholder, cmd, path, f"{path.name}/(new)", project,
-                placeholder_path=path, env=env, login_shell=login_shell,
-                session_type=session_type):
+                placeholder_path=path, env=env,
+                login_shell=login_shell,
+                session_type=session_type,
+                **slot_kwargs):
             self._set_status(f"→ new project: {path}")
 
     @staticmethod
@@ -2054,9 +2742,9 @@ class App:
             return
         shell = os.environ.get("SHELL", "/bin/bash")
         cmd = f"cd {shlex.quote(str(proj.real_path))} && exec {shlex.quote(shell)}"
-        # Split visibly in the same window: if an agent pane exists,
-        # put the terminal below it; otherwise split off the current pane.
-        pane_id = self._primary_slot.pane_id
+        # Split below the explicit active agent. If no agent pane exists, tmux
+        # falls back to the current pane as before.
+        pane_id = self._sync_target_slot_from_tmux().pane_id
         target = pane_id if (pane_id and tmux_ctl.pane_alive(pane_id)) else None
         new_pane = tmux_ctl.split_window_v(cmd, target=target)
         if not new_pane:
@@ -2158,7 +2846,7 @@ class App:
 
     def _portable_right_state_data(self) -> dict:
         """Return a stable display wish with no node-local tmux authority."""
-        slot = self._primary_slot
+        slot = self._agent_workspace().target
         session_id = slot.active_session_id
         mode_key = slot.mode_key
         if not session_id or session_id.startswith("__new__-") or not mode_key:
@@ -2185,9 +2873,72 @@ class App:
             data["right_project"] = slot.project_key
         return data
 
+    def _slot_recovery_state_data(self, slot: AgentSlot) -> dict:
+        """Exact-owner content wish for one display slot."""
+        if slot.in_history_mode:
+            data: dict = {"kind": "preview"}
+        elif slot.agent_tmux_name is not None:
+            data = {"kind": "agent", "tmux": slot.agent_tmux_name}
+        else:
+            data = {"kind": "empty"}
+        if slot.active_session_id is not None:
+            data["session"] = slot.active_session_id
+        mode_key = slot.mode_key
+        if mode_key is None and slot.in_history_mode:
+            mode_key = self._current_mode_key()
+        if mode_key is not None:
+            data["mode"] = mode_key
+        project_key = slot.project_key
+        selected = getattr(self, "_selected_project", None)
+        if project_key is None and slot.in_history_mode and selected is not None:
+            project_key = selected.encoded_name
+        if project_key is not None:
+            data["project"] = project_key
+        restore = slot.restore_state
+        if slot.in_history_mode and restore is not None:
+            saved_restore = {"kind": restore.kind}
+            if restore.tmux_name is not None:
+                saved_restore["tmux"] = restore.tmux_name
+            data["restore"] = saved_restore
+        return data
+
+    def _workspace_recovery_state_data(self) -> dict:
+        """Full local workspace wish; never written to portable state."""
+        workspace = self._agent_workspace()
+        focus = (
+            "sidebar"
+            if getattr(self, "_railmux_has_focus", True)
+            else workspace.target_slot_key
+        )
+        data = {
+            "version": 1,
+            "layout": workspace.layout.value,
+            "target": workspace.target_slot_key,
+            "focus": focus,
+            "slots": {
+                AgentWorkspace.PRIMARY: self._slot_recovery_state_data(
+                    workspace.primary),
+                AgentWorkspace.SECONDARY: self._slot_recovery_state_data(
+                    workspace.secondary),
+            },
+        }
+        if workspace.collapsed_secondary_agent is not None:
+            running = self._by_tmux(workspace.collapsed_secondary_agent)
+            mode = (
+                self._modes().for_tmux_name(running.tmux_name)
+                if running is not None else None
+            )
+            if running is not None and mode is not None:
+                data["collapsed_secondary"] = {
+                    "tmux": running.tmux_name,
+                    "session": running.key,
+                    "mode": mode.key,
+                }
+        return data
+
     def _recovery_state_data(self) -> dict:
         data: dict = {}
-        slot = self._primary_slot
+        slot = self._agent_workspace().target
         if slot.in_history_mode:
             data["right_kind"] = "preview"
             if slot.active_session_id is not None:
@@ -2198,6 +2949,7 @@ class App:
         else:
             data["right_kind"] = "empty"
         data.update(self._portable_right_state_data())
+        data["workspace"] = self._workspace_recovery_state_data()
 
         bindings: list[dict] = []
         for running in self._running.values():
@@ -2227,6 +2979,11 @@ class App:
 
     def _save_state(self, *, portable_right: bool = False) -> None:
         """Persist portable view state and exact-owner recovery independently."""
+        if not getattr(self, "_railmux_has_focus", True):
+            # A direct P1/P2 mouse move may precede the next periodic focus
+            # sync. Snapshot the real tmux owner before serializing Target and
+            # Focused pane; failure conservatively retains the last known slot.
+            self._sync_target_slot_from_tmux()
         view_data = self._view_state_data()
         portable_view_data = dict(view_data)
         if portable_right:
@@ -2339,7 +3096,9 @@ class App:
             )
         return selected
 
-    def _restore_preview_target(self, state: dict) -> bool:
+    def _restore_preview_target(
+        self, state: dict, slot: AgentSlot | None = None,
+    ) -> bool:
         session_id = state.get("right_session")
         mode = self._right_mode_from_state(state)
         if not isinstance(session_id, str) or mode is None:
@@ -2351,78 +3110,286 @@ class App:
             if project is None:
                 return False
             meta = self._session_cache.get(project, session_id)
-        if (meta is None or meta.session_type != mode.session_type
-                or not self._show_transcript(
-                    meta.jsonl_path, session_type=meta.session_type)):
+        slot = slot or self._agent_workspace().primary
+        if meta is None or meta.session_type != mode.session_type:
             return False
-        self._primary_slot.in_history_mode = True
-        self._set_active_target(
-            meta.session_id,
-            None,
-            mode_key=mode.key,
-            project_key=meta.project.encoded_name,
+        shown = (
+            self._show_transcript(
+                meta.jsonl_path,
+                session_type=meta.session_type,
+            )
+            if slot is self._agent_workspace().primary
+            else self._show_transcript(
+                meta.jsonl_path,
+                session_type=meta.session_type,
+                slot=slot,
+            )
         )
+        if not shown:
+            return False
+        slot.in_history_mode = True
+        if slot is self._agent_workspace().primary:
+            self._set_active_target(
+                meta.session_id,
+                None,
+                mode_key=mode.key,
+                project_key=meta.project.encoded_name,
+            )
+        else:
+            self._set_slot_active_target(
+                slot,
+                meta.session_id,
+                None,
+                mode_key=mode.key,
+                project_key=meta.project.encoded_name,
+            )
         return True
+
+    @staticmethod
+    def _workspace_slot_as_right_state(saved: dict) -> dict:
+        """Translate one validated workspace slot into existing restore keys."""
+        state = {"right_kind": saved["kind"]}
+        for source, target in (
+            ("tmux", "right_tmux"),
+            ("session", "right_session"),
+            ("mode", "right_mode"),
+            ("project", "right_project"),
+        ):
+            value = saved.get(source)
+            if isinstance(value, str):
+                state[target] = value
+        return state
+
+    def _validated_saved_agent(
+        self, state: dict,
+    ) -> tuple[str, _Running] | None:
+        """Resolve one persisted agent wish through current exact discovery."""
+        tmux_name = state.get("right_tmux")
+        session_id = state.get("right_session")
+        running = (
+            self._running.get(session_id)
+            if isinstance(session_id, str) else None
+        )
+        if running is not None:
+            tmux_name = running.tmux_name
+        if not (isinstance(tmux_name, str)
+                and tmux_ctl.session_exists(tmux_name)):
+            return None
+        running = running or self._by_tmux(tmux_name)
+        if running is None:
+            # A validated binding can redirect a historical duplicate to the
+            # canonical writer selected during startup discovery.
+            for raw in state.get("running_bindings", []):
+                if (isinstance(raw, dict)
+                        and raw.get("tmux_name") == tmux_name
+                        and isinstance(raw.get("key"), str)):
+                    running = self._running.get(raw["key"])
+                    if running is not None:
+                        tmux_name = running.tmux_name
+                    break
+        if running is None:
+            self._set_status(
+                "Restore deferred: previous agent could not be validated",
+                "error",
+            )
+            return None
+        actual_mode = self._modes().for_tmux_name(running.tmux_name)
+        expected_mode = (
+            self._right_mode_from_state(state)
+            if "right_mode" in state else actual_mode
+        )
+        if (expected_mode is None or actual_mode is None
+                or expected_mode.key != actual_mode.key):
+            self._set_status(
+                "Restore deferred: previous provider identity changed", "error")
+            return None
+        if (running.orphan is not None
+                and not self._running_action_valid(running)):
+            self._set_status(
+                "Restore deferred: marked tmux identity changed", "error")
+            return None
+        return tmux_name, running
+
+    def _restore_agent_target(self, state: dict, slot: AgentSlot) -> bool:
+        """Attach one saved agent only after current discovery validates it."""
+        validated = self._validated_saved_agent(state)
+        if validated is None:
+            return False
+        tmux_name, _running = validated
+        ok = (
+            self._attach_in_right_pane(tmux_name, steal_focus=False)
+            if slot is self._agent_workspace().primary
+            else self._attach_agent_slot(slot, tmux_name, steal_focus=False)
+        )
+        if not ok:
+            self._set_status(
+                "Restore failed: could not re-attach to previous agent session",
+                "error",
+            )
+        return ok
+
+    def _restore_workspace_slot(
+        self,
+        slot: AgentSlot,
+        saved: dict,
+        running_bindings: list | None = None,
+    ) -> bool:
+        state = self._workspace_slot_as_right_state(saved)
+        state["running_bindings"] = running_bindings or []
+        kind = saved["kind"]
+        if kind == "agent":
+            return self._restore_agent_target(state, slot)
+        if kind == "preview":
+            restored = self._restore_preview_target(state, slot)
+            if restored:
+                raw_restore = saved.get("restore")
+                if isinstance(raw_restore, dict):
+                    restore_kind = raw_restore["kind"]
+                    restore_tmux = raw_restore.get("tmux")
+                    if restore_kind == "agent":
+                        restore_tmux = self._validated_preview_restore_agent(
+                            restore_tmux)
+                        restore_kind = "agent" if restore_tmux else "empty"
+                    slot.restore_state = SlotRestoreState(
+                        restore_kind, restore_tmux)
+            return restored
+        # The caller creates the owning pane before restoring empty content.
+        slot.clear_content()
+        return True
+
+    def _validated_preview_restore_agent(
+        self, tmux_name: object, *, already_alive: bool = False,
+    ) -> str | None:
+        """Return a represented exact agent name safe for preview rollback."""
+        if not (isinstance(tmux_name, str)
+                and (already_alive or tmux_ctl.session_exists(tmux_name))):
+            return None
+        running = self._by_tmux(tmux_name)
+        if running is None:
+            return None
+        if running.orphan is not None and not self._running_action_valid(running):
+            return None
+        return tmux_name
+
+    def _restore_workspace(self, state: dict, saved: dict) -> bool:
+        """Rebuild an exact-owner two-slot workspace, degrading truthfully."""
+        workspace = self._agent_workspace()
+        transport = self._display_transport()
+        slots = saved["slots"]
+
+        def live_represented(raw: object) -> str | None:
+            if not isinstance(raw, dict):
+                return None
+            candidate = self._workspace_slot_as_right_state({
+                **raw, "kind": "agent",
+            })
+            candidate["running_bindings"] = state.get("running_bindings", [])
+            validated = self._validated_saved_agent(candidate)
+            return validated[0] if validated is not None else None
+
+        primary_saved = self._workspace_slot_as_right_state(
+            slots[AgentWorkspace.PRIMARY])
+        primary_saved["running_bindings"] = state.get("running_bindings", [])
+
+        primary_kind = slots[AgentWorkspace.PRIMARY]["kind"]
+        if primary_kind == "agent":
+            primary_ok = self._restore_agent_target(
+                primary_saved, workspace.primary)
+        elif primary_kind == "preview":
+            primary_ok = self._restore_workspace_slot(
+                workspace.primary, slots[AgentWorkspace.PRIMARY])
+        else:
+            primary_ok = transport.create_primary()
+            if primary_ok:
+                workspace.primary.clear_content()
+        content_ok = primary_ok
+        if not primary_ok:
+            primary_ok = (
+                transport.reset_slot(workspace.primary)
+                if (workspace.primary.pane_id is not None
+                    and tmux_ctl.pane_alive(workspace.primary.pane_id))
+                else transport.create_primary()
+            )
+        if not primary_ok or workspace.primary.pane_id is None:
+            workspace.layout = WorkspaceLayout.SINGLE
+            workspace.set_target(AgentWorkspace.PRIMARY)
+            self._set_railmux_focus(True, force_border=True)
+            return False
+
+        requested = WorkspaceLayout(saved["layout"])
+        secondary_ok = True
+        if requested is not WorkspaceLayout.SINGLE:
+            region = self._agent_region_size()
+            if (region is not None
+                    and not self._layout_fits(region, requested)):
+                secondary_ok = False
+            elif not transport.create_secondary(requested):
+                secondary_ok = False
+            elif not self._restore_workspace_slot(
+                    workspace.secondary,
+                    slots[AgentWorkspace.SECONDARY],
+                    state.get("running_bindings")):
+                # Keep the user's chosen layout visible and truthful; the
+                # failed content remains represented in Running.
+                if not transport.reset_slot(workspace.secondary):
+                    transport.close_slot(workspace.secondary)
+                    workspace.layout = WorkspaceLayout.SINGLE
+                secondary_ok = False
+        else:
+            workspace.layout = WorkspaceLayout.SINGLE
+
+        if requested is not WorkspaceLayout.SINGLE and not workspace.secondary.is_open:
+            workspace.layout = WorkspaceLayout.SINGLE
+        if workspace.layout is WorkspaceLayout.SINGLE:
+            workspace.set_target(AgentWorkspace.PRIMARY)
+            collapsed = live_represented(saved.get("collapsed_secondary"))
+            if collapsed is None and requested is not WorkspaceLayout.SINGLE:
+                secondary_saved = slots[AgentWorkspace.SECONDARY]
+                if secondary_saved["kind"] == "agent":
+                    collapsed = live_represented(secondary_saved)
+            if collapsed is not None:
+                workspace.collapsed_secondary_agent = collapsed
+        else:
+            workspace.set_target(saved["target"])
+
+        target = workspace.target
+        self._paint_slot_active_target(
+            target, target.active_session_id, target.agent_tmux_name)
+        focus_key = saved["focus"]
+        focus_slot = (
+            workspace.secondary
+            if focus_key == AgentWorkspace.SECONDARY
+            else workspace.primary
+        )
+        if (focus_key != "sidebar" and focus_slot.pane_id is not None
+                and tmux_ctl.select_pane(focus_slot.pane_id)):
+            workspace.set_target(focus_slot.key)
+            self._set_railmux_focus(False, force_border=True)
+        else:
+            railmux_pane = getattr(self, "_railmux_pane_id", None)
+            if railmux_pane is not None:
+                tmux_ctl.select_pane(railmux_pane)
+            self._set_railmux_focus(True, force_border=True)
+        self._install_function_key_bindings()
+        return content_ok and secondary_ok
 
     def _restore_right_pane(self, state: dict) -> bool:
         """Re-open the right pane to its state at soft-quit time."""
+        workspace = state.get("workspace")
+        if isinstance(workspace, dict):
+            return self._restore_workspace(state, workspace)
         kind = state.get("right_kind")
         if kind in ("agent", "claude"):  # "claude" written by <=0.1.1
-            tmux_name = state.get("right_tmux")
             session_id = state.get("right_session")
-            running = (
-                self._running.get(session_id)
-                if isinstance(session_id, str) else None
+            exact_tmux = state.get("right_tmux")
+            exact_live = (
+                isinstance(exact_tmux, str)
+                and tmux_ctl.session_exists(exact_tmux)
             )
-            if running is not None:
-                tmux_name = running.tmux_name
-            if (isinstance(tmux_name, str)
-                    and tmux_ctl.session_exists(tmux_name)):
-                running = running or self._by_tmux(tmux_name)
-                if running is None:
-                    # If the requested tmux was a historical duplicate, a
-                    # validated state binding may lead to the canonical writer
-                    # selected during discovery. Never attach an unrepresented
-                    # live process directly.
-                    for raw in state.get("running_bindings", []):
-                        if (isinstance(raw, dict)
-                                and raw.get("tmux_name") == tmux_name
-                                and isinstance(raw.get("key"), str)):
-                            running = self._running.get(raw["key"])
-                            if running is not None:
-                                tmux_name = running.tmux_name
-                            break
-                if running is None:
-                    msg = (
-                        "Restore deferred: previous agent could not be "
-                        "validated"
-                    )
-                    self._set_status(msg, "error")
-                    return False
-                actual_mode = self._modes().for_tmux_name(running.tmux_name)
-                expected_mode = (
-                    self._right_mode_from_state(state)
-                    if "right_mode" in state else actual_mode
-                )
-                if (expected_mode is None or actual_mode is None
-                        or expected_mode.key != actual_mode.key):
-                    msg = "Restore deferred: previous provider identity changed"
-                    self._set_status(msg, "error")
-                    return False
-                if (running.orphan is not None
-                        and not self._running_action_valid(running)):
-                    msg = "Restore deferred: marked tmux identity changed"
-                    self._set_status(msg, "error")
-                    return False
-                ok = self._attach_in_right_pane(tmux_name, steal_focus=False)
-                if not ok:
-                    msg = (
-                        "Restore failed: could not re-attach to previous "
-                        "agent session"
-                    )
-                    self._set_status(msg, "error")
-                    return False
+            if self._restore_agent_target(state, self._primary_slot):
                 return True
+            if exact_live:
+                return False
             # A portable restart wish never authorizes process adoption. If its
             # stable session is not live on this tmux server, reopen the same
             # transcript read-only instead of resuming or launching anything.
@@ -3135,6 +4102,11 @@ class App:
     # --- key handling ---
 
     def _on_input(self, key: str) -> None:
+        # F9 is routed here by a global tmux binding and must remain available
+        # while a modal is open (notably Help's fullscreen copy workflow).
+        if key == "f9":
+            self._toggle_agent_fullscreen()
+            return
         # When a modal overlay is showing, don't dispatch sidebar action keys.
         # Modals handle their own keys (Esc, Enter, y/n) in their keypress
         # methods.  Unhandled keys like q would otherwise open a second modal
@@ -3165,6 +4137,9 @@ class App:
             return
         if key in ("[", "]"):
             self._resize_divider(key == "]")
+            return
+        if key == "f8":
+            self._rotate_split()
             return
         # Simple action keys are dispatched from the shared keymap (single
         # source of truth shared with the hint bar) so the two can't drift.
@@ -3572,6 +4547,10 @@ class App:
             wheel = getattr(self, "_root_wheel_manager", None)
             if wheel is not None:
                 wheel.close()
+            function_keys = getattr(
+                self, "_root_function_key_manager", None)
+            if function_keys is not None:
+                function_keys.close()
             # Drop our status-bar overrides BEFORE the soft-quit branch below —
             # on soft quit the outer tmux session may survive, so Railmux's
             # appearance and text must not linger in it.
@@ -3590,13 +4569,6 @@ class App:
                 except Exception:
                     pass
                 self._tmux_status_enabled = False
-            # Remove the F9 fullscreen binding we installed (server-global).
-            try:
-                import subprocess as _sp
-                _sp.run(["tmux", "unbind-key", "-n", "F9"],
-                        stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
-            except Exception:
-                pass
             # Return real swap panes before deleting display placeholders. A
             # failed proof degrades hard quit to soft semantics.
             try:
@@ -3613,6 +4585,13 @@ class App:
                         pass
                 self._running.clear()
             self._teardown_core_done = True
+
+        # Side-by-side focus temporarily enables tmux border arrows.  Keep
+        # this outside the one-shot core guard: visible exit first calls
+        # teardown with ``defer_outer=True``, and run()'s finally pass can then
+        # retry a failed restoration before preserving or killing the outer
+        # session. Success clears ``original_known`` and makes this a no-op.
+        self._restore_border_indicators()
 
         if defer_outer or getattr(self, "_outer_teardown_done", False):
             return
@@ -3681,6 +4660,9 @@ class App:
     def _refresh_impl(self) -> None:
         self._retry_pending_codex_recovery()
         self._scroll_manager.maintain()
+        if (not getattr(self, "_railmux_has_focus", True)
+                and self._agent_workspace().secondary.is_open):
+            self._sync_target_slot_from_tmux()
         transport = self._display_transport()
         if transport.outer_session_lost():
             # A grouped keeper may still own the window after an external
@@ -3706,26 +4688,22 @@ class App:
                     "error",
                 )
         if rebound_for_client:
-            self._install_fullscreen_binding()
-        dead_display_agents = {
-            agent
-            for slot in self._agent_workspace().slots
-            if (agent := transport.reap_dead_display(slot)) is not None
-        }
+            self._install_function_key_bindings()
+        dead_display_agents = self._reap_dead_display_slots(transport)
         if dead_display_agents:
             for key in [
                 key for key, running in self._running.items()
                 if running.tmux_name in dead_display_agents
             ]:
                 del self._running[key]
-            self._set_active_target(None, None)
         self._consume_mode_refresh()
         mode_refresh_pending = self._mode_refresh_pending()
         mode = self._active_mode()
-        prefix = mode.tmux_prefix
-        slot = self._primary_slot
-        needs_liveness = slot.pane_id is not None or any(
-            r.tmux_name.startswith(prefix) for r in self._running.values())
+        needs_liveness = (
+            any(slot.pane_id is not None
+                for slot in self._agent_workspace().slots)
+            or bool(self._running)
+        )
         server = tmux_ctl.server_snapshot() if needs_liveness else None
         child_probes: dict[str, bool | None] = {}
 
@@ -3771,32 +4749,10 @@ class App:
             self._set_current_project(refreshed_selection)
         # Prune dead tmux sessions (e.g. a provider exited via /quit).
         for key in list(self._running):
-            if self._running[key].tmux_name.startswith(prefix):
-                if not session_is_alive(self._running[key].tmux_name):
-                    del self._running[key]
+            if not session_is_alive(self._running[key].tmux_name):
+                del self._running[key]
 
-        # If the session we were showing in the right pane has exited,
-        # kill the right pane so the TUI returns to full-screen.
-        if slot.pane_id and slot.agent_tmux_name:
-            if not session_is_alive(slot.agent_tmux_name):
-                tmux_ctl.kill_pane(slot.pane_id)
-                slot.pane_id = None
-                slot.agent_tmux_name = None
-                slot.mode_key = None
-                self._set_active_target(None, None)
-
-        # Detect when the right pane was closed (user pressed q in less, the
-        # pane was cleaned up above, or it was killed externally).
-        if slot.pane_id and not pane_is_alive(slot.pane_id):
-            slot.pane_id = None
-            slot.agent_tmux_name = None
-            slot.mode_key = None
-            if slot.in_history_mode:
-                slot.in_history_mode = False
-                self._set_active_target(None, None)
-                self._restore_from_history_mode()
-            else:
-                self._set_active_target(None, None)
+        self._reconcile_display_slots(session_is_alive, pane_is_alive)
 
         # Promote any `__new__-N` placeholders to their real session id — in
         # BOTH Claude and Codex mode. While a session stays a placeholder its
@@ -4011,7 +4967,7 @@ class App:
                 r.status = self._effective_status(meta, child_probes, server)
                 r.last_mtime = meta.last_mtime
                 r.attention = meta.attention
-                if self._primary_slot.agent_tmux_name == r.tmux_name:
+                if self._agent_workspace().target.agent_tmux_name == r.tmux_name:
                     if meta.attention is None:
                         self._attention_notice_key = None
                     else:
@@ -4187,9 +5143,12 @@ class App:
             self._running[candidate.session_id] = r
             self._stamp_running(r)
             claimed.add(candidate.session_id)
-            if self._primary_slot.agent_tmux_name == r.tmux_name:
-                self._set_active_target(candidate.session_id, r.tmux_name)
-                self._set_current_project(candidate.project)
+            displayed_slot = self._agent_workspace().slot_for_agent(r.tmux_name)
+            if displayed_slot is not None:
+                self._set_slot_active_target(
+                    displayed_slot, candidate.session_id, r.tmux_name)
+                if displayed_slot is self._agent_workspace().target:
+                    self._set_current_project(candidate.project)
 
     def _correlate_codex_rollout(self, r: "_Running") -> set[str] | None:
         """Exact child→rollout correlation for a Codex placeholder (#12).
@@ -4241,11 +5200,24 @@ class App:
     # --- kill / delete session ---
 
     def _return_agent_before_kill(self, tmux_name: str) -> bool:
-        """Prove a displayed real pane is home before killing its session."""
-        if self._display_transport().prepare_kill(tmux_name):
+        """Detach a displayed agent into a stable empty slot before killing."""
+        slot = self._agent_workspace().slot_for_agent(tmux_name)
+        outcome = self._display_transport().prepare_kill(tmux_name)
+        if outcome:
+            if slot is not None:
+                self._paint_slot_active_target(slot, None, None)
+                self._set_railmux_focus(
+                    self._railmux_has_focus, force_border=True)
             return True
+        if slot is not None and slot.agent_tmux_name != tmux_name:
+            # Swap return may have succeeded before painting the idle surface
+            # failed. Reflect that partial but safe transition immediately.
+            self._paint_slot_active_target(slot, None, None)
+            self._set_railmux_focus(
+                self._railmux_has_focus, force_border=True)
         self._set_status(
-            f"could not safely return {tmux_name} home; nothing was killed",
+            getattr(outcome, "error", None)
+            or f"could not safely prepare {tmux_name}; nothing was killed",
             "error",
         )
         return False
@@ -4728,7 +5700,7 @@ class App:
                 items.append(
                     (" Term       t", lambda: self._open_terminal_for_path(path)))
             menu = ContextMenu(items, on_close=self._close_modal)
-            self._show_overlay(menu, width=32, height=12,
+            self._show_overlay(menu, width=36, height=13,
                                click_outside_to_close=True,
                                fixed_width=True, fixed_height=True)
             return
@@ -4748,6 +5720,8 @@ class App:
         is_starred = session.session_id in self._favorites.get_ids()
         items: list[tuple[str, Callable[[], None]]] = [
             (" Open      ↵", lambda s=session: self._do_context_open(s)),
+            (" Preview    ␣", lambda s=session:
+             self._on_session_row_preview(s)),
             (" Info       i", lambda s=session: self._do_context_info(s)),
             (" Rename     r", lambda s=session: self._do_context_rename(s)),
             (" Unstar    s" if is_starred else " Star      s",
@@ -4760,7 +5734,7 @@ class App:
         # Filter out None callbacks (e.g. Kill for non-running sessions).
         items = [(label, cb) for label, cb in items if cb is not None]
         menu = ContextMenu(items, on_close=self._close_modal)
-        self._show_overlay(menu, width=32, height=14,
+        self._show_overlay(menu, width=36, height=15,
                            click_outside_to_close=True,
                            fixed_width=True, fixed_height=True)
 
@@ -4807,7 +5781,11 @@ class App:
             self._set_status(
                 "Open refused: the unresolved tmux identity changed", "error")
             return
-        self._attach_in_right_pane(tmux_name, steal_focus=True)
+        slot = self._agent_workspace().target
+        if slot is self._primary_slot:
+            self._attach_in_right_pane(tmux_name, steal_focus=True)
+        else:
+            self._attach_agent_slot(slot, tmux_name, steal_focus=True)
 
     def _kill_tmux_session(
         self, tmux_name: str, label: str,
@@ -4825,23 +5803,38 @@ class App:
                     "error",
                 )
                 return
-            if not self._return_agent_before_kill(tmux_name):
-                return
+
+        # A resolved session can be displayed just as an orphan can. Always
+        # detach the agent first so killing it cannot strand a swap marker or
+        # leave a nested client owning the outer pane.
+        if not self._return_agent_before_kill(tmux_name):
+            return
+
+        killed = True
+        if running is not None and running.orphan is not None:
             pane = self._exact_running_pane(running)
             if (pane is None
                     or not orphan_marker.same_live_tmux(running.orphan, pane)):
                 self._set_status(
                     "Kill refused: the marked pane did not return home", "error")
                 return
-            if not tmux_ctl.kill_session_identity(pane):
-                self._set_status(
-                    "Kill failed: exact tmux session is still live", "error")
-                return
+            killed = tmux_ctl.kill_session_identity(pane)
         elif tmux_ctl.session_exists(tmux_name):
-            tmux_ctl.kill_session(tmux_name)
+            killed = tmux_ctl.kill_session(tmux_name)
+
+        still_alive = (
+            self._exact_running_pane(running) is not None
+            if running is not None and running.orphan is not None
+            else tmux_ctl.session_exists(tmux_name)
+        )
+        if not killed and still_alive:
+            self._set_status(
+                "Kill failed: exact tmux session is still live", "error")
+            return
         # Remove any _running entry keyed by this tmux name.
         for key in [k for k, r in self._running.items() if r.tmux_name == tmux_name]:
             del self._running[key]
+        self._refresh()
         self._set_status(f"Killed: {label}  (file kept)")
 
     def _open_terminal_for_project(self, project: Project) -> None:
@@ -4855,7 +5848,7 @@ class App:
         import subprocess as _sp
         shell = os.environ.get("SHELL", "/bin/bash")
         cmd = f"cd {shlex.quote(str(path))} && exec {shlex.quote(shell)}"
-        pane_id = self._agent_workspace().active.pane_id
+        pane_id = self._sync_target_slot_from_tmux().pane_id
         target = pane_id if (pane_id and tmux_ctl.pane_alive(pane_id)) else None
         new_pane = tmux_ctl.split_window_v(cmd, target=target)
         if not new_pane:
@@ -4873,7 +5866,7 @@ class App:
         import subprocess as _sp
         shell = os.environ.get("SHELL", "/bin/bash")
         cmd = f"cd {shlex.quote(str(session.project.real_path))} && exec {shlex.quote(shell)}"
-        pane_id = self._agent_workspace().active.pane_id
+        pane_id = self._sync_target_slot_from_tmux().pane_id
         target = pane_id if (pane_id and tmux_ctl.pane_alive(pane_id)) else None
         new_pane = tmux_ctl.split_window_v(cmd, target=target)
         if not new_pane:
@@ -5121,7 +6114,11 @@ class App:
         if not self._tmux_status_enabled or not self._tmux_status_session:
             return
         bar = _TMUX_BAR_STYLE_ERROR if error else _TMUX_BAR_STYLE_NORMAL
-        brand = _tmux_status_left(error, self._active_mode().label)
+        brand = _tmux_status_left(
+            error,
+            self._active_mode().label,
+            self._status_layout_indicator(),
+        )
         try:
             import subprocess as _sp
             for opt, val in (("status-style", bar), ("status-left", brand)):
@@ -5136,6 +6133,18 @@ class App:
                     stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
         except Exception:
             pass
+
+    def _status_layout_indicator(self) -> str | None:
+        """Compact visible layout with its filled half naming the Target pane."""
+        workspace = getattr(self, "_workspace", None)
+        if workspace is None or workspace.primary.pane_id is None:
+            return None
+        secondary = workspace.target_slot_key == AgentWorkspace.SECONDARY
+        if workspace.layout is WorkspaceLayout.SIDE_BY_SIDE:
+            return "◨" if secondary else "◧"
+        if workspace.layout is WorkspaceLayout.STACKED:
+            return "⬓" if secondary else "⬒"
+        return "▣"
 
     def _set_status(self, msg: str, level: str | None = None, *,
                     force: bool = False) -> None:
@@ -5224,7 +6233,7 @@ class App:
         # (less running in the right pane), poll faster so the user sees a
         # quick response when pressing q in less or clicking the right pane.
         fast_poll = (
-            self._primary_slot.in_history_mode
+            any(slot.in_history_mode for slot in self._agent_workspace().slots)
             or (self._railmux_pane_id is not None
                 and self._loop is not None
                 and isinstance(self._loop.widget, _CloseOnClickOverlay))
@@ -5303,6 +6312,7 @@ class App:
 
             self._railmux_pane_id = tmux_ctl.current_pane_id()
             self._set_railmux_focus(True, force_border=True)
+            self._install_function_key_bindings()
             # bracketed_paste_mode: the terminal frames pastes in begin/end markers
             # so _filter_input can drop them — sidebar keys are destructive commands,
             # not text input.

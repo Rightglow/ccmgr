@@ -22,18 +22,23 @@ heuristic adoption when its complete pre-launch fence is unavailable.
 
 ### Dual-agent workspace
 
-Expose the prepared primary/secondary `AgentWorkspace` model through a small
-Pane menu: `Open selected in split`, `Close split`, and `Rotate split`. Decide
-the direct keyboard shortcut only after the menu interaction has been used in
-practice. Validate Claude+Claude, Codex+Codex, and mixed-provider layouts on
-macOS and Linux before enabling restoration of the secondary pane.
+An experimental UI now exposes the prepared primary/secondary `AgentWorkspace`
+model through `F8`, which can create an empty Pane 2 and cycles single,
+side-by-side, and stacked layouts. Single-click/`␣` previews stopped rows or
+switches running rows, while double-click/Enter opens and transfers focus in the
+Target pane remembered from tmux focus. In a dual layout, sidebar focus removes
+agent focus while preserving that Target pane for subsequent actions. Returning
+to single remembers the collapsed agent without stopping it. Validate
+Claude+Claude, Codex+Codex, mixed-provider layouts, and native tmux focus-border
+behavior on macOS and Linux. Same-instance soft restart now restores the full
+validated workspace; cross-instance portable state remains intentionally
+single-display and non-authoritative.
 
 Open questions:
 
-- Whether F9 uses the focused agent slot, or primary when the sidebar is focused.
-- Whether transcript preview always uses primary or may use an existing secondary.
 - Whether swapping primary/secondary belongs in the first public iteration.
-- Exact minimum per-agent width/height for choosing stacked vs side-by-side.
+- Whether the current 50x12 minimum and 80x20 preferred size thresholds remain
+  comfortable across the supported agent TUIs.
 
 ### Default swap transport follow-up
 
@@ -86,7 +91,12 @@ Proven implementation facts:
 - Cross-session swap and direct-outer-kill recovery pass on Linux with tmux 2.7
   and 3.4. The CI smoke runs the same private-socket path on Linux and macOS.
 - Primary and secondary ownership records are separate, and one real pane
-  cannot be claimed by both slots; the public UI still exposes only primary.
+  cannot be claimed by both slots; the experimental split interaction exposes
+  secondary ownership and same-instance soft restart restores both slots after
+  validating their exact local identities.
+- Real tmux active/last-pane focus drives the workspace Target pane. Both-slot
+  liveness reconciliation safely rebuilds a missing primary or collapses a
+  missing secondary without relabelling swap markers in memory.
 - Total PTY count does not fall because the hidden home placeholder replaces
   the visible nested-client PTY. The visible update path does remove the nested
   client/parser/composition hop.

@@ -56,16 +56,35 @@ def _extract_text(content) -> str | None:
     return None
 
 
+def _nonnegative_int(value: object) -> int:
+    """Return a provider count only when it is a genuine non-negative int."""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return 0
+
+
+def _claude_usage_total(usage: object) -> int:
+    """Total billed/context tokens reported for one Claude API message."""
+    if not isinstance(usage, dict):
+        return 0
+    return sum(_nonnegative_int(usage.get(field)) for field in (
+        "input_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "output_tokens",
+    ))
+
+
 def _scan_session(project: Project, jsonl_path: Path) -> SessionMeta | None:
     session_id = jsonl_path.stem
     if not _looks_like_uuid(session_id):
         return None
 
     title: str | None = None
-    message_count = 0
     user_count = 0
-    assistant_count = 0
-    token_total = 0
+    assistant_keys: set[str] = set()
+    assistant_token_totals: dict[str, int] = {}
+    anonymous_assistant_seq = 0
     git_branch: str | None = None
     last_user_message: str | None = None
     first_user_message: str | None = None
@@ -95,30 +114,55 @@ def _scan_session(project: Project, jsonl_path: Path) -> SessionMeta | None:
                 # user`), so counting it as a user turn made every finished
                 # session show "busy" until the next prompt was sent.
                 elif rtype == "user":
-                    message_count += 1
-                    user_count += 1
                     last_rtype = "user"
                     last_stop_reason = ""
-                    # Extract meaningful text for display.
+                    # Only real conversational text is a message. Tool results
+                    # use the provider's ``user`` role too, but counting them
+                    # makes tool-heavy sessions look many times larger.
                     msg = rec.get("message", {}) or {}
-                    text = _extract_text(msg.get("content", ""))
+                    text = (_extract_text(msg.get("content", ""))
+                            if isinstance(msg, dict) else None)
                     if text is not None:
+                        user_count += 1
                         last_user_message = text
                         if first_user_message is None:
                             first_user_message = text
                 elif rtype == "assistant":
-                    message_count += 1
-                    assistant_count += 1
                     last_rtype = "assistant"
-                    last_stop_reason = (rec.get("message", {}) or {}).get("stop_reason", "")
-                    usage = rec.get("message", {}).get("usage", {}) or {}
-                    token_total += int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0))
+                    msg = rec.get("message", {}) or {}
+                    if not isinstance(msg, dict):
+                        msg = {}
+                    last_stop_reason = msg.get("stop_reason", "")
+
+                    # Claude Code can persist several streaming/tool records
+                    # for one API message. Deduplicate on the provider message
+                    # id (record uuid as a fallback), and retain the largest
+                    # observed usage snapshot for that logical message.
+                    message_id = msg.get("id")
+                    record_uuid = rec.get("uuid")
+                    if isinstance(message_id, str) and message_id:
+                        assistant_key = f"message:{message_id}"
+                    elif isinstance(record_uuid, str) and record_uuid:
+                        assistant_key = f"record:{record_uuid}"
+                    else:
+                        assistant_key = f"anonymous:{anonymous_assistant_seq}"
+                        anonymous_assistant_seq += 1
+                    assistant_keys.add(assistant_key)
+                    usage_total = _claude_usage_total(msg.get("usage"))
+                    assistant_token_totals[assistant_key] = max(
+                        usage_total,
+                        assistant_token_totals.get(assistant_key, 0),
+                    )
                 if git_branch is None:
                     gb = rec.get("gitBranch")
                     if isinstance(gb, str) and gb:
                         git_branch = gb
     except OSError:
         return None
+
+    assistant_count = len(assistant_keys)
+    message_count = user_count + assistant_count
+    token_total = sum(assistant_token_totals.values())
 
     # Skip sessions that can't be meaningfully resumed:
     # 1. No messages → metadata stub. Claude may recreate a deleted JSONL with

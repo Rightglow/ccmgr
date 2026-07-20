@@ -85,6 +85,8 @@ setup does not behave as expected.
 | `d` | Delete the focused session (prompts for confirmation) |
 | `t` | Open a terminal in the active project directory |
 | `m` | Cycle through available agent modes |
+| `␣` | Preview stopped or switch running target (like single-click) |
+| `F8` | Cycle agent layout: single → side-by-side → stacked |
 | `F9` | Fullscreen the agent pane (toggle) for clean text selection |
 | `?` | Full help popup with all keybindings |
 | `q` or `Ctrl-C` | Quit with confirmation |
@@ -98,6 +100,45 @@ railmux creates the directory before starting the agent.
 The rename popup starts with the current title pre-filled. Press
 `Ctrl-U` to clear the entire input, `Enter` to save a non-empty title, or `Esc`
 to cancel.
+
+### Experimental dual-agent split
+
+Railmux distinguishes the **Focused pane** from the **Target pane**. The Focused
+pane currently receives keyboard input. The Target pane is the remembered P1 or
+P2 where actions started from the sidebar take effect; Chinese documentation
+uses **焦点窗格** and **目标窗格** respectively.
+
+Open the first agent normally, then press `F8` to create Pane 2 and cycle single,
+side-by-side, and stacked layouts even while an agent has keyboard focus. A new
+Pane 2 may remain empty until you use it; on narrower terminals F8 skips an
+orientation that cannot provide two usable panes. Returning to single remembers
+Pane 2 for the next cycle and leaves its agent running in the background. A
+same-instance soft restart restores the layout, both pane contents, Target pane,
+and keyboard focus after validating the exact local tmux identities. If one
+content wish is no longer valid, Railmux keeps the usable layout with a branded
+empty pane; if the terminal can no longer fit the split, it falls back to single
+and keeps the displaced live agent in Running. Killing a displayed session
+safely detaches it first and keeps the chosen layout open; its agent pane returns
+to the resize-aware Railmux empty surface instead of disappearing or retaining a
+stale interactive client.
+
+The bottom brand keeps a one-cell workspace indicator after the provider name:
+`▣` is single-pane; `◧`/`◨` are side-by-side with the filled half naming the
+left/right Target pane; `⬒`/`⬓` are stacked with the filled half naming the
+top/bottom Target pane. For example, `Railmux · Codex · ◨` means a side-by-side
+layout targeting the right pane. The indicator remains visible across focus
+changes. When focus returns to Railmux, agent borders become gray while the
+filled half continues to identify the pane used for stopped-session preview,
+running-session switching,
+Enter/double-click open, F9, terminal placement, status, and attention state.
+Move through an empty Pane 2 and back to Railmux to target it; no extra
+split-specific menu action is needed. In a single-agent layout P1 is the only
+possible target, so no separate inactive-target marker is needed.
+
+In the side-by-side layout, arrows on the green shared borders point inward at
+the agent pane that actually owns keyboard focus. They disappear when focus
+returns to Railmux and do not alter the stacked layout. tmux versions before
+3.3 retain the same focus colours without directional arrows.
 
 When a mode has no projects or sessions, its empty state names the active
 provider and points to `+ New project` or `n`, so an unavailable provider never
@@ -114,15 +155,15 @@ update immediately.
 
 | Action | Effect |
 |--------|--------|
-| Left-click (non-running) | Preview session history in the right pane |
-| Left-click (running) | Attach to the running session (focus stays left) |
-| Double-click | Open/attach and move focus to the right pane |
-| Right-click | Context menu (Open, Info, Rename, Star, Kill, Term, Delete) |
+| Left-click (non-running) | Preview session history in the last agent pane |
+| Left-click (running) | Switch the last agent pane to that session |
+| Double-click | Open/attach in the last agent pane and move focus there |
+| Right-click | Context menu (Open, Preview, Info, Rename, Star, Kill, Term, Delete) |
 
 ## History preview
 
-Left-click a non-running session to view its conversation history in the right
-pane without starting or resuming the agent. The preview reads the saved JSONL
+For a stopped session, left-click or press `␣` to view conversation history in
+the last agent pane without starting or resuming the agent. The preview reads the saved JSONL
 directly, so it cannot send a message or mutate the session. It follows the
 providers' conversation structure as closely as their saved data allows:
 user/assistant messages, tool calls and abbreviated tool output are
@@ -137,7 +178,10 @@ move between matches, and `q` to exit; the right pane restores whatever was
 there before. Shell/editor commands and pager history are disabled in preview
 mode. Double-click to skip the preview and open the session directly.
 
-Clicking a running session attaches to it immediately (focus stays left so you can keep browsing). Double-clicking steals focus to the right pane for both running and non-running sessions.
+For a running session, single-click or `␣` switches the remembered agent pane
+to it while focus stays in Railmux. For a stopped session, the same inputs open
+a read-only preview. Double-click or Enter opens either kind and transfers
+focus. The context-menu Preview action follows the single-click/`␣` rule.
 
 ## Status indicators
 

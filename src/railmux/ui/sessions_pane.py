@@ -9,7 +9,7 @@ from functools import partial
 import urwid
 
 from railmux.fuzzy import fuzzy_match
-from railmux.models import Project, SessionMeta
+from railmux.models import AttentionCategory, Project, SessionMeta
 from railmux.ui._widgets import (
     ClickableRow,
     ScrollableSidebarPane,
@@ -35,13 +35,71 @@ def _format_when(epoch: float) -> str:
     return datetime.fromtimestamp(epoch).strftime("%Y-%m-%d")
 
 
-def _format_size(nbytes: int) -> str:
-    """Human file size: 175907 -> '175.9KB', 1342177 -> '1.3MB'."""
-    if nbytes >= 1024 * 1024:
-        return f"{nbytes / (1024 * 1024):.1f}MB"
-    if nbytes >= 1024:
-        return f"{nbytes / 1024:.1f}KB"
-    return f"{nbytes}B"
+_COUNT_UNITS = ("", "k", "M", "B", "T", "P", "E")
+
+
+def _format_scientific_count(value: int) -> str:
+    """One-decimal scientific notation using integer arithmetic only."""
+    digits = str(value)
+    exponent = len(digits) - 1
+    leading_tenths = int(digits[:2])
+    if len(digits) > 2 and digits[2] >= "5":
+        leading_tenths += 1
+    if leading_tenths == 100:
+        return f"1e{exponent + 1}"
+    mantissa = (str(leading_tenths // 10) if leading_tenths % 10 == 0
+                else f"{leading_tenths // 10}.{leading_tenths % 10}")
+    return f"{mantissa}e{exponent}"
+
+
+def _format_count(value: int) -> str:
+    """Compact a non-negative count without losing small values.
+
+    Counts below 1,000 stay exact. Larger values use one decimal below ten
+    units and whole units thereafter; rounding across a unit boundary is
+    promoted (999,500 -> 1M). Values beyond the named SI units fall back to a
+    compact scientific form instead of overflowing a float.
+    """
+    value = max(0, value)
+    if value < 1000:
+        return str(value)
+
+    divisor = 1
+    unit_index = 0
+    while (unit_index < len(_COUNT_UNITS) - 1
+           and value >= divisor * 1000):
+        divisor *= 1000
+        unit_index += 1
+
+    if (unit_index == len(_COUNT_UNITS) - 1
+            and value >= divisor * 1000):
+        return _format_scientific_count(value)
+
+    if value < divisor * 10:
+        tenths = (value * 10 + divisor // 2) // divisor
+        number = (str(tenths // 10) if tenths % 10 == 0
+                  else f"{tenths // 10}.{tenths % 10}")
+    else:
+        rounded = (value + divisor // 2) // divisor
+        if rounded == 1000:
+            if unit_index == len(_COUNT_UNITS) - 1:
+                return _format_scientific_count(value)
+            divisor *= 1000
+            unit_index += 1
+            number = "1"
+        else:
+            number = str(rounded)
+    return number + _COUNT_UNITS[unit_index]
+
+
+def _live_state(session: SessionMeta) -> str:
+    """Compact current state for a session owned by a live tmux process."""
+    if (session.attention is not None
+            and session.attention.category is AttentionCategory.ABORTED):
+        return "aborted"
+    if session.status in {"idle", "busy", "blocked"}:
+        return session.status
+    return "running"
 
 
 _STATUS_DOTS = {"idle": ("status_idle", "●"), "busy": ("status_busy", "●"),
@@ -50,6 +108,7 @@ _ATTENTION_MARK = ("attention", "!")
 # When a row is active in the right pane (or targeted by a context menu), map
 # status-dot attributes to variants with the selected background.
 _SELECTED_MAP = {None: "selected", "dim": "selected",
+                 "session_meta": "session_meta_sel",
                  "status_idle": "status_idle_sel",
                  "status_busy": "status_busy_sel",
                  "status_blocked": "status_blocked_sel",
@@ -58,6 +117,7 @@ _SELECTED_MAP = {None: "selected", "dim": "selected",
 # ● inherits the focus background instead of leaving a black gap; everything
 # else (title, star, meta) collapses to the plain "focus" attribute.
 _FOCUS_REMAP = {None: "focus", "live": "focus", "dim": "focus",
+                "session_meta": "session_meta_focus",
                 "status_idle": "status_idle_focus",
                 "status_busy": "status_busy_focus",
                 "status_blocked": "status_blocked_focus",
@@ -74,7 +134,7 @@ class _SessionRow(ClickableRow):
         self.session = session
         # Two-line layout:
         #   [●] [★] Title
-        #   <relative time> · <branch> · <size>
+        #   <relative time/live state> · <message count> · <token count>
         # Status dot stays in a fixed leftmost column so the status column
         # aligns across rows; the star sits next to the title it marks.
         title_markup: list = []
@@ -97,14 +157,14 @@ class _SessionRow(ClickableRow):
         title_markup.append(session.display_title)
         title_text = urwid.Text(title_markup, wrap="clip")
 
-        # Size is captured on SessionMeta at scan time — no stat() in the
-        # render/poll hot path.
-        size_str = _format_size(session.size_bytes) if session.size_bytes else "—"
-        parts = [_format_when(session.last_mtime)]
-        if session.git_branch:
-            parts.append(session.git_branch)
-        parts.append(size_str)
-        meta_text = urwid.Text(("dim", "  " + " · ".join(parts)), wrap="clip")
+        parts = [
+            _live_state(session) if is_running
+            else _format_when(session.last_mtime)
+        ]
+        parts.append(f"{_format_count(session.message_count)} msg")
+        parts.append(f"{_format_count(session.token_total)} tok")
+        meta_text = urwid.Text(
+            ("session_meta", "  " + " · ".join(parts)), wrap="ellipsis")
 
         body = urwid.Pile([title_text, meta_text])
         if is_selected:
@@ -313,10 +373,14 @@ class SessionsPane(ScrollableSidebarPane, urwid.WidgetWrap):
             selected_id = self._selected_session_id or self._active_session_id
             is_sel = s.session_id == selected_id
             on_dbl = partial(self._on_double_select, s)
+            # Preserve the established distinction: running rows switch the
+            # active display immediately, while stopped rows preview history.
+            # Both callbacks route through App's remembered agent slot.
             if is_running:
                 on_click = partial(self._on_select, s, steal_focus=False)
             else:
-                on_click = partial(self._on_preview, s) if self._on_preview else None
+                on_click = (
+                    partial(self._on_preview, s) if self._on_preview else None)
             rows.append(_SessionRow(
                 s,
                 is_running=is_running, is_favorite=is_fav,

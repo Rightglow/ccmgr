@@ -1,8 +1,8 @@
-"""State model for the tmux panes that display agents.
+"""State model for the tmux panes that display up to two agents.
 
-Only the primary slot is rendered today.  Keeping primary and secondary slots
-inside one bounded workspace lets the dual-agent feature be added without
-duplicating every pane, preview, focus, and restore field in ``App``.
+Primary retains the established single-pane behavior. The experimental split
+exposes secondary without duplicating pane, focus, and transport state in
+``App``.
 """
 from __future__ import annotations
 
@@ -14,6 +14,27 @@ class WorkspaceLayout(str, Enum):
     SINGLE = "single"
     STACKED = "stacked"
     SIDE_BY_SIDE = "side-by-side"
+
+
+def next_workspace_layout(layout: WorkspaceLayout) -> WorkspaceLayout:
+    """Cycle single -> columns -> rows -> single."""
+    return {
+        WorkspaceLayout.SINGLE: WorkspaceLayout.SIDE_BY_SIDE,
+        WorkspaceLayout.SIDE_BY_SIDE: WorkspaceLayout.STACKED,
+        WorkspaceLayout.STACKED: WorkspaceLayout.SINGLE,
+    }[layout]
+
+
+def projected_agent_size(
+    region: tuple[int, int], layout: WorkspaceLayout,
+) -> tuple[int, int]:
+    """Size of each equal agent pane after splitting *region* once."""
+    width, height = region
+    if layout is WorkspaceLayout.SIDE_BY_SIDE:
+        return max(0, (width - 1) // 2), height
+    if layout is WorkspaceLayout.STACKED:
+        return width, max(0, (height - 1) // 2)
+    return width, height
 
 
 class DisplayTransportKind(str, Enum):
@@ -71,6 +92,10 @@ class AgentSlot:
 
     def clear_display(self) -> None:
         self.pane_id = None
+        self.clear_content()
+
+    def clear_content(self) -> None:
+        """Forget displayed content while retaining the owned outer pane."""
         self.agent_tmux_name = None
         self.active_session_id = None
         self.in_history_mode = False
@@ -84,14 +109,23 @@ class AgentSlot:
 
 
 class AgentWorkspace:
-    """At-most-two-slot workspace; current releases render primary only."""
+    """At-most-two-slot workspace with one explicit Target pane.
+
+    ``target`` is the canonical product concept: sidebar actions operate on
+    this slot. While an agent owns keyboard focus it is also the focused pane;
+    while the sidebar owns focus it remains only the remembered Target pane.
+    """
 
     PRIMARY = "primary"
     SECONDARY = "secondary"
 
     def __init__(self) -> None:
         self.layout = WorkspaceLayout.SINGLE
-        self.active_slot_key = self.PRIMARY
+        self.target_slot_key = self.PRIMARY
+        # Closing the outer secondary pane must not kill its detached agent.
+        # Keep its exact instance-local tmux name so F8 can reopen the same
+        # target while cycling back from single to a dual layout.
+        self.collapsed_secondary_agent: str | None = None
         self._slots = {
             self.PRIMARY: AgentSlot(self.PRIMARY),
             self.SECONDARY: AgentSlot(self.SECONDARY),
@@ -106,8 +140,22 @@ class AgentWorkspace:
         return self._slots[self.SECONDARY]
 
     @property
+    def target(self) -> AgentSlot:
+        return self._slots[self.target_slot_key]
+
+    @property
+    def active_slot_key(self) -> str:
+        """Compatibility view of :attr:`target_slot_key` for released callers."""
+        return self.target_slot_key
+
+    @active_slot_key.setter
+    def active_slot_key(self, slot_key: str) -> None:
+        self.target_slot_key = slot_key
+
+    @property
     def active(self) -> AgentSlot:
-        return self._slots[self.active_slot_key]
+        """Compatibility view of :attr:`target` for released callers."""
+        return self.target
 
     @property
     def slots(self) -> tuple[AgentSlot, AgentSlot]:
@@ -126,11 +174,16 @@ class AgentWorkspace:
         existing = self.slot_for_agent(tmux_name)
         return existing is None or existing is slot
 
-    def activate(self, slot_key: str) -> AgentSlot:
+    def set_target(self, slot_key: str) -> AgentSlot:
+        """Make one slot the Target pane for subsequent sidebar actions."""
         if slot_key not in self._slots:
             raise KeyError(slot_key)
-        self.active_slot_key = slot_key
+        self.target_slot_key = slot_key
         return self._slots[slot_key]
+
+    def activate(self, slot_key: str) -> AgentSlot:
+        """Compatibility wrapper for the previously released workspace API."""
+        return self.set_target(slot_key)
 
     def collapse_to_primary(self) -> str | None:
         """Reset secondary state and return its outer pane ID for caller cleanup."""
@@ -138,5 +191,5 @@ class AgentWorkspace:
         pane_id = secondary.pane_id
         secondary.clear_display()
         self.layout = WorkspaceLayout.SINGLE
-        self.active_slot_key = self.PRIMARY
+        self.target_slot_key = self.PRIMARY
         return pane_id

@@ -11,7 +11,11 @@ from railmux.display_transport import (
     AgentDisplayTransport,
     recover_interrupted_swaps,
 )
-from railmux.ui.workspace import AgentWorkspace, DisplayTransportKind
+from railmux.ui.workspace import (
+    AgentWorkspace,
+    DisplayTransportKind,
+    WorkspaceLayout,
+)
 
 
 class FakeTmux:
@@ -37,7 +41,9 @@ class FakeTmux:
         self.killed_sessions: list[str] = []
         self.fail_marker_window: str | None = None
         self.fail_swap_at: int | None = None
+        self.fail_respawn = False
         self.respawned: list[tuple[str, str]] = []
+        self.split_commands: list[str] = []
         self._patch(monkeypatch)
 
     def _patch(self, monkeypatch):
@@ -50,6 +56,7 @@ class FakeTmux:
             "session_has_window": lambda name, window: (
                 name in self.sessions and window in self.sessions[name]["windows"]),
             "split_window_h": self.split_window_h,
+            "split_window_v": self.split_window_h,
             "respawn_pane": self.respawn_pane,
             "fit_session_to_pane": lambda *_args: True,
             "wait_session_detached": lambda name, timeout=1.0: (
@@ -98,7 +105,8 @@ class FakeTmux:
         return tmux_ctl.SessionTopology(
             name, str(session["id"]), int(session["attached"]), windows, panes)
 
-    def split_window_h(self, _cmd, **_kwargs):
+    def split_window_h(self, command, **_kwargs):
+        self.split_commands.append(command)
         pane_id = f"%{self.next_pane}"
         self.next_pane += 1
         self.panes[pane_id] = tmux_ctl.PaneIdentity(
@@ -107,7 +115,7 @@ class FakeTmux:
         return pane_id
 
     def respawn_pane(self, pane, command):
-        if pane not in self.panes:
+        if pane not in self.panes or self.fail_respawn:
             return False
         self.respawned.append((pane, command))
         return True
@@ -388,6 +396,112 @@ def test_two_distinct_slots_share_keeper_without_duplicate_agent(rig):
         workspace.secondary.swap_state.keeper_session)
     assert fake.panes["%2"].window_id == "@1"
     assert fake.panes["%3"].window_id == "@1"
+
+
+def test_create_secondary_uses_requested_stacked_layout(rig):
+    fake, workspace, manager = rig
+    assert manager.attach(workspace.primary, "agent-a").ok
+
+    assert manager.create_secondary(WorkspaceLayout.STACKED)
+
+    assert workspace.layout is WorkspaceLayout.STACKED
+    assert workspace.secondary.pane_id in fake.panes
+    assert "railmux.pane_surface --empty 2" in fake.split_commands[-1]
+
+
+def test_create_primary_and_reset_slot_use_branded_empty_surface(rig):
+    fake, workspace, manager = rig
+
+    assert manager.create_primary()
+    pane_id = workspace.primary.pane_id
+    assert pane_id is not None
+    assert "railmux.pane_surface --empty 1" in fake.split_commands[-1]
+
+    workspace.primary.agent_tmux_name = "agent-a"
+    workspace.primary.active_session_id = "session-a"
+    assert manager.reset_slot(workspace.primary)
+    assert workspace.primary.pane_id == pane_id
+    assert workspace.primary.agent_tmux_name is None
+    assert "railmux.pane_surface --empty 1" in fake.respawned[-1][1]
+
+
+def test_prepare_kill_returns_swap_home_and_keeps_secondary_empty(rig):
+    fake, workspace, manager = rig
+    assert manager.attach(workspace.primary, "agent-a").ok
+    assert manager.create_secondary(WorkspaceLayout.STACKED)
+    assert manager.attach(workspace.secondary, "agent-b").ok
+    placeholder = workspace.secondary.swap_state.placeholder_pane_id
+
+    assert manager.prepare_kill("agent-b")
+
+    assert workspace.layout is WorkspaceLayout.STACKED
+    assert workspace.secondary.pane_id == placeholder
+    assert workspace.secondary.agent_tmux_name is None
+    assert workspace.secondary.swap_state is None
+    assert fake.panes["%3"].window_id == "@3"
+    assert fake.respawned[-1][0] == placeholder
+    assert "railmux.pane_surface --empty 2" in fake.respawned[-1][1]
+    assert "agent-b" in fake.sessions  # The caller kills only after safe return.
+
+
+def test_prepare_kill_detaches_nested_client_into_same_empty_pane(rig):
+    fake, workspace, _manager = rig
+    workspace.primary.pane_id = "%0"
+    manager = AgentDisplayTransport(
+        workspace, "nested", auto_launched=True,
+        outer_session_name="railmux", outer_session_id="$1",
+        owner_pane_id="%0",
+    )
+    assert manager.create_secondary(WorkspaceLayout.SIDE_BY_SIDE)
+    pane_id = workspace.secondary.pane_id
+    assert manager.attach(workspace.secondary, "agent-b").ok
+
+    assert manager.prepare_kill("agent-b")
+
+    assert workspace.layout is WorkspaceLayout.SIDE_BY_SIDE
+    assert workspace.secondary.pane_id == pane_id
+    assert workspace.secondary.agent_tmux_name is None
+    assert fake.respawned[-1][0] == pane_id
+    assert "railmux.pane_surface --empty 2" in fake.respawned[-1][1]
+
+
+def test_swap_empty_surface_failure_reports_that_agent_is_already_home(rig):
+    fake, workspace, manager = rig
+    assert manager.attach(workspace.primary, "agent-a").ok
+    workspace.primary.active_session_id = "session-a"
+    placeholder = workspace.primary.swap_state.placeholder_pane_id
+    fake.fail_respawn = True
+
+    outcome = manager.prepare_kill("agent-a")
+
+    assert not outcome
+    assert "returned home" in (outcome.error or "")
+    assert "nothing was killed" in (outcome.error or "")
+    assert workspace.primary.pane_id == placeholder
+    assert workspace.primary.agent_tmux_name is None
+    assert workspace.primary.active_session_id is None
+    assert workspace.primary.swap_state is None
+    assert fake.panes["%2"].window_id == "@2"
+    assert "agent-a" in fake.sessions
+
+
+def test_nested_empty_surface_failure_refuses_to_kill_attached_agent(rig):
+    fake, workspace, _manager = rig
+    workspace.primary.pane_id = "%0"
+    manager = AgentDisplayTransport(
+        workspace, "nested", auto_launched=True,
+        outer_session_name="railmux", outer_session_id="$1",
+        owner_pane_id="%0",
+    )
+    assert manager.attach(workspace.primary, "agent-a").ok
+    fake.fail_respawn = True
+
+    outcome = manager.prepare_kill("agent-a")
+
+    assert not outcome
+    assert "could not detach" in (outcome.error or "")
+    assert workspace.primary.agent_tmux_name == "agent-a"
+    assert "agent-a" in fake.sessions
 
 
 def test_preview_returns_real_home_and_keeps_display_placeholder(rig):

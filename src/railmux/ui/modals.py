@@ -182,11 +182,13 @@ class HelpModal(urwid.WidgetWrap):
             ("d", "Delete the focused session (prompts for confirmation)"),
             ("m", "Cycle through available agent modes"),
             ("t", "Open a terminal in the active project"),
+            ("␣", "Preview stopped / switch running session"),
+            ("F8", "Cycle layout: single / side-by-side / stacked"),
             ("F9", "Fullscreen the agent pane (toggle) for clean text copy"),
             ("q or Ctrl-C", "Quit railmux (prompts for confirmation)"),
         ]),
         ("Mouse", [
-            ("Left click", "Select / preview (non-running) / attach (running)"),
+            ("Left click", "Preview stopped / switch running session"),
             ("Double-click", "Open session and move focus to it"),
             ("Right-click", "Context menu for the session"),
         ]),
@@ -198,6 +200,7 @@ class HelpModal(urwid.WidgetWrap):
         ]),
         ("tmux", [
             ("Ctrl-B → / ←", "Move focus between railmux and agent panes"),
+            ("F8", "Cycle layout even while an agent pane has focus"),
             ("Ctrl-B d", "Detach from railmux (keep sessions alive)"),
         ]),
         ("", [

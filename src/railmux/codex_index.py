@@ -443,6 +443,7 @@ def _parse_codex_session(path: Path, f) -> SessionMeta | None:
     message_count = 0
     token_total = 0
     first_user_message: str | None = None
+    last_user_message: str | None = None
     # Tool-call state machine: a call_id is added when its call record is seen
     # and removed when its matching output arrives, so only genuinely unpaired
     # calls remain "pending".  Calls lacking a call_id get a synthetic key so
@@ -484,17 +485,23 @@ def _parse_codex_session(path: Path, f) -> SessionMeta | None:
             if pt == "message":
                 role = rp.get("role", "")
                 if role == "user":
-                    message_count += 1
-                    last_message_role = "user"
-                    # Bias a user message toward active even if task_started is
-                    # flushed just after it (or absent in a legacy rollout).
-                    turn_active = True
                     content = rp.get("content")
                     if isinstance(content, list):
                         text = _extract_codex_text(content)
-                        if (text is not None and first_user_message is None
+                        if (text is not None
                                 and not _is_codex_synthetic_message(text)):
-                            first_user_message = text
+                            # Harness-injected environment/context records use
+                            # the user role too. Count only actual conversation
+                            # messages and let only those affect legacy status.
+                            message_count += 1
+                            last_message_role = "user"
+                            # Bias a real user message toward active even if
+                            # task_started is flushed just after it (or absent
+                            # in a legacy rollout).
+                            turn_active = True
+                            if first_user_message is None:
+                                first_user_message = text
+                            last_user_message = text
                 elif role == "assistant":
                     message_count += 1
                     last_message_role = "assistant"
@@ -593,10 +600,10 @@ def _parse_codex_session(path: Path, f) -> SessionMeta | None:
         first_line = first_user_message.split("\n")[0]
         title = first_line[:60] + ("..." if len(first_line) > 60 else "")
 
-    # -- preview: first line of first user message ------------------------
+    # -- preview: first line of latest user message -----------------------
     preview: str | None = None
-    if first_user_message:
-        first_line = first_user_message.split("\n")[0]
+    if last_user_message:
+        first_line = last_user_message.split("\n")[0]
         preview = first_line[:117] + ("..." if len(first_line) > 120 else "") if len(first_line) > 120 else first_line
 
     # Synthesize a Project from the cwd.

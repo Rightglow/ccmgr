@@ -258,7 +258,7 @@ def _cols(s: str) -> int:
 def test_hintbar_wide_shows_all_keys_no_ellipsis():
     bar = HintBar()
     bar.set_context(keymap.CTX_SESSIONS)
-    rows = _hint_rows(bar, 140)  # wider than the full sessions hint
+    rows = _hint_rows(bar, 180)  # wider than the full sessions hint
     joined = "".join(rows)
     assert "…" not in joined
     assert "F9 fullscreen" in joined  # last key is present

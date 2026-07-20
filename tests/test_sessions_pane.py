@@ -1,7 +1,9 @@
 """Tests for railmux.ui.sessions_pane — callback dispatch (preview vs open)."""
 
+import time
 from pathlib import Path
 
+import pytest
 import urwid
 
 from railmux.models import (
@@ -10,7 +12,7 @@ from railmux.models import (
     Project,
     SessionMeta,
 )
-from railmux.ui.sessions_pane import SessionsPane, _SessionRow
+from railmux.ui.sessions_pane import SessionsPane, _SessionRow, _format_count
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -122,12 +124,13 @@ def test_non_running_sessions_get_preview_and_open():
 
 
 def test_running_sessions_get_click_and_double_click():
-    """Running-session double-click defers focus until tmux settles."""
+    """Running-session click switches; double-click also transfers focus."""
     open_calls = []
+    preview_calls = []
     completed = []
     pane = SessionsPane(
         on_select=lambda s, **kw: open_calls.append((s.session_id, kw.get("steal_focus", True))),
-        on_preview=lambda s: None,
+        on_preview=lambda s: preview_calls.append(s.session_id),
         on_double_detected=lambda: completed.append(True),
     )
     proj = _project()
@@ -142,16 +145,16 @@ def test_running_sessions_get_click_and_double_click():
 
     r._on_click()
     r._on_double_click()
+    assert preview_calls == []
     assert open_calls == [
-        (s.session_id, False),  # click → no focus steal
+        (s.session_id, False),  # click → switch without focus transfer
         (s.session_id, False),  # double-click → App focuses after tmux settles
     ]
     assert completed == [True]
 
 
 def test_stale_preview_callback_rechecks_live_running_session(monkeypatch):
-    """A row rendered just before the running registry changed must not open
-    history for an agent whose tmux session is live at click time."""
+    """A row that became live switches instead of showing stale history."""
     from railmux import tmux_ctl
     from railmux.config import Config
     from railmux.ui.app import App, _Running
@@ -183,7 +186,7 @@ def test_stale_preview_callback_rechecks_live_running_session(monkeypatch):
 
     pane = SessionsPane(
         on_select=lambda *_args, **_kwargs: None,
-        on_preview=app._on_session_preview,
+        on_preview=app._on_session_row_preview,
     )
     pane.set_sessions(project, [session], running_ids=set(), favorite_ids=set())
     row = next(w for w in pane._walker if isinstance(w, _SessionRow))
@@ -512,6 +515,83 @@ def test_stopped_session_row_uses_neutral_hollow_marker():
     assert title.attrib[0] == ("dim", 1)
 
 
+def _session_meta_text(row: _SessionRow) -> str:
+    return row._wrapped_widget.base_widget.contents[1][0].text
+
+
+def test_running_session_meta_replaces_age_with_live_state():
+    project = _project()
+    for status in ("idle", "busy", "blocked"):
+        session = SessionMeta(
+            **{**_session(project).__dict__,
+               "last_mtime": time.time() - 3600,
+               "last_user_message": "Latest request",
+               "status": status},
+        )
+
+        meta = _session_meta_text(_SessionRow(session, is_running=True))
+
+        assert meta == f"  {status} · 5 msg · 500 tok"
+        assert "ago" not in meta
+
+
+def test_running_aborted_attention_takes_priority_over_idle_status():
+    session = _session(_project())
+    session = SessionMeta(
+        **{**session.__dict__, "status": "idle", "attention": AttentionState(
+            AttentionCategory.ABORTED, "Turn aborted.")},
+    )
+
+    meta = _session_meta_text(_SessionRow(session, is_running=True))
+
+    assert meta.startswith("  aborted · ")
+
+
+def test_session_meta_ignores_branch_even_when_metadata_has_one():
+    session = SessionMeta(
+        **{**_session(_project()).__dict__, "git_branch": "feat/sidebar"},
+    )
+
+    meta = _session_meta_text(_SessionRow(session, is_running=True))
+
+    assert meta == "  idle · 5 msg · 500 tok"
+
+
+@pytest.mark.parametrize(("value", "expected"), [
+    (0, "0"),
+    (1, "1"),
+    (999, "999"),
+    (1000, "1k"),
+    (1250, "1.3k"),
+    (12_345, "12k"),
+    (999_499, "999k"),
+    (999_500, "1M"),
+    (1_250_000, "1.3M"),
+    (10**12, "1T"),
+    (10**18, "1E"),
+    (999_500 * 10**15, "1e21"),
+    (10**21, "1e21"),
+    (15 * 10**99, "1.5e100"),
+    (-1, "0"),
+])
+def test_format_count_handles_small_boundaries_and_huge_values(value, expected):
+    assert _format_count(value) == expected
+
+
+def test_stopped_session_meta_keeps_relative_age_instead_of_stale_status():
+    session = _session(_project())
+    session = SessionMeta(
+        **{**session.__dict__,
+           "last_mtime": time.time() - 3600,
+           "status": "blocked"},
+    )
+
+    meta = _session_meta_text(_SessionRow(session, is_running=False))
+
+    assert meta == "  1h ago · 5 msg · 500 tok"
+    assert "blocked" not in meta
+
+
 def test_live_attention_keeps_status_dot_and_adds_separate_badge():
     proj = _project()
     session = _session(proj)
@@ -565,6 +645,7 @@ def test_focus_remap_includes_status_dots():
         assert "focus" in _FOCUS_REMAP[key], \
             f"{key} focus variant should contain 'focus'"
     assert _FOCUS_REMAP["attention"] == "attention_focus"
+    assert _FOCUS_REMAP["session_meta"] == "session_meta_focus"
 
 
 def test_selected_map_includes_status_dots():
@@ -574,6 +655,23 @@ def test_selected_map_includes_status_dots():
         assert "sel" in _SELECTED_MAP[key], \
             f"{key} selected variant should contain 'sel'"
     assert _SELECTED_MAP["attention"] == "attention_sel"
+    assert _SELECTED_MAP["session_meta"] == "session_meta_sel"
+
+
+def test_session_meta_stays_secondary_when_focused_or_selected():
+    session = _session(_project())
+    focused = _SessionRow(session, is_running=True).render((40,), focus=True)
+    selected = _SessionRow(
+        session, is_running=True, is_selected=True,
+    ).render((40,), focus=False)
+
+    assert list(focused.content())[1][0][0] == "session_meta_focus"
+    assert list(selected.content())[1][0][0] == "session_meta_sel"
+
+    from railmux.ui.app import PALETTE
+    entries = {entry[0]: entry for entry in PALETTE}
+    for name in ("session_meta", "session_meta_focus", "session_meta_sel"):
+        assert "bold" not in ",".join(str(field) for field in entries[name][1:])
 
 
 def test_star_is_plain_text_no_palette():

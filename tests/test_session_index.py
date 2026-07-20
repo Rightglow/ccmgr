@@ -55,6 +55,44 @@ def test_session_basic_metadata(claude_home, write_session_fixture, tmp_path):
     assert s.last_mtime > 0
 
 
+def test_counts_real_messages_and_deduplicates_claude_usage(
+    claude_home, write_session_fixture, tmp_path,
+):
+    project = _make_one_project(claude_home, tmp_path, write_session_fixture, [
+        ("abababab-abab-abab-abab-abababababab", [
+            {"type": "user", "message": {
+                "role": "user", "content": "Run the tests"}},
+            {"type": "user", "message": {
+                "role": "user", "content": [{
+                    "type": "tool_result", "content": "test output"}]}},
+            {"type": "assistant", "message": {
+                "id": "msg-1", "role": "assistant", "content": [],
+                "usage": {"input_tokens": 10,
+                          "cache_creation_input_tokens": 20,
+                          "cache_read_input_tokens": 30,
+                          "output_tokens": 4}}},
+            {"type": "assistant", "message": {
+                "id": "msg-1", "role": "assistant", "content": [],
+                "usage": {"input_tokens": 10,
+                          "cache_creation_input_tokens": 20,
+                          "cache_read_input_tokens": 30,
+                          "output_tokens": 8}}},
+            {"type": "assistant", "message": {
+                "id": "msg-2", "role": "assistant", "content": [],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 5, "output_tokens": 2}}},
+        ]),
+    ])
+
+    session = list_sessions(project)[0]
+
+    # One real user prompt + two unique provider assistant messages. The tool
+    # result and duplicate streaming record are not conversation messages.
+    assert session.message_count == 3
+    # max(msg-1 snapshots) + msg-2, including cache creation/read tokens.
+    assert session.token_total == 75
+
+
 def test_most_recent_ai_title_wins(claude_home, write_session_fixture, tmp_path):
     project = _make_one_project(claude_home, tmp_path, write_session_fixture, [
         ("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", [

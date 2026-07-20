@@ -754,11 +754,20 @@ def split_window_h(cmd: str = "", target: str | None = None,
         return None
 
 
-def split_window_v(cmd: str = "", target: str | None = None) -> str | None:
+def split_window_v(cmd: str = "", target: str | None = None,
+                   size_percent: int | None = None,
+                   detached: bool = False) -> str | None:
     """Create a vertical split (new pane below). Returns the new pane id."""
     if not in_tmux():
         return None
     args = ["tmux", "split-window", "-v", "-P", "-F", "#{pane_id}"]
+    if detached:
+        args.append("-d")
+    if size_percent is not None:
+        if tmux_version() >= (3, 1):
+            args.extend(["-l", f"{size_percent}%"])
+        else:
+            args.extend(["-p", str(size_percent)])
     if target:
         args.extend(["-t", target])
     if cmd:
@@ -795,18 +804,44 @@ def kill_pane(pane_id: str) -> bool:
         return False
 
 
-def set_window_option(name: str, value: str) -> bool:
-    """`tmux set-window-option -w <name> <value>` scoped to the current window.
+def local_window_option(name: str) -> tuple[bool, str | None]:
+    """Return an explicitly-set current-window option.
+
+    The boolean distinguishes a successful empty result (the option is
+    inherited) from a failed tmux query.  This lets temporary UI treatments
+    restore inheritance with ``set-window-option -u`` instead of pinning the
+    current global value as a new local override.
+    """
+    if not in_tmux():
+        return False, None
+    try:
+        value = subprocess.check_output(
+            ["tmux", "show-window-options", "-v", name],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        return True, value or None
+    except (OSError, subprocess.CalledProcessError, UnicodeError):
+        return False, None
+
+
+def set_window_option(name: str, value: str | None) -> bool:
+    """Set or unset *name* on the current window.
 
     Used by railmux to enable a visible border highlight on the active tmux
     pane (so the agent pane lights up the same way Railmux's Urwid panes do
     when focused) without leaking the setting into the user's other windows.
+    ``None`` removes the local override and restores inheritance.
     """
     if not in_tmux():
         return False
+    args = ["tmux", "set-window-option"]
+    if value is None:
+        args.extend(["-u", name])
+    else:
+        args.extend([name, value])
     try:
         subprocess.check_call(
-            ["tmux", "set-window-option", name, value],
+            args,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -842,6 +877,51 @@ def select_pane(pane_id: str) -> bool:
     try:
         subprocess.check_call(
             ["tmux", "select-pane", "-t", pane_id],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
+def active_pane_id(target: str) -> str | None:
+    """Return the active pane in *target*'s window."""
+    if not in_tmux():
+        return None
+    try:
+        out = subprocess.check_output(
+            ["tmux", "list-panes", "-t", target, "-F",
+             "#{?pane_active,#{pane_id},}"],
+            stderr=subprocess.DEVNULL,
+        ).decode()
+    except (OSError, subprocess.CalledProcessError, UnicodeError):
+        return None
+    active = [line for line in out.splitlines() if line]
+    return active[0] if len(active) == 1 else None
+
+
+def last_pane_id(target: str) -> str | None:
+    """Return the previously active pane in *target*'s window."""
+    if not in_tmux():
+        return None
+    try:
+        out = subprocess.check_output(
+            ["tmux", "list-panes", "-t", target, "-F",
+             "#{?pane_last,#{pane_id},}"],
+            stderr=subprocess.DEVNULL,
+        ).decode()
+    except (OSError, subprocess.CalledProcessError, UnicodeError):
+        return None
+    previous = [line for line in out.splitlines() if line]
+    return previous[0] if len(previous) == 1 else None
+
+
+def toggle_pane_zoom(pane_id: str) -> bool:
+    """Toggle tmux zoom for one explicit pane."""
+    try:
+        subprocess.check_call(
+            ["tmux", "resize-pane", "-Z", "-t", pane_id],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -1000,8 +1080,12 @@ _SCROLL_TABLES = ("copy-mode", "copy-mode-vi")
 _SCROLL_KEYS = ("WheelUpPane", "WheelDownPane")
 ScrollBindingBackup = dict[tuple[str, str], Optional[str]]
 RootWheelBindingBackup = dict[str, Optional[str]]
+RootFunctionBindingBackup = dict[str, Optional[str]]
 _ROOT_WHEEL_KEYS = ("WheelUpPane", "WheelDownPane")
 _ROOT_WHEEL_MARKER = "railmux-wheel-forward-v1"
+_ROOT_FUNCTION_KEYS = ("F8", "F9")
+_ROOT_FUNCTION_MARKER = "railmux-function-forward-v1"
+RAILMUX_CONTROLLER_OPTION = "@railmux_controller_pane"
 
 
 def _read_key_binding(table: str, key: str) -> str | None:
@@ -1233,6 +1317,138 @@ def restore_root_wheel_bindings(
                     os.unlink(path)
         except (OSError, subprocess.CalledProcessError, FileNotFoundError):
             pass
+
+
+def read_root_function_bindings() -> RootFunctionBindingBackup:
+    return {key: _read_key_binding("root", key) for key in _ROOT_FUNCTION_KEYS}
+
+
+def prepare_root_function_bindings() -> RootFunctionBindingBackup | None:
+    if tmux_version() < (2, 7):
+        return None
+    backup = read_root_function_bindings()
+    if any(binding and _ROOT_FUNCTION_MARKER in binding
+           for binding in backup.values()):
+        return None
+    return backup
+
+
+def set_root_function_forwarding(
+    backup: RootFunctionBindingBackup, token: str,
+) -> bool:
+    """Route F8/F9 to the controller option in Railmux windows only."""
+    marker = f"{_ROOT_FUNCTION_MARKER}-{token}"
+    condition = (
+        "#{&&:#{!=:#{@railmux_controller_pane},},"
+        f"#{{==:{marker},{marker}}}}}"
+    )
+    try:
+        for key in _ROOT_FUNCTION_KEYS:
+            original = backup.get(key)
+            fallback = (
+                _binding_command(original)
+                if original is not None else f"send-keys {key}"
+            )
+            # if-shell parses its selected branch a second time.  Leaving the
+            # option format bare would make that parser treat ``#`` as the
+            # start of a comment and reduce this to ``send-keys -t``.  Let
+            # run-shell expand the quoted format before invoking tmux again.
+            forward = (
+                'run-shell "tmux send-keys -t '
+                f"'#{{@railmux_controller_pane}}' {key}"
+                '"'
+            )
+            subprocess.check_call(
+                [
+                    "tmux", "bind-key", "-T", "root", key,
+                    "if-shell", "-F", condition,
+                    forward,
+                    fallback,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+    except (ValueError, subprocess.CalledProcessError, FileNotFoundError):
+        return False
+    return True
+
+
+def root_function_bindings_owned_by(token: str) -> bool:
+    marker = f"{_ROOT_FUNCTION_MARKER}-{token}"
+    return all(
+        binding is not None
+        and marker in binding
+        and RAILMUX_CONTROLLER_OPTION in binding
+        for binding in read_root_function_bindings().values()
+    )
+
+
+def root_function_binding_is_original_or_owned(
+    key: str,
+    binding: str | None,
+    original: str | None,
+    token: str,
+) -> bool:
+    if binding == original:
+        return True
+    marker = f"{_ROOT_FUNCTION_MARKER}-{token}"
+    return bool(binding and marker in binding and key in binding)
+
+
+def restore_root_function_bindings(
+    backup: RootFunctionBindingBackup, *, token: str,
+) -> None:
+    """Restore per-key originals only while the transaction still owns them."""
+    current = read_root_function_bindings()
+    marker = f"{_ROOT_FUNCTION_MARKER}-{token}"
+    for key in _ROOT_FUNCTION_KEYS:
+        live = current.get(key)
+        if live is None or marker not in live:
+            continue
+        original = backup.get(key)
+        try:
+            if original is None:
+                subprocess.check_call(
+                    ["tmux", "unbind-key", "-T", "root", key],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                fd, path = tempfile.mkstemp(
+                    prefix="railmux-root-function-", suffix=".conf")
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                        fh.write(original + "\n")
+                    subprocess.check_call(
+                        ["tmux", "source-file", path],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                finally:
+                    os.unlink(path)
+        except (OSError, subprocess.CalledProcessError, FileNotFoundError):
+            pass
+
+
+def unset_window_user_option_if_value(
+    target: str, name: str, expected: str,
+) -> bool:
+    """Unset a window option only if it still contains our exact value."""
+    try:
+        current = subprocess.check_output(
+            ["tmux", "show-window-options", "-v", "-t", target, name],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        if current != expected:
+            return False
+        subprocess.check_call(
+            ["tmux", "set-window-option", "-u", "-t", target, name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except (OSError, subprocess.CalledProcessError, UnicodeError):
+        return False
 
 
 def _set_scroll_bindings(agent_pane_id: str,

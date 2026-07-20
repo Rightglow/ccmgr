@@ -63,6 +63,7 @@ def test_hint_text_for_sessions_shows_all_actions():
     assert "del" in text
     assert "info" in text
     assert "term" in text
+    assert "␣ preview" in text
 
 
 def test_hint_text_for_running_hides_creation_and_editing():
@@ -78,6 +79,12 @@ def test_hint_text_for_running_hides_creation_and_editing():
     assert "kill" in text
     assert "info" in text
     assert "term" in text
+    assert "␣ preview" in text
+
+
+def test_preview_uses_space_in_session_and_running_contexts():
+    assert action_for(" ", CTX_SESSIONS) == "_preview_focused_target"
+    assert action_for(" ", CTX_RUNNING) == "_preview_focused_target"
 
 
 def test_running_slash_routes_to_filter_editor():

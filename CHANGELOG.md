@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Give the two-line Sessions list half of the sidebar's vertical allocation,
+  changing the Projects / Sessions / Running weights from 2:3:2 to 2:4:2.
+- Replace the relative-age prefix on live Sessions rows with their current
+  `idle`, `busy`, or `blocked` state, with actionable aborts shown as `aborted`.
+- Replace branch and file-size metadata in both Claude Code and Codex session
+  rows with compact logical-message and token counts. Keep this second line
+  visually secondary and non-bold even while its row is focused or selected.
+- Exclude tool results, harness-injected prompts, and duplicate Claude
+  streaming records from logical-message counts; deduplicate Claude usage by
+  provider message and include reported cache creation/read tokens.
+- Add an experimental second agent pane through `F8`, which can create an empty
+  Pane 2 and cycles single, side-by-side, and stacked layouts globally while
+  keeping the collapsed Pane 2 agent running. Unusable side-by-side geometry is
+  skipped instead of leaving F8 stuck on single. Empty agent panes now use a
+  centered, resize-aware Railmux surface with compact interaction guidance;
+  startup restoration uses the same visual language.
+- Align `␣` and right-click Preview with single-click: preview stopped sessions,
+  but switch/attach running sessions while sidebar focus stays put. Double-click
+  and Enter open in the agent pane remembered from tmux focus and transfer
+  focus. While the sidebar is active in a dual layout, agent borders return to
+  honest gray and the status brand's compact workspace map identifies the
+  exact neutral Target pane.
+  Single-agent sidebar focus also uses a continuous gray divider, removing a
+  stale per-pane target format that could leave half the line dim green after
+  restart.
+- Show a persistent one-cell workspace map after the provider name: `▣` for
+  single, `◧`/`◨` for side-by-side, and `⬒`/`⬓` for stacked. The filled half
+  identifies the Target pane across focus changes, including direct mouse
+  movement between P1 and P2 without returning through the sidebar.
+- Establish **Target pane / 目标窗格** as the canonical name for the remembered
+  agent pane where sidebar actions take effect, distinct from the **Focused
+  pane / 焦点窗格** that currently receives keyboard input. The workspace model
+  uses `target_slot_key`, `target`, and `set_target()` consistently; the
+  previously released `active*` names remain compatibility views only.
+- Disambiguate the shared green border in the side-by-side layout with inward
+  tmux arrows that point at the exact focused agent pane. Directional markers
+  are limited to agent focus, restore the prior window option on teardown, and
+  degrade to colour-only borders on tmux versions older than 3.3.
+- Retry a failed tmux focus-border update instead of caching it, preventing the
+  old half-gray/half-green dual-pane style from surviving after returning to a
+  single agent pane.
+- Resolve the Target pane from real tmux focus (including the last pane
+  when returning to the sidebar). F9, transcript preview, terminal placement,
+  status/attention targeting, scrolling, and soft-restart display selection no
+  longer silently default to Pane 1.
+- Reconcile liveness and outer-pane disappearance across both slots and both
+  providers. A lost Pane 2 collapses or rebuilds safely; if Pane 1 disappears,
+  Railmux returns Pane 2 home before rebuilding or promoting its surviving
+  agent, preserving slot-specific swap ownership.
+- Manage the server-global F8/F9 wrappers as a crash-safe, multi-instance
+  transaction. They forward only in Railmux windows, preserve prior behavior
+  elsewhere, restore exact per-key originals on final teardown, and defer to
+  any newer user tmux configuration.
+- Restore the complete exact-owner agent workspace after a soft restart:
+  layout, both validated pane contents, Target pane, keyboard focus, preview
+  rollback target, and a collapsed secondary agent. Portable state remains a
+  single stable display wish with no tmux process authority; invalid content or
+  newly constrained geometry degrades to branded empty or single-pane UI while
+  live agents remain discoverable in Running.
+
+### Fixed
+
+- Route every displayed-session kill through the display transport, including
+  ordinary resolved sessions. Swap panes now return home and nested clients
+  detach before the exact tmux session is killed; the affected slot remains in
+  the chosen dual-pane layout as a usable empty pane, failed kills stay in the
+  Running registry, and stale display markers can no longer cascade errors.
+- Quote and expand the controller pane correctly in the global F8/F9 tmux
+  wrapper, preventing `-t expects an argument` when cycling layouts.
+
 ## [0.1.3] - 2026-07-17
 
 ### Changed

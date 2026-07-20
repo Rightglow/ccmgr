@@ -247,6 +247,94 @@ def _bounded_string(value: object, limit: int) -> str | None:
     return value if isinstance(value, str) and len(value) <= limit else None
 
 
+def _validate_workspace_slot(raw: object) -> dict | None:
+    """Validate one exact-owner display wish without granting new authority."""
+    if not isinstance(raw, dict) or len(raw) > 8:
+        return None
+    kind = _bounded_string(raw.get("kind"), 16)
+    if kind not in {"empty", "agent", "preview"}:
+        return None
+    slot: dict = {"kind": kind}
+    fields = {
+        "tmux": 256,
+        "session": 256,
+        "mode": 64,
+        "project": 512,
+    }
+    for key, limit in fields.items():
+        value = _bounded_string(raw.get(key), limit)
+        if value is not None:
+            slot[key] = value
+    if kind == "agent" and "tmux" not in slot:
+        return None
+    if kind == "preview" and not {"session", "mode"} <= slot.keys():
+        return None
+    restore = raw.get("restore")
+    if restore is not None:
+        if not isinstance(restore, dict) or len(restore) > 2:
+            return None
+        restore_kind = _bounded_string(restore.get("kind"), 16)
+        restore_tmux = _bounded_string(restore.get("tmux"), 256)
+        if restore_kind == "empty":
+            slot["restore"] = {"kind": "empty"}
+        elif restore_kind == "agent" and restore_tmux:
+            slot["restore"] = {"kind": "agent", "tmux": restore_tmux}
+        else:
+            return None
+    return slot
+
+
+def _validate_workspace(raw: object) -> dict | None:
+    """Decode the optional full workspace owned by this exact outer pane."""
+    if not isinstance(raw, dict) or len(raw) > 7 or raw.get("version") != 1:
+        return None
+    layout = _bounded_string(raw.get("layout"), 32)
+    target = _bounded_string(raw.get("target"), 16)
+    focus = _bounded_string(raw.get("focus"), 16)
+    if layout not in {"single", "side-by-side", "stacked"}:
+        return None
+    if target not in {"primary", "secondary"}:
+        return None
+    if focus not in {"sidebar", "primary", "secondary"}:
+        return None
+    if focus != "sidebar" and focus != target:
+        return None
+    if layout == "single" and (target != "primary" or focus == "secondary"):
+        return None
+    raw_slots = raw.get("slots")
+    if not isinstance(raw_slots, dict) or set(raw_slots) != {
+        "primary", "secondary",
+    }:
+        return None
+    primary = _validate_workspace_slot(raw_slots["primary"])
+    secondary = _validate_workspace_slot(raw_slots["secondary"])
+    if primary is None or secondary is None:
+        return None
+    if layout == "single" and secondary["kind"] != "empty":
+        return None
+    workspace = {
+        "version": 1,
+        "layout": layout,
+        "target": target,
+        "focus": focus,
+        "slots": {"primary": primary, "secondary": secondary},
+    }
+    raw_collapsed = raw.get("collapsed_secondary")
+    if raw_collapsed is not None:
+        if not isinstance(raw_collapsed, dict) or len(raw_collapsed) > 3:
+            return None
+        collapsed = {
+            key: _bounded_string(raw_collapsed.get(key), limit)
+            for key, limit in (
+                ("tmux", 256), ("session", 256), ("mode", 64),
+            )
+        }
+        if not all(collapsed.values()):
+            return None
+        workspace["collapsed_secondary"] = collapsed
+    return workspace
+
+
 def validate_view(raw: object) -> dict | None:
     """Flatten the active mode from a validated, extensible view schema."""
     if not isinstance(raw, dict):
@@ -368,6 +456,12 @@ def decode_instance(
         value = _bounded_string(recovery.get(key), limit)
         if value is not None:
             decoded[key] = value
+    raw_workspace = recovery.get("workspace")
+    if raw_workspace is not None:
+        workspace = _validate_workspace(raw_workspace)
+        if workspace is None:
+            return None
+        decoded["workspace"] = workspace
     bindings = recovery.get("running_bindings")
     version = recovery.get("running_bindings_version")
     if version == 1 and isinstance(bindings, list) and len(bindings) <= 10000:

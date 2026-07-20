@@ -16,6 +16,11 @@ from railmux import restart_state, tmux_ctl
 from railmux.restart_state import OuterTmuxIdentity
 from railmux.ui.app import App, _Running
 from railmux.ui.modals import QuitConfirmModal
+from railmux.ui.workspace import (
+    AgentWorkspace,
+    SlotRestoreState,
+    WorkspaceLayout,
+)
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -231,7 +236,18 @@ def test_save_state_always_writes_right_kind(tmp_path, monkeypatch):
     app._save_state()
     assert (tmp_path / "state.json").is_file()
     data = app._load_state()
-    assert data == {"right_kind": "empty", "mode": "claude"}
+    assert data["right_kind"] == "empty"
+    assert data["mode"] == "claude"
+    assert data["workspace"] == {
+        "version": 1,
+        "layout": "single",
+        "target": "primary",
+        "focus": "sidebar",
+        "slots": {
+            "primary": {"kind": "empty"},
+            "secondary": {"kind": "empty"},
+        },
+    }
 
 
 def test_save_state_with_claude_in_right_pane(tmp_path, monkeypatch):
@@ -293,6 +309,330 @@ def test_soft_quit_portable_state_keeps_stable_agent_not_tmux_name(
     }
     assert "cc-12345678-1234-12" not in portable_path.read_text()
     assert app._load_state()["right_tmux"] == "cc-12345678-1234-12"
+
+
+def test_portable_state_uses_explicit_active_secondary_slot():
+    project = _project("secondary")
+    session_id = "22345678-1234-1234-1234-1234567890ab"
+    app = _minimal_app(selected_project=project)
+    app._running[session_id] = _Running(
+        key=session_id,
+        tmux_name="cx-secondary",
+        label="secondary/session",
+        project=project,
+        session_type="codex",
+    )
+    slot = app._agent_workspace().secondary
+    slot.agent_tmux_name = "cx-secondary"
+    slot.active_session_id = session_id
+    slot.mode_key = "codex"
+    slot.project_key = project.encoded_name
+    app._agent_workspace().set_target(AgentWorkspace.SECONDARY)
+
+    data = app._portable_right_state_data()
+
+    assert data["right_mode"] == "codex"
+    assert data["right_session"] == session_id
+
+
+def test_local_state_keeps_full_dual_workspace_but_portable_does_not(
+        tmp_path, monkeypatch):
+    local_path = tmp_path / "local.json"
+    portable_path = tmp_path / "portable.json"
+    monkeypatch.setattr(App, "_state_path", staticmethod(lambda: local_path))
+    monkeypatch.setattr(
+        App, "_portable_state_path", staticmethod(lambda: portable_path))
+    app = _minimal_app(selected_project=_project("dual"))
+    workspace = app._agent_workspace()
+    workspace.layout = WorkspaceLayout.STACKED
+    workspace.primary.agent_tmux_name = "cc-primary"
+    workspace.primary.active_session_id = "primary-session"
+    workspace.primary.mode_key = "claude"
+    workspace.secondary.in_history_mode = True
+    workspace.secondary.active_session_id = "secondary-session"
+    workspace.secondary.mode_key = "codex"
+    workspace.secondary.project_key = "-tmp-secondary"
+    workspace.secondary.restore_state = SlotRestoreState(
+        "agent", "cx-secondary")
+    workspace.set_target(AgentWorkspace.SECONDARY)
+    app._railmux_has_focus = True
+
+    app._save_state(portable_right=True)
+
+    saved = app._load_state()["workspace"]
+    assert saved["layout"] == "stacked"
+    assert saved["target"] == "secondary"
+    assert saved["focus"] == "sidebar"
+    assert saved["slots"]["primary"]["tmux"] == "cc-primary"
+    assert saved["slots"]["secondary"] == {
+        "kind": "preview",
+        "session": "secondary-session",
+        "mode": "codex",
+        "project": "-tmp-secondary",
+        "restore": {"kind": "agent", "tmux": "cx-secondary"},
+    }
+    assert "workspace" not in portable_path.read_text()
+
+
+def test_local_state_snapshots_actual_agent_focus_before_save(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        App, "_state_path", staticmethod(lambda: tmp_path / "state.json"))
+    app = _minimal_app()
+    workspace = app._agent_workspace()
+    workspace.layout = WorkspaceLayout.SIDE_BY_SIDE
+    workspace.primary.pane_id = "%2"
+    workspace.secondary.pane_id = "%3"
+    workspace.set_target(AgentWorkspace.PRIMARY)
+    app._railmux_has_focus = False
+
+    def sync_focus():
+        workspace.set_target(AgentWorkspace.SECONDARY)
+        return workspace.secondary
+
+    app._sync_target_slot_from_tmux = MagicMock(side_effect=sync_focus)
+
+    app._save_state()
+
+    saved = app._load_state()["workspace"]
+    assert saved["target"] == "secondary"
+    assert saved["focus"] == "secondary"
+
+
+def test_local_state_saves_collapsed_agent_with_stable_identity():
+    app = _minimal_app()
+    workspace = app._agent_workspace()
+    workspace.collapsed_secondary_agent = "cx-collapsed"
+    app._running["collapsed-session"] = _Running(
+        key="collapsed-session",
+        tmux_name="cx-collapsed",
+        label="collapsed",
+        session_type="codex",
+    )
+
+    saved = app._workspace_recovery_state_data()
+
+    assert saved["collapsed_secondary"] == {
+        "tmux": "cx-collapsed",
+        "session": "collapsed-session",
+        "mode": "codex",
+    }
+
+
+def test_restore_workspace_rebuilds_both_slots_target_and_agent_focus(
+        monkeypatch):
+    app = _minimal_app()
+    workspace = app._agent_workspace()
+    transport = MagicMock()
+    app._display_transport_manager = transport
+    app._agent_region_size = MagicMock(return_value=(200, 40))
+    app._layout_fits = MagicMock(return_value=True)
+    app._set_railmux_focus = MagicMock()
+    app._paint_slot_active_target = MagicMock()
+    app._install_function_key_bindings = MagicMock()
+
+    def restore_primary(_state, slot):
+        slot.pane_id = "%2"
+        slot.agent_tmux_name = "cc-primary"
+        return True
+
+    def create_secondary(layout):
+        workspace.layout = layout
+        workspace.secondary.pane_id = "%3"
+        return True
+
+    def restore_secondary(slot, _saved, _bindings):
+        slot.in_history_mode = True
+        slot.active_session_id = "secondary-session"
+        return True
+
+    app._restore_agent_target = MagicMock(side_effect=restore_primary)
+    transport.create_secondary.side_effect = create_secondary
+    app._restore_workspace_slot = MagicMock(side_effect=restore_secondary)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.select_pane", lambda _pane: True)
+    saved = {
+        "layout": "side-by-side",
+        "target": "secondary",
+        "focus": "secondary",
+        "slots": {
+            "primary": {"kind": "agent", "tmux": "cc-primary"},
+            "secondary": {
+                "kind": "preview", "session": "secondary-session",
+                "mode": "codex",
+            },
+        },
+    }
+
+    assert app._restore_workspace({"running_bindings": []}, saved)
+
+    assert workspace.layout is WorkspaceLayout.SIDE_BY_SIDE
+    assert workspace.target_slot_key == AgentWorkspace.SECONDARY
+    app._set_railmux_focus.assert_called_with(False, force_border=True)
+    app._restore_workspace_slot.assert_called_once_with(
+        workspace.secondary, saved["slots"]["secondary"], [])
+
+
+def test_restore_workspace_keeps_dual_layout_when_secondary_content_fails(
+        monkeypatch):
+    app = _minimal_app()
+    workspace = app._agent_workspace()
+    transport = MagicMock()
+    app._display_transport_manager = transport
+    app._agent_region_size = MagicMock(return_value=(200, 40))
+    app._layout_fits = MagicMock(return_value=True)
+    app._set_railmux_focus = MagicMock()
+    app._paint_slot_active_target = MagicMock()
+    app._install_function_key_bindings = MagicMock()
+
+    def create_primary():
+        workspace.primary.pane_id = "%2"
+        return True
+
+    def create_secondary(layout):
+        workspace.layout = layout
+        workspace.secondary.pane_id = "%3"
+        return True
+
+    transport.create_primary.side_effect = create_primary
+    transport.create_secondary.side_effect = create_secondary
+    transport.reset_slot.return_value = True
+    app._restore_workspace_slot = MagicMock(return_value=False)
+    selected = []
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.select_pane",
+        lambda pane: selected.append(pane) or True,
+    )
+    app._railmux_pane_id = "%1"
+    saved = {
+        "layout": "stacked",
+        "target": "secondary",
+        "focus": "sidebar",
+        "slots": {
+            "primary": {"kind": "empty"},
+            "secondary": {"kind": "agent", "tmux": "cx-missing"},
+        },
+    }
+
+    assert not app._restore_workspace({}, saved)
+
+    assert workspace.layout is WorkspaceLayout.STACKED
+    assert workspace.target_slot_key == AgentWorkspace.SECONDARY
+    transport.reset_slot.assert_called_once_with(workspace.secondary)
+    assert selected[-1] == "%1"
+    app._set_railmux_focus.assert_called_with(True, force_border=True)
+
+
+def test_restore_workspace_geometry_fallback_remembers_validated_secondary(
+        monkeypatch):
+    app = _minimal_app()
+    workspace = app._agent_workspace()
+    transport = MagicMock()
+    app._display_transport_manager = transport
+    app._agent_region_size = MagicMock(return_value=(70, 20))
+    app._layout_fits = MagicMock(return_value=False)
+    app._set_railmux_focus = MagicMock()
+    app._paint_slot_active_target = MagicMock()
+    app._install_function_key_bindings = MagicMock()
+    app._set_status = MagicMock()
+    app._running["secondary-session"] = _Running(
+        key="secondary-session",
+        tmux_name="cx-secondary",
+        label="secondary",
+        session_type="codex",
+    )
+
+    def create_primary():
+        workspace.primary.pane_id = "%2"
+        return True
+
+    transport.create_primary.side_effect = create_primary
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.session_exists", lambda _name: True)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.select_pane", lambda _pane: True)
+    saved = {
+        "layout": "stacked",
+        "target": "secondary",
+        "focus": "sidebar",
+        "slots": {
+            "primary": {"kind": "empty"},
+            "secondary": {
+                "kind": "agent",
+                "tmux": "cx-secondary",
+                "session": "secondary-session",
+                "mode": "codex",
+            },
+        },
+    }
+
+    assert not app._restore_workspace({}, saved)
+
+    assert workspace.layout is WorkspaceLayout.SINGLE
+    assert workspace.collapsed_secondary_agent == "cx-secondary"
+    transport.create_secondary.assert_not_called()
+
+
+def test_restore_workspace_keeps_layout_when_primary_content_falls_back_empty(
+        monkeypatch):
+    app = _minimal_app()
+    workspace = app._agent_workspace()
+    transport = MagicMock()
+    app._display_transport_manager = transport
+    app._agent_region_size = MagicMock(return_value=(200, 40))
+    app._layout_fits = MagicMock(return_value=True)
+    app._set_railmux_focus = MagicMock()
+    app._paint_slot_active_target = MagicMock()
+    app._install_function_key_bindings = MagicMock()
+    app._restore_agent_target = MagicMock(return_value=False)
+
+    def create_primary():
+        workspace.primary.pane_id = "%2"
+        return True
+
+    def create_secondary(layout):
+        workspace.layout = layout
+        workspace.secondary.pane_id = "%3"
+        return True
+
+    transport.create_primary.side_effect = create_primary
+    transport.create_secondary.side_effect = create_secondary
+    app._restore_workspace_slot = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.select_pane", lambda _pane: True)
+    saved = {
+        "layout": "side-by-side",
+        "target": "secondary",
+        "focus": "sidebar",
+        "slots": {
+            "primary": {"kind": "agent", "tmux": "cc-missing"},
+            "secondary": {"kind": "empty"},
+        },
+    }
+
+    assert not app._restore_workspace({}, saved)
+
+    assert workspace.layout is WorkspaceLayout.SIDE_BY_SIDE
+    assert workspace.primary.pane_id == "%2"
+    assert workspace.target_slot_key == AgentWorkspace.SECONDARY
+    transport.create_primary.assert_called_once_with()
+
+
+def test_workspace_preview_drops_unrepresented_agent_rollback(monkeypatch):
+    app = _minimal_app()
+    slot = app._agent_workspace().secondary
+    app._restore_preview_target = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.session_exists", lambda _name: True)
+
+    assert app._restore_workspace_slot(slot, {
+        "kind": "preview",
+        "session": "history",
+        "mode": "codex",
+        "restore": {"kind": "agent", "tmux": "cx-reused-name"},
+    })
+
+    assert slot.restore_state == SlotRestoreState("empty")
 
 
 def test_save_state_persists_codex_mode(tmp_path, monkeypatch):
@@ -1081,6 +1421,43 @@ def test_pending_codex_preview_waits_for_first_history_generation(monkeypatch):
     app._restore_pending_right_pane(None, None)
     app._restore_right_pane.assert_called_once()
     assert app._pending_restore_state is None
+
+
+def test_pending_secondary_codex_preview_waits_for_history_generation(
+        monkeypatch):
+    class _Snapshot:
+        generation = 0
+
+    class _Index:
+        def current_snapshot(self):
+            return _Snapshot()
+
+    monkeypatch.setattr("railmux.ui.app.BackgroundCodexIndex", _Index)
+    app = _minimal_app()
+    app._codex_index = _Index()
+    app._codex_recovery_pending = False
+    app._running_recovery_ok = False
+    app._pending_restore_state = {
+        "right_kind": "agent",
+        "right_mode": "claude",
+        "right_tmux": "cc-primary",
+        "workspace": {
+            "slots": {
+                "primary": {"kind": "agent", "mode": "claude"},
+                "secondary": {"kind": "preview", "mode": "codex"},
+            },
+        },
+    }
+    app._restore_right_pane = MagicMock(return_value=True)
+
+    app._restore_pending_right_pane(None, None)
+
+    app._restore_right_pane.assert_not_called()
+    assert app._pending_restore_state is not None
+
+    _Snapshot.generation = 1
+    app._restore_pending_right_pane(None, None)
+    app._restore_right_pane.assert_called_once()
 
 
 def test_launch_resume_attaches_recovered_writer_instead_of_resuming_again():

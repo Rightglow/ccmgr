@@ -26,6 +26,7 @@ from railmux.tmux_ctl import (
     session_has_child,
     session_process_ids,
     split_window_h,
+    split_window_v,
     session_pane_id,
     scroll_lines_per_event,
     scroll_bindings_owned_by,
@@ -424,6 +425,99 @@ def test_root_wheel_restore_does_not_overwrite_user_change():
     assert call.call_args.args[0][:2] == ["tmux", "source-file"]
 
 
+def test_root_function_forwarding_captures_custom_and_unbound_originals():
+    backup = {
+        "F8": "bind-key -T root F8 display-message original",
+        "F9": None,
+    }
+    with patch("railmux.tmux_ctl.tmux_version", return_value=(3, 4)), \
+         patch("railmux.tmux_ctl.read_root_function_bindings",
+               return_value=backup):
+        assert tmux_ctl.prepare_root_function_bindings() == backup
+
+    owned = dict(
+        backup,
+        F9=("bind-key -T root F9 if-shell -F "
+            "railmux-function-forward-v1-old send-keys"),
+    )
+    with patch("railmux.tmux_ctl.tmux_version", return_value=(3, 4)), \
+         patch("railmux.tmux_ctl.read_root_function_bindings",
+               return_value=owned):
+        assert tmux_ctl.prepare_root_function_bindings() is None
+
+
+def test_root_function_forwarding_scopes_and_preserves_fallbacks():
+    backup = {
+        "F8": "bind-key -T root F8 display-message original",
+        "F9": None,
+    }
+    with _mock_check_call() as call:
+        assert tmux_ctl.set_root_function_forwarding(backup, "owner123")
+
+    assert call.call_count == 2
+    f8, f9 = [item.args[0] for item in call.call_args_list]
+    assert f8[:5] == ["tmux", "bind-key", "-T", "root", "F8"]
+    assert f9[:5] == ["tmux", "bind-key", "-T", "root", "F9"]
+    assert all(
+        any("railmux-function-forward-v1-owner123" in arg for arg in argv)
+        for argv in (f8, f9)
+    )
+    assert all(
+        any("@railmux_controller_pane" in arg for arg in argv)
+        for argv in (f8, f9)
+    )
+    assert all(
+        any('run-shell "tmux send-keys -t ' in arg for arg in argv)
+        for argv in (f8, f9)
+    )
+    assert all(
+        any("'#{@railmux_controller_pane}'" in arg for arg in argv)
+        for argv in (f8, f9)
+    )
+    assert all(
+        all(argv[index:index + 2] != ["-t", "="]
+            for index in range(len(argv) - 1))
+        for argv in (f8, f9)
+    )
+    assert f8[-1] == "display-message original"
+    assert f9[-1] == "send-keys F9"
+
+
+def test_root_function_restore_does_not_overwrite_user_change():
+    backup = {
+        "F8": "bind-key -T root F8 display-message original",
+        "F9": None,
+    }
+    current = {
+        "F8": (
+            "bind-key -T root F8 if-shell -F "
+            "railmux-function-forward-v1-owner123 send-keys"
+        ),
+        "F9": "bind-key -T root F9 display-message user-custom",
+    }
+    with patch("railmux.tmux_ctl.read_root_function_bindings",
+               return_value=current), _mock_check_call() as call:
+        tmux_ctl.restore_root_function_bindings(backup, token="owner123")
+
+    assert call.call_count == 1
+    assert call.call_args.args[0][:2] == ["tmux", "source-file"]
+
+
+def test_unset_window_user_option_requires_exact_owner_value():
+    with _mock_check_output("%1"), _mock_check_call() as call:
+        assert tmux_ctl.unset_window_user_option_if_value(
+            "%1", tmux_ctl.RAILMUX_CONTROLLER_OPTION, "%1")
+    assert call.call_args.args[0] == [
+        "tmux", "set-window-option", "-u", "-t", "%1",
+        tmux_ctl.RAILMUX_CONTROLLER_OPTION,
+    ]
+
+    with _mock_check_output("%other"), _mock_check_call() as call:
+        assert not tmux_ctl.unset_window_user_option_if_value(
+            "%1", tmux_ctl.RAILMUX_CONTROLLER_OPTION, "%1")
+    call.assert_not_called()
+
+
 def test_window_user_option_uses_tmux_27_compatible_command():
     with _mock_check_call() as call:
         assert set_window_user_option("cc-session", "@railmux_scroll_agent", "1")
@@ -575,6 +669,28 @@ def test_window_border_style_updates_both_segments_in_one_tmux_call():
     ]
 
 
+def test_local_window_option_distinguishes_inheritance_from_failure():
+    with patch("railmux.tmux_ctl.in_tmux", return_value=True), \
+         _mock_check_output(""):
+        assert tmux_ctl.local_window_option("pane-border-indicators") == (
+            True, None)
+
+    with patch("railmux.tmux_ctl.in_tmux", return_value=True), \
+         patch("subprocess.check_output", side_effect=FileNotFoundError):
+        assert tmux_ctl.local_window_option("pane-border-indicators") == (
+            False, None)
+
+
+def test_set_window_option_can_restore_inheritance():
+    with patch("railmux.tmux_ctl.in_tmux", return_value=True), \
+         _mock_check_call() as call:
+        assert tmux_ctl.set_window_option("pane-border-indicators", None)
+
+    assert call.call_args.args[0] == [
+        "tmux", "set-window-option", "-u", "pane-border-indicators",
+    ]
+
+
 def test_split_window_h_can_leave_focus_on_current_pane():
     with patch("railmux.tmux_ctl.in_tmux", return_value=True), \
          patch("railmux.tmux_ctl.tmux_version", return_value=(3, 4)), \
@@ -587,6 +703,43 @@ def test_split_window_h_can_leave_focus_on_current_pane():
     ]
     assert "-d" in args
     assert "-l" in args
+
+
+def test_split_window_v_supports_equal_detached_layout():
+    with patch("railmux.tmux_ctl.in_tmux", return_value=True), \
+         patch("railmux.tmux_ctl.tmux_version", return_value=(2, 7)), \
+         _mock_check_output("%10") as output:
+        assert split_window_v(
+            "cmd", target="%9", size_percent=50, detached=True,
+        ) == "%10"
+
+    args = output.call_args.args[0]
+    assert args[:6] == [
+        "tmux", "split-window", "-v", "-P", "-F", "#{pane_id}",
+    ]
+    assert "-d" in args
+    assert args[args.index("-p") + 1] == "50"
+    assert args[args.index("-t") + 1] == "%9"
+
+
+def test_last_pane_id_uses_tmux_previous_active_flag():
+    with patch("railmux.tmux_ctl.in_tmux", return_value=True), \
+         _mock_check_output("\n%3\n") as output:
+        assert tmux_ctl.last_pane_id("%1") == "%3"
+
+    assert output.call_args.args[0] == [
+        "tmux", "list-panes", "-t", "%1", "-F",
+        "#{?pane_last,#{pane_id},}",
+    ]
+
+
+def test_toggle_pane_zoom_targets_exact_pane():
+    with patch("subprocess.check_call") as call:
+        assert tmux_ctl.toggle_pane_zoom("%3") is True
+
+    assert call.call_args.args[0] == [
+        "tmux", "resize-pane", "-Z", "-t", "%3",
+    ]
 
 
 def test_pane_size_parses_exact_dimensions():

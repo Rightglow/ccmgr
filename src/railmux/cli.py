@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
 from pathlib import Path
 
 from railmux import __version__
 from railmux.config import ConfigError, default_config_path, load_config
 from railmux.diagnostics import is_ssh_session, run_doctor
+from railmux.pane_surface import render_startup_surface
 from railmux import tmux_ctl
 from railmux.system_deps import ensure_tmux_available
 
@@ -16,7 +18,8 @@ def _show_startup_message() -> None:
     """Paint immediate feedback before App performs its initial discovery."""
     if not sys.stdout.isatty():
         return
-    sys.stdout.write("\033[2J\033[HRestoring Railmux workspace...\n")
+    size = shutil.get_terminal_size((80, 24))
+    sys.stdout.write(render_startup_surface(size.columns, size.lines))
     sys.stdout.flush()
 
 

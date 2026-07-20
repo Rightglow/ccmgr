@@ -281,6 +281,86 @@ def test_concurrent_instance_saves_do_not_overwrite_each_other(tmp_path):
         restart_state.read_json_object(second_path), second)["mode"] == "codex"
 
 
+def test_exact_owner_workspace_round_trips_but_portable_cannot_carry_it():
+    identity = _identity()
+    workspace = {
+        "version": 1,
+        "layout": "stacked",
+        "target": "secondary",
+        "focus": "secondary",
+        "collapsed_secondary": {
+            "tmux": "cx-collapsed",
+            "session": "collapsed-session",
+            "mode": "codex",
+        },
+        "slots": {
+            "primary": {
+                "kind": "agent",
+                "tmux": "cc-primary",
+                "session": "primary-session",
+                "mode": "claude",
+            },
+            "secondary": {
+                "kind": "preview",
+                "session": "secondary-session",
+                "mode": "codex",
+                "project": "-tmp-secondary",
+                "restore": {"kind": "agent", "tmux": "cx-secondary"},
+            },
+        },
+    }
+    payload = _instance_payload(identity)
+    payload["recovery"]["workspace"] = workspace
+
+    decoded = restart_state.decode_instance(payload, identity)
+
+    assert decoded is not None and decoded["workspace"] == workspace
+    portable = restart_state.build_view({
+        "mode": "claude",
+        "workspace": workspace,
+    })
+    assert "workspace" not in json.dumps(portable)
+
+
+def test_instance_rejects_inconsistent_or_unbounded_workspace():
+    identity = _identity()
+    base = {
+        "version": 1,
+        "layout": "side-by-side",
+        "target": "secondary",
+        "focus": "primary",
+        "slots": {
+            "primary": {"kind": "empty"},
+            "secondary": {"kind": "empty"},
+        },
+    }
+    payload = _instance_payload(identity)
+    payload["recovery"]["workspace"] = base
+    assert restart_state.decode_instance(payload, identity) is None
+
+    payload["recovery"]["workspace"] = {
+        **base,
+        "focus": "secondary",
+        "slots": {
+            **base["slots"],
+            "secondary": {"kind": "agent", "tmux": "x" * 257},
+        },
+    }
+    assert restart_state.decode_instance(payload, identity) is None
+
+    payload["recovery"]["workspace"] = {
+        **base,
+        "layout": "single",
+        "target": "primary",
+        "focus": "sidebar",
+        "slots": {
+            "primary": {"kind": "empty"},
+            "secondary": {"kind": "agent", "tmux": "cx-secondary"},
+        },
+    }
+    assert restart_state.decode_instance(payload, identity) is None
+
+
 def test_concurrent_portable_writes_remain_valid_json(tmp_path):
     path = tmp_path / "view.json"
     payloads = [

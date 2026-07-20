@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,7 +17,13 @@ from railmux.display_transport import (
     AgentDisplayTransport,
     recover_interrupted_swaps,
 )
-from railmux.ui.workspace import AgentWorkspace, DisplayTransportKind
+from railmux.function_key_manager import RootFunctionKeyManager
+from railmux.ui.app import App, _Running
+from railmux.ui.workspace import (
+    AgentWorkspace,
+    DisplayTransportKind,
+    WorkspaceLayout,
+)
 
 
 pytestmark = pytest.mark.skipif(
@@ -351,6 +358,340 @@ def test_real_tmux_session_split_attach_persistence_and_styles(isolated_tmux):
     assert tmux_ctl.kill_session(agent_session)
 
 
+def test_real_tmux_single_sidebar_focus_clears_stale_target_format(isolated_tmux):
+    """A restored single pane cannot leave half the divider dim green."""
+    display_session, _sidebar_pane, _socket_path = isolated_tmux
+    primary = subprocess.check_output(
+        [
+            "tmux", "split-window", "-d", "-h", "-t", display_session,
+            "-P", "-F", "#{pane_id}", "sleep 60",
+        ],
+        text=True,
+    ).strip()
+    stale_target = (
+        "fg=#{?#{==:#{pane_id}," + primary + "},#3f6f00,colour240}"
+    )
+    assert tmux_ctl.set_window_border_styles(stale_target, "fg=colour240")
+
+    app = App.__new__(App)
+    app._workspace = AgentWorkspace()
+    app._workspace.primary.pane_id = primary
+    app._divider_active = None
+    app._set_divider_active(False)
+
+    for option in ("pane-border-style", "pane-active-border-style"):
+        assert subprocess.check_output(
+            [
+                "tmux", "show-window-options", "-v", "-t", display_session,
+                option,
+            ],
+            text=True,
+        ).strip() == "fg=colour240"
+
+
+def test_real_side_by_side_focus_draws_inward_arrows_and_restores(
+    isolated_tmux,
+):
+    """Three-pane columns identify the middle active pane directionally."""
+    if tmux_ctl.tmux_version() < (3, 3):
+        pytest.skip("pane-border-indicators was added in tmux 3.3")
+    if shutil.which("script") is None or shutil.which("timeout") is None:
+        pytest.skip("PTY screen capture requires script and timeout")
+
+    display_session, sidebar_pane, socket_path = isolated_tmux
+    primary = subprocess.check_output(
+        [
+            "tmux", "split-window", "-d", "-h", "-t", display_session,
+            "-P", "-F", "#{pane_id}", "sleep 60",
+        ],
+        text=True,
+    ).strip()
+    secondary = subprocess.check_output(
+        [
+            "tmux", "split-window", "-d", "-h", "-t", primary,
+            "-P", "-F", "#{pane_id}", "sleep 60",
+        ],
+        text=True,
+    ).strip()
+    subprocess.run(["tmux", "select-pane", "-t", primary], check=True)
+
+    app = App.__new__(App)
+    app._workspace = AgentWorkspace()
+    app._workspace.layout = WorkspaceLayout.SIDE_BY_SIDE
+    app._workspace.primary.pane_id = primary
+    app._workspace.secondary.pane_id = secondary
+    app._divider_active = None
+
+    assert tmux_ctl.local_window_option("pane-border-indicators") == (
+        True, None)
+    app._set_divider_active(True)
+    assert tmux_ctl.local_window_option("pane-border-indicators") == (
+        True, "arrows")
+
+    with tempfile.NamedTemporaryFile(
+        prefix="rx-border-", dir="/tmp", delete=False,
+    ) as capture_file:
+        capture = Path(capture_file.name)
+    try:
+        command = (
+            "stty cols 100 rows 24; TERM=xterm-256color "
+            f"tmux -S {shlex.quote(socket_path)} "
+            f"attach-session -t {shlex.quote(display_session)}"
+        )
+        subprocess.run(
+            ["timeout", "0.4", "script", "-qfec", command, str(capture)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        screen = capture.read_text(errors="replace")
+        assert "→" in screen
+        assert "←" in screen
+    finally:
+        capture.unlink(missing_ok=True)
+
+    subprocess.run(["tmux", "select-pane", "-t", sidebar_pane], check=True)
+    app._set_divider_active(False)
+    assert subprocess.check_output(
+        [
+            "tmux", "show-window-options", "-v", "-t", display_session,
+            "pane-border-style",
+        ],
+        text=True,
+    ).strip() == "fg=colour240"
+    assert subprocess.check_output(
+        [
+            "tmux", "show-window-options", "-v", "-t", display_session,
+            "pane-active-border-style",
+        ],
+        text=True,
+    ).strip() == "fg=colour240"
+    assert tmux_ctl.local_window_option("pane-border-indicators") == (
+        True, "colour")
+
+    app._tmux_status_enabled = True
+    app._tmux_status_session = display_session
+    app._tmux_error_bar = False
+    app._railmux_has_focus = True
+    app._active_mode = lambda: SimpleNamespace(label="Codex")
+    app._apply_tmux_bar(False)
+    status_left = subprocess.check_output(
+        [
+            "tmux", "show-options", "-v", "-t", display_session,
+            "status-left",
+        ],
+        text=True,
+    )
+    assert "· Codex · ◧" in status_left
+    # A direct mouse-style focus move from P1/sidebar to P2 is observed through
+    # tmux while the sidebar remains unfocused; Target and status-left must
+    # update without waiting for focus to return through the sidebar.
+    app._sessions_pane = SimpleNamespace(set_active_session=lambda _value: None)
+    app._running_pane = SimpleNamespace(set_active=lambda _value: None)
+    app._railmux_pane_id = sidebar_pane
+    app._railmux_has_focus = False
+    subprocess.run(["tmux", "select-pane", "-t", secondary], check=True)
+    app._sync_target_slot_from_tmux()
+    status_left = subprocess.check_output(
+        [
+            "tmux", "show-options", "-v", "-t", display_session,
+            "status-left",
+        ],
+        text=True,
+    )
+    assert "· Codex · ◨" in status_left
+
+    assert app._restore_border_indicators()
+    assert tmux_ctl.local_window_option("pane-border-indicators") == (
+        True, None)
+
+    # An explicit per-window setting is restored by value, not flattened into
+    # inheritance. This covers the defensive branch separately from the
+    # ordinary fresh-window path above.
+    assert tmux_ctl.set_window_option("pane-border-indicators", "both")
+    app._divider_active = None
+    app._set_divider_active(True)
+    assert tmux_ctl.local_window_option("pane-border-indicators") == (
+        True, "arrows")
+    app._set_divider_active(False)
+    assert app._restore_border_indicators()
+    assert tmux_ctl.local_window_option("pane-border-indicators") == (
+        True, "both")
+
+
+def test_real_empty_secondary_pane_shows_guidance(isolated_tmux):
+    display_session, sidebar_pane, _socket_path = isolated_tmux
+    outer_id = tmux_ctl.current_session_id()
+    primary = subprocess.check_output(
+        [
+            "tmux", "split-window", "-d", "-h", "-t", display_session,
+            "-P", "-F", "#{pane_id}", "sleep 60",
+        ],
+        text=True,
+    ).strip()
+    workspace = AgentWorkspace()
+    workspace.primary.pane_id = primary
+    manager = AgentDisplayTransport(
+        workspace,
+        "nested",
+        auto_launched=True,
+        outer_session_name=display_session,
+        outer_session_id=outer_id,
+        owner_pane_id=sidebar_pane,
+    )
+
+    assert manager.create_secondary(WorkspaceLayout.STACKED)
+    secondary = workspace.secondary.pane_id
+    assert secondary is not None
+
+    def content() -> str:
+        return subprocess.check_output(
+            ["tmux", "capture-pane", "-p", "-t", secondary],
+            text=True,
+        )
+
+    assert _wait_until(
+        lambda: "RAILMUX  ·  PANE 2" in content()
+    ), subprocess.check_output(
+        [
+            "tmux", "list-panes", "-t", secondary, "-F",
+            "#{pane_dead} #{pane_dead_status} #{pane_current_command} "
+            "#{pane_start_command}",
+        ],
+        text=True,
+    ) + content()
+    assert "Ready for another agent" in content()
+    assert "click / ␣  show" in content()
+
+
+def test_real_local_workspace_restore_rebuilds_layout_target_and_focus(
+        isolated_tmux):
+    display_session, sidebar_pane, _socket_path = isolated_tmux
+    for name in ("cc-soft-primary", "cx-soft-secondary"):
+        subprocess.run(
+            ["tmux", "new-session", "-d", "-s", name, "sleep 60"],
+            check=True,
+        )
+    outer_id = tmux_ctl.current_session_id()
+    workspace = AgentWorkspace()
+    app = App.__new__(App)
+    app._workspace = workspace
+    app._display_transport_manager = AgentDisplayTransport(
+        workspace,
+        "swap",
+        auto_launched=True,
+        outer_session_name=display_session,
+        outer_session_id=outer_id,
+        owner_pane_id=sidebar_pane,
+    )
+    app._running = {
+        "primary-session": _Running(
+            key="primary-session",
+            tmux_name="cc-soft-primary",
+            label="primary",
+            session_type="claude",
+        ),
+        "secondary-session": _Running(
+            key="secondary-session",
+            tmux_name="cx-soft-secondary",
+            label="secondary",
+            session_type="codex",
+        ),
+    }
+    app._railmux_pane_id = sidebar_pane
+    app._railmux_has_focus = True
+    app._double_focus_visual_pending = False
+    app._sessions_pane = SimpleNamespace(set_active_session=lambda _value: None)
+    app._running_pane = SimpleNamespace(set_active=lambda _value: None)
+    app._paint_slot_active_target = lambda *_args: None
+    app._redraw_focus_state_now = lambda: None
+    app._check_agent_slot_size = lambda *_args, **_kwargs: None
+    app._schedule_scroll_acceleration = lambda *_args: None
+    app._install_function_key_bindings = lambda: None
+    statuses = []
+    app._set_status = lambda *args, **_kwargs: statuses.append(args)
+    app._agent_region_size = lambda: (160, 30)
+    app._layout_fits = lambda _region, _layout: True
+
+    def set_focus(active, *, force_border=False):
+        app._railmux_has_focus = active
+
+    app._set_railmux_focus = set_focus
+    saved = {
+        "layout": "stacked",
+        "target": "secondary",
+        "focus": "secondary",
+        "slots": {
+            "primary": {
+                "kind": "agent", "tmux": "cc-soft-primary",
+                "session": "primary-session", "mode": "claude",
+            },
+            "secondary": {
+                "kind": "agent", "tmux": "cx-soft-secondary",
+                "session": "secondary-session", "mode": "codex",
+            },
+        },
+    }
+
+    assert app._restore_workspace({}, saved), statuses
+
+    assert workspace.layout is WorkspaceLayout.STACKED
+    assert workspace.target_slot_key == AgentWorkspace.SECONDARY
+    assert workspace.primary.agent_tmux_name == "cc-soft-primary"
+    assert workspace.secondary.agent_tmux_name == "cx-soft-secondary"
+    assert app._railmux_has_focus is False
+    assert tmux_ctl.active_pane_id(sidebar_pane) == workspace.secondary.pane_id
+    assert workspace.primary.transport_kind is DisplayTransportKind.SWAP
+    assert workspace.secondary.transport_kind is DisplayTransportKind.SWAP
+
+
+def test_real_kill_preparation_keeps_swap_secondary_as_empty_surface(
+        isolated_tmux):
+    """Intentional kill returns the real pane home without collapsing Pane 2."""
+    display_session, sidebar_pane, _socket_path = isolated_tmux
+    outer_id = tmux_ctl.current_session_id()
+    primary = subprocess.check_output(
+        [
+            "tmux", "split-window", "-d", "-h", "-t", display_session,
+            "-P", "-F", "#{pane_id}", "sleep 60",
+        ],
+        text=True,
+    ).strip()
+    subprocess.run(
+        ["tmux", "new-session", "-d", "-s", "kill-display-agent", "sleep 60"],
+        check=True,
+    )
+    workspace = AgentWorkspace()
+    workspace.primary.pane_id = primary
+    manager = AgentDisplayTransport(
+        workspace,
+        "swap",
+        auto_launched=True,
+        outer_session_name=display_session,
+        outer_session_id=outer_id,
+        owner_pane_id=sidebar_pane,
+    )
+    assert manager.create_secondary(WorkspaceLayout.STACKED)
+    outcome = manager.attach(workspace.secondary, "kill-display-agent")
+    assert outcome.ok and outcome.kind is DisplayTransportKind.SWAP
+
+    assert manager.prepare_kill("kill-display-agent")
+    empty_pane = workspace.secondary.pane_id
+    assert empty_pane is not None
+    assert workspace.layout is WorkspaceLayout.STACKED
+    assert workspace.secondary.agent_tmux_name is None
+    assert tmux_ctl.kill_session("kill-display-agent")
+
+    def content() -> str:
+        return subprocess.check_output(
+            ["tmux", "capture-pane", "-p", "-t", empty_pane],
+            text=True,
+        )
+
+    assert _wait_until(lambda: "Ready for another agent" in content())
+    assert tmux_ctl.pane_alive(empty_pane)
+
+
 def test_real_copy_mode_restore_preserves_one_new_user_binding(isolated_tmux):
     """Closing Railmux restores owned wrappers without undoing a tmux reload."""
     _display_session, helper_pane, _socket_path = isolated_tmux
@@ -407,6 +748,124 @@ def test_real_root_wheel_install_restore_and_user_reload(isolated_tmux):
     assert current["WheelUpPane"] == backup["WheelUpPane"]
     custom = current["WheelDownPane"]
     assert custom is not None and "user-custom-wheel" in custom
+
+
+def test_real_function_key_manager_round_trip_and_user_reload(
+        isolated_tmux, monkeypatch, tmp_path):
+    """F8/F9 wrappers are valid tmux commands and restore per-key authority."""
+    _display_session, owner_pane, _socket_path = isolated_tmux
+    monkeypatch.setattr(
+        "railmux.function_key_manager.restart_state.runtime_state_dir",
+        lambda: tmp_path,
+    )
+    subprocess.run(
+        [
+            "tmux", "bind-key", "-T", "root", "F8",
+            "display-message", "original-f8",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        ["tmux", "unbind-key", "-T", "root", "F9"],
+        check=False,
+        stderr=subprocess.DEVNULL,
+    )
+    original = tmux_ctl.read_root_function_bindings()
+    assert original["F8"] is not None and original["F9"] is None
+
+    manager = RootFunctionKeyManager("integration-server", owner_pane)
+    assert manager.open()
+    current = tmux_ctl.read_root_function_bindings()
+    assert all(
+        binding is not None
+        and "railmux-function-forward-v1-" in binding
+        and tmux_ctl.RAILMUX_CONTROLLER_OPTION in binding
+        for binding in current.values()
+    )
+    assert tmux_ctl.show_window_user_option(
+        owner_pane, tmux_ctl.RAILMUX_CONTROLLER_OPTION) == owner_pane
+
+    # Installation alone does not exercise if-shell's second parsing pass.
+    # Send a real F8 through an attached client's root key table and prove it
+    # reaches the controller pane without the historical ``-t`` parse error.
+    if shutil.which("script") is None:
+        pytest.skip("script(1) is required to emulate an attached client")
+    subprocess.run(
+        ["tmux", "respawn-pane", "-k", "-t", owner_pane,
+         "bash --noprofile --norc"],
+        check=True,
+    )
+    other_pane = subprocess.check_output(
+        [
+            "tmux", "split-window", "-h", "-t", owner_pane,
+            "-P", "-F", "#{pane_id}", "sleep 60",
+        ],
+        text=True,
+    ).strip()
+    subprocess.run(
+        ["tmux", "select-pane", "-t", other_pane], check=True)
+    client_process = subprocess.Popen(
+        [
+            "script", "-qefc",
+            f"env TERM=xterm-256color tmux -S {shlex.quote(_socket_path)} "
+            f"attach-session -t {shlex.quote(_display_session)}",
+            "/dev/null",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    client_name = ""
+    try:
+        assert _wait_until(
+            lambda: bool(subprocess.check_output(
+                ["tmux", "list-clients", "-F", "#{client_name}"],
+                text=True,
+            ).strip())
+        )
+        client_name = subprocess.check_output(
+            ["tmux", "list-clients", "-F", "#{client_name}"],
+            text=True,
+        ).strip()
+        assert _wait_until(
+            lambda: "bash-" in subprocess.check_output(
+                ["tmux", "capture-pane", "-p", "-t", owner_pane],
+                text=True,
+            )
+        )
+        subprocess.run(
+            ["tmux", "send-keys", "-K", "-c", client_name, "F8"],
+            check=True,
+        )
+        assert _wait_until(
+            lambda: "$ ~" in subprocess.check_output(
+                ["tmux", "capture-pane", "-p", "-t", owner_pane],
+                text=True,
+            )
+        )
+        subprocess.run(
+            ["tmux", "detach-client", "-t", client_name], check=True)
+        output = client_process.communicate(timeout=2)[0]
+    finally:
+        if client_process.poll() is None:
+            client_process.kill()
+            client_process.wait()
+    assert b"-t expects an argument" not in output
+
+    # A newer user binding wins independently while F8 still round-trips.
+    subprocess.run(
+        [
+            "tmux", "bind-key", "-T", "root", "F9",
+            "display-message", "new-user-f9",
+        ],
+        check=True,
+    )
+    manager.close()
+    restored = tmux_ctl.read_root_function_bindings()
+    assert restored["F8"] == original["F8"]
+    assert restored["F9"] is not None and "new-user-f9" in restored["F9"]
+    assert tmux_ctl.show_window_user_option(
+        owner_pane, tmux_ctl.RAILMUX_CONTROLLER_OPTION) is None
 
 
 def test_real_tmux_swap_recovery_direct_kill_and_fallback(isolated_tmux):
