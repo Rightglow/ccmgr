@@ -167,6 +167,19 @@ def test_session_topology_requires_exact_server_results(monkeypatch):
     assert topology.attached_clients == 0
 
 
+def test_detached_single_pane_start_command_rejects_attached_session(
+        monkeypatch):
+    pane = tmux_ctl.PaneIdentity(
+        "%7", 4242, "agent", "$2", "@3", False, 91, 31)
+    topology = tmux_ctl.SessionTopology(
+        "agent", "$2", 1, ("@3",), (pane,))
+    monkeypatch.setattr(tmux_ctl, "session_topology", lambda _name: topology)
+    with patch("subprocess.check_output") as output:
+        assert tmux_ctl.detached_single_pane_start_command(
+            "agent", session_id="$2", pane_id="%7") is None
+    output.assert_not_called()
+
+
 def test_swap_and_grouped_session_commands_are_tmux_27_compatible():
     with _mock_check_call() as call:
         assert tmux_ctl.swap_panes("%2", "%1")
@@ -740,6 +753,16 @@ def test_toggle_pane_zoom_targets_exact_pane():
     assert call.call_args.args[0] == [
         "tmux", "resize-pane", "-Z", "-t", "%3",
     ]
+
+
+def test_resize_pane_width_targets_exact_cells():
+    with patch("subprocess.check_call") as call:
+        assert tmux_ctl.resize_pane_width("%3", 32) is True
+
+    assert call.call_args.args[0] == [
+        "tmux", "resize-pane", "-t", "%3", "-x", "32",
+    ]
+    assert not tmux_ctl.resize_pane_width("%3", 0)
 
 
 def test_pane_size_parses_exact_dimensions():

@@ -61,6 +61,35 @@ def test_f8_dispatches_rotate_without_sidebar_action_lookup():
     app._rotate_split.assert_called_once_with()
 
 
+def test_sidebar_width_is_30_percent_single_and_20_percent_dual_with_floor():
+    assert App._sidebar_width_for_layout(WorkspaceLayout.SINGLE, 160) == 48
+    assert App._sidebar_width_for_layout(
+        WorkspaceLayout.SIDE_BY_SIDE, 160) == 32
+    assert App._sidebar_width_for_layout(WorkspaceLayout.STACKED, 120) == 30
+
+
+def test_sidebar_resize_uses_exact_width_and_skips_noop(monkeypatch):
+    app = _bare_app(_railmux_pane_id="%1")
+    resized = []
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.window_size", lambda _pane: (160, 40))
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.pane_size", lambda _pane: (48, 40))
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.resize_pane_width",
+        lambda pane, width: resized.append((pane, width)) or True,
+    )
+
+    assert app._resize_sidebar_for_layout(WorkspaceLayout.SIDE_BY_SIDE)
+    assert resized == [("%1", 32)]
+
+    resized.clear()
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.pane_size", lambda _pane: (48, 40))
+    assert app._resize_sidebar_for_layout(WorkspaceLayout.SINGLE)
+    assert resized == []
+
+
 def test_f8_restores_remembered_secondary_as_side_by_side(monkeypatch):
     app = _bare_app()
     workspace = app._agent_workspace()

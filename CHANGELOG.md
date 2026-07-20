@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Document terminal-side right-click and F8/F9 forwarding, including the iTerm2
+  Pointer setting required for Railmux's context menu.
+- Preserve idle agent sessions created by Railmux 0.1.3 and earlier, before
+  durable tmux identity markers:
+  conservatively migrate only detached, single-pane sessions whose immutable
+  tmux identities, historical Railmux name, cwd, and launch command all agree,
+  then install the current v2 marker plus compatibility binding for subsequent
+  soft restarts and exact resolved-ID promotion.
 - Give the two-line Sessions list half of the sidebar's vertical allocation,
   changing the Projects / Sessions / Running weights from 2:3:2 to 2:4:2.
 - Replace the relative-age prefix on live Sessions rows with their current
@@ -19,12 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Exclude tool results, harness-injected prompts, and duplicate Claude
   streaming records from logical-message counts; deduplicate Claude usage by
   provider message and include reported cache creation/read tokens.
-- Add an experimental second agent pane through `F8`, which can create an empty
+- Add a second agent pane through `F8`, which can create an empty
   Pane 2 and cycles single, side-by-side, and stacked layouts globally while
   keeping the collapsed Pane 2 agent running. Unusable side-by-side geometry is
   skipped instead of leaving F8 stuck on single. Empty agent panes now use a
   centered, resize-aware Railmux surface with compact interaction guidance;
   startup restoration uses the same visual language.
+- Keep the sidebar at roughly 30% in single-agent layout and compact it to 20%
+  in either dual-agent layout, with a 30-column floor. Returning to single
+  restores the wider navigator, and ratio updates remain best-effort.
 - Align `␣` and right-click Preview with single-click: preview stopped sessions,
   but switch/attach running sessions while sidebar focus stays put. Double-click
   and Enter open in the agent pane remembered from tmux focus and transfer

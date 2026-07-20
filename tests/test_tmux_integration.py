@@ -18,6 +18,8 @@ from railmux.display_transport import (
     recover_interrupted_swaps,
 )
 from railmux.function_key_manager import RootFunctionKeyManager
+from railmux.modes import CODEX_MODE
+from railmux.models import Project
 from railmux.ui.app import App, _Running
 from railmux.ui.workspace import (
     AgentWorkspace,
@@ -277,6 +279,56 @@ def test_real_marked_holder_persists_identity_before_provider_runs(
     current = tmux_ctl.pane_identity(holder.pane_id)
     assert current is not None
     assert tmux_ctl.kill_session_identity(current)
+
+
+def test_real_legacy_session_migration_installs_v2_marker(
+        isolated_tmux, tmp_path):
+    """A strictly matched pre-marker session is upgraded on the live object."""
+    _display_session, _sidebar_pane, _socket_path = isolated_tmux
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    provider = tmp_path / "codex"
+    provider.write_text("#!/bin/sh\nexec sleep 60\n")
+    provider.chmod(0o700)
+    name = "cx-new---abc123-1"
+    command = App._shellify(
+        [str(provider), "-C", str(cwd)], cwd, login_shell=True)
+    subprocess.run(
+        ["tmux", "new-session", "-d", "-s", name, command], check=True)
+    raw = subprocess.check_output(
+        [
+            "tmux", "list-sessions", "-F",
+            "#{session_name}\t#{session_created}\t#{session_id}\t#{pane_id}",
+        ],
+        text=True,
+    )
+    fields = next(
+        line.split("\t") for line in raw.splitlines()
+        if line.startswith(name + "\t")
+    )
+    _name, created, session_id, pane_id = fields
+    owner = restart_state.capture_outer_identity()
+    assert owner is not None
+    app = App.__new__(App)
+    app._restart_identity = owner
+    app._config = SimpleNamespace(codex_binary=str(provider))
+    project = Project(cwd, "project", Path(), 0, 0.0)
+
+    running = app._legacy_unresolved_running(
+        name=name,
+        cwd=cwd,
+        created=int(created),
+        session_id=session_id,
+        pane_id=pane_id,
+        mode=CODEX_MODE,
+        project=project,
+    )
+
+    assert running is not None and running.orphan is not None
+    saved = tmux_ctl.show_session_user_option(
+        session_id, orphan_marker.OPTION_NAME)
+    assert orphan_marker.decode(saved) == running.orphan
+    assert running.orphan.phase == "unresolved"
 
 
 def test_real_exact_kill_refuses_reused_session_name(isolated_tmux):
@@ -641,6 +693,10 @@ def test_real_local_workspace_restore_rebuilds_layout_target_and_focus(
     assert workspace.secondary.agent_tmux_name == "cx-soft-secondary"
     assert app._railmux_has_focus is False
     assert tmux_ctl.active_pane_id(sidebar_pane) == workspace.secondary.pane_id
+    window_width, _ = tmux_ctl.window_size(sidebar_pane) or (0, 0)
+    sidebar_width, _ = tmux_ctl.pane_size(sidebar_pane) or (0, 0)
+    assert sidebar_width == App._sidebar_width_for_layout(
+        WorkspaceLayout.STACKED, window_width)
     assert workspace.primary.transport_kind is DisplayTransportKind.SWAP
     assert workspace.secondary.transport_kind is DisplayTransportKind.SWAP
 

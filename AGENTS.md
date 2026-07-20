@@ -19,4 +19,20 @@ update the corresponding document in the same change.
 Keep provider-neutral and multi-slot constraints intact unless the task
 explicitly changes the documented architecture.
 
+Before declaring a change ready to commit or merge, perform a closure review
+of the complete diff, not only a correctness pass:
+
+- Remove experimental branches, temporary scaffolding, superseded comments,
+  and tests that exist only to preserve an abandoned or intermediate
+  implementation. The final tree should describe the chosen design directly.
+- Keep compatibility or migration logic only for a released contract or real
+  persisted/live state that Railmux must still upgrade safely. Do not add
+  speculative compatibility; make the authority and retirement boundary clear.
+- Keep the smallest test set that protects durable behavior, safety boundaries,
+  and demonstrated regressions. Prefer one strong boundary or round-trip test
+  over redundant implementation-detail permutations, and remove obsolete tests
+  together with the code they protected.
+- Explicitly audit the final diff for dead paths, duplicated state, stale names,
+  transitional wording, and accidental scope growth before delivery.
+
 Follow [`CONTRIBUTING.md`](CONTRIBUTING.md) for verification and delivery.

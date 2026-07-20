@@ -419,6 +419,9 @@ class App:
     _MINIMUM_TERMINAL_SIZE = (80, 20)
     _RECOMMENDED_AGENT_PANE_SIZE = (80, 20)
     _MINIMUM_AGENT_PANE_SIZE = (50, 12)
+    _SINGLE_SIDEBAR_PERCENT = 30
+    _DUAL_SIDEBAR_PERCENT = 20
+    _DUAL_SIDEBAR_MIN_WIDTH = 30
 
     # -- compatibility shims -------------------------------------------------
     # Tests and third-party extensions built against pre-workspace releases may
@@ -1832,6 +1835,37 @@ class App:
             return pw + sw + 1, max(ph, sh)
         return max(pw, sw), ph + sh + 1
 
+    @classmethod
+    def _sidebar_width_for_layout(
+        cls, layout: WorkspaceLayout, window_width: int,
+    ) -> int:
+        """Responsive sidebar width for one workspace layout."""
+        percent = (
+            cls._SINGLE_SIDEBAR_PERCENT
+            if layout is WorkspaceLayout.SINGLE
+            else cls._DUAL_SIDEBAR_PERCENT
+        )
+        width = round(window_width * percent / 100)
+        if layout is not WorkspaceLayout.SINGLE:
+            width = max(cls._DUAL_SIDEBAR_MIN_WIDTH, width)
+        # The layout-fit gate rejects dual panes before a tiny window can reach
+        # this clamp; the final bound keeps every best-effort tmux request valid.
+        return min(max(1, width), max(1, window_width - 2))
+
+    def _resize_sidebar_for_layout(self, layout: WorkspaceLayout) -> bool:
+        """Apply the layout's sidebar ratio without making layout depend on it."""
+        sidebar_id = getattr(self, "_railmux_pane_id", None)
+        if sidebar_id is None:
+            return False
+        window = tmux_ctl.window_size(sidebar_id)
+        current = tmux_ctl.pane_size(sidebar_id)
+        if window is None or current is None:
+            return False
+        desired = self._sidebar_width_for_layout(layout, window[0])
+        if current[0] == desired:
+            return True
+        return tmux_ctl.resize_pane_width(sidebar_id, desired)
+
     def _layout_fits(
         self, region: tuple[int, int], layout: WorkspaceLayout,
     ) -> bool:
@@ -1884,6 +1918,7 @@ class App:
         if remembered_agent is not None:
             workspace.collapsed_secondary_agent = remembered_agent
         workspace.layout = WorkspaceLayout.SINGLE
+        self._resize_sidebar_for_layout(WorkspaceLayout.SINGLE)
         workspace.set_target(AgentWorkspace.PRIMARY)
         if not sidebar_focused and workspace.primary.pane_id:
             tmux_ctl.select_pane(workspace.primary.pane_id)
@@ -1932,6 +1967,7 @@ class App:
             if workspace.primary.agent_tmux_name == agent_tmux_name:
                 workspace.collapsed_secondary_agent = None
                 agent_tmux_name = None
+            self._resize_sidebar_for_layout(new_layout)
             region = self._agent_region_size()
             if (region is not None
                     and not self._layout_fits(region, new_layout)):
@@ -1943,6 +1979,7 @@ class App:
                         and self._layout_fits(region, alternate)):
                     new_layout = alternate
             if region is None or not self._layout_fits(region, new_layout):
+                self._resize_sidebar_for_layout(WorkspaceLayout.SINGLE)
                 detail = "unknown"
                 if region is not None:
                     width, height = projected_agent_size(region, new_layout)
@@ -1957,6 +1994,7 @@ class App:
             if not self._rebuild_secondary(new_layout, agent_tmux_name):
                 self._display_transport().close_slot(secondary)
                 workspace.layout = WorkspaceLayout.SINGLE
+                self._resize_sidebar_for_layout(WorkspaceLayout.SINGLE)
                 workspace.set_target(AgentWorkspace.PRIMARY)
                 self._set_railmux_focus(sidebar_focused, force_border=True)
                 self._set_status(
@@ -1975,6 +2013,7 @@ class App:
 
         if not secondary.is_open:
             workspace.layout = WorkspaceLayout.SINGLE
+            self._resize_sidebar_for_layout(WorkspaceLayout.SINGLE)
             self._set_railmux_focus(
                 self._railmux_has_focus, force_border=True)
             self._set_status(
@@ -2014,6 +2053,7 @@ class App:
             if not self._rebuild_secondary(old_layout, agent_tmux_name):
                 self._display_transport().close_slot(secondary)
                 workspace.layout = WorkspaceLayout.SINGLE
+                self._resize_sidebar_for_layout(WorkspaceLayout.SINGLE)
                 workspace.set_target(AgentWorkspace.PRIMARY)
                 self._set_status(
                     "Rotate failed; Pane 2's agent continues in Running.", "error")
@@ -2031,6 +2071,7 @@ class App:
         else:
             workspace.set_target(target_slot_before)
         self._install_function_key_bindings()
+        self._resize_sidebar_for_layout(new_layout)
         self._set_railmux_focus(sidebar_focused, force_border=True)
         self._set_status(f"Layout → {new_layout.value}")
 
@@ -2203,6 +2244,7 @@ class App:
                 workspace.set_target(AgentWorkspace.SECONDARY)
             else:
                 workspace.set_target(AgentWorkspace.PRIMARY)
+            self._resize_sidebar_for_layout(workspace.layout)
             self._paint_slot_active_target(
                 workspace.target,
                 workspace.target.active_session_id,
@@ -2239,6 +2281,7 @@ class App:
                     and not session_is_alive(
                         workspace.collapsed_secondary_agent)):
                 workspace.collapsed_secondary_agent = None
+        self._resize_sidebar_for_layout(workspace.layout)
         self._paint_slot_active_target(
             workspace.target,
             workspace.target.active_session_id,
@@ -2953,24 +2996,10 @@ class App:
 
         bindings: list[dict] = []
         for running in self._running.values():
-            cwd = (
-                running.placeholder_path
-                if running.is_placeholder
-                else running.project.real_path if running.project is not None
-                else None
-            )
-            if cwd is None:
+            item = self._running_binding_data(
+                running, include_launch_context=True)
+            if item is None:
                 continue
-            item = {
-                "key": running.key,
-                "tmux_name": running.tmux_name,
-                "session_type": running.session_type,
-                "cwd": str(cwd),
-            }
-            if running.is_placeholder:
-                item["created_at"] = running.created_at
-                item["pre_launch_ids"] = sorted(running.pre_launch_ids)
-                item["pre_launch_complete"] = True
             bindings.append(item)
         if bindings:
             data["running_bindings_version"] = 1
@@ -3312,11 +3341,13 @@ class App:
             )
         if not primary_ok or workspace.primary.pane_id is None:
             workspace.layout = WorkspaceLayout.SINGLE
+            self._resize_sidebar_for_layout(WorkspaceLayout.SINGLE)
             workspace.set_target(AgentWorkspace.PRIMARY)
             self._set_railmux_focus(True, force_border=True)
             return False
 
         requested = WorkspaceLayout(saved["layout"])
+        self._resize_sidebar_for_layout(requested)
         secondary_ok = True
         if requested is not WorkspaceLayout.SINGLE:
             region = self._agent_region_size()
@@ -3341,6 +3372,7 @@ class App:
         if requested is not WorkspaceLayout.SINGLE and not workspace.secondary.is_open:
             workspace.layout = WorkspaceLayout.SINGLE
         if workspace.layout is WorkspaceLayout.SINGLE:
+            self._resize_sidebar_for_layout(WorkspaceLayout.SINGLE)
             workspace.set_target(AgentWorkspace.PRIMARY)
             collapsed = live_represented(saved.get("collapsed_secondary"))
             if collapsed is None and requested is not WorkspaceLayout.SINGLE:
@@ -3350,6 +3382,7 @@ class App:
             if collapsed is not None:
                 workspace.collapsed_secondary_agent = collapsed
         else:
+            self._resize_sidebar_for_layout(workspace.layout)
             workspace.set_target(saved["target"])
 
         target = workspace.target
@@ -3423,6 +3456,156 @@ class App:
             return None
         key = "__new__-" + remainder[len("new---"):]
         return key if App._safe_name(key, len(key)) == remainder else None
+
+    @staticmethod
+    def _legacy_placeholder_name(name: str, mode: AgentMode) -> bool:
+        """Whether *name* has one of Railmux's historical new-session shapes."""
+        import re
+        if not name.startswith(mode.tmux_prefix):
+            return False
+        remainder = name[len(mode.tmux_prefix):]
+        return re.fullmatch(
+            r"new---(?:[0-9]+|[0-9a-f]{6}-[1-9][0-9]*)",
+            remainder,
+        ) is not None
+
+    def _is_legacy_new_session_command(
+        self,
+        raw: str,
+        mode: AgentMode,
+        cwd: Path,
+    ) -> bool:
+        """Validate the strict launch grammar used before identity markers.
+
+        tmux quotes ``pane_start_command`` as one shell argument.  Parsing both
+        layers lets us compare tokens without executing or substring-matching
+        shell text.  Only a provider's configured binary and the exact live cwd
+        are accepted; resume commands and additional shell operations fail.
+        """
+        import shlex
+        try:
+            outer = shlex.split(raw)
+            command = shlex.split(outer[0]) if len(outer) == 1 else outer
+        except ValueError:
+            return False
+        expected_binary = str(getattr(
+            self._config, mode.binary_config_attr, ""))
+        cwd_key = self._path_key(cwd)
+        if not expected_binary or len(command) < 5:
+            return False
+        try:
+            command_cwd = self._path_key(Path(command[1]))
+        except (TypeError, ValueError):
+            return False
+        if (command[:1] != ["cd"] or not Path(command[1]).is_absolute()
+                or command_cwd != cwd_key
+                or command[2:4] != ["&&", "exec"]):
+            return False
+        if mode.project_source == ProjectSource.CLAUDE:
+            return command[4:] == [expected_binary]
+        if command[4:7] != ["$SHELL", "-li", "-c"] or len(command) != 8:
+            return False
+        try:
+            inner = shlex.split(command[7])
+        except ValueError:
+            return False
+        if len(inner) >= 3 and inner[0] == "export" and inner[2] == "&&":
+            key, separator, value = inner[1].partition("=")
+            if (key != "CODEX_HOME" or not separator or not value
+                    or not Path(value).is_absolute()):
+                return False
+            inner = inner[3:]
+        expected = ["exec", expected_binary, "-C", str(cwd)]
+        return inner in (
+            expected,
+            [*expected, "--dangerously-bypass-approvals-and-sandbox"],
+        )
+
+    def _migrate_legacy_v2_marker(
+        self,
+        *,
+        name: str,
+        cwd: Path,
+        created: int,
+        session_id: str,
+        pane_id: str,
+        mode: AgentMode,
+        resolved_session_id: str | None = None,
+    ) -> orphan_marker.Marker | None:
+        """Install a v2 marker on one strictly validated legacy live session.
+
+        This is the direct-upgrade boundary for live new-session processes
+        created by Railmux 0.1.3 and earlier. It can be retired only when those
+        releases are no longer supported as an in-place upgrade source.
+        """
+        placeholder_key = self._placeholder_tmux_key(name, mode)
+        if (placeholder_key is None
+                or not self._legacy_placeholder_name(name, mode)):
+            return None
+        raw = tmux_ctl.detached_single_pane_start_command(
+            name, session_id=session_id, pane_id=pane_id)
+        if raw is None or not self._is_legacy_new_session_command(
+                raw, mode, cwd):
+            return None
+        owner = getattr(self, "_restart_identity", None)
+        if owner is None or created <= 0:
+            return None
+        marker = orphan_marker.Marker(
+            mode_key=mode.key,
+            placeholder_key=placeholder_key,
+            tmux_name=name,
+            tmux_session_id=session_id,
+            tmux_pane_id=pane_id,
+            owner=owner,
+            cwd=self._path_key(cwd),
+            created_at=float(created),
+            creation_token=uuid.uuid4().hex,
+            phase=("resolved" if resolved_session_id is not None
+                   else "unresolved"),
+            session_id=resolved_session_id,
+        )
+        # Marker-first migration mirrors new-session launch. If persistence or
+        # readback fails, leave the legacy process untouched and unclaimed.
+        if not self._write_orphan_marker(marker):
+            return None
+        return marker
+
+    def _legacy_unresolved_running(
+        self,
+        *,
+        name: str,
+        cwd: Path,
+        created: int,
+        session_id: str,
+        pane_id: str,
+        mode: AgentMode,
+        project: Project,
+    ) -> _Running | None:
+        """Conservatively adopt a live agent created before recovery markers."""
+        marker = self._migrate_legacy_v2_marker(
+            name=name,
+            cwd=cwd,
+            created=created,
+            session_id=session_id,
+            pane_id=pane_id,
+            mode=mode,
+        )
+        if marker is None:
+            return None
+        return _Running(
+            key=marker.placeholder_key,
+            tmux_name=name,
+            label=f"{project.display_name}/(recovering)",
+            project=project,
+            placeholder_path=cwd,
+            created_at=float(created),
+            # A pre-marker process has no pre-launch snapshot. Keep it visible
+            # and operable, but never guess which same-cwd transcript it owns.
+            allow_heuristic_resolution=False,
+            status="idle",
+            session_type=mode.session_type,
+            orphan=marker,
+        )
 
     def _valid_running_binding(
         self,
@@ -3543,7 +3726,12 @@ class App:
             session_type=session_type,
         )
 
-    def _running_binding_data(self, running: _Running) -> dict | None:
+    def _running_binding_data(
+        self,
+        running: _Running,
+        *,
+        include_launch_context: bool = False,
+    ) -> dict | None:
         cwd = (
             running.placeholder_path
             if running.is_placeholder
@@ -3560,10 +3748,16 @@ class App:
         }
         if running.is_placeholder:
             data["created_at"] = running.created_at
-            # The potentially-large exclusion set lives in the atomic runtime
-            # state, not in a tmux command argument. A stamp alone therefore
-            # identifies the process but must not authorize heuristic binding.
-            data["pre_launch_complete"] = False
+            if include_launch_context:
+                data["pre_launch_ids"] = sorted(running.pre_launch_ids)
+                data["pre_launch_complete"] = (
+                    running.allow_heuristic_resolution)
+            else:
+                # The potentially-large exclusion set lives in the atomic
+                # runtime state, not in a tmux command argument. A stamp alone
+                # therefore identifies the process but must not authorize
+                # heuristic binding.
+                data["pre_launch_complete"] = False
         return data
 
     def _stamp_running(self, running: _Running) -> bool:
@@ -3711,6 +3905,7 @@ class App:
                     self._path_key(cwd), self._synthesise_codex_project(cwd, count))
 
         live: dict[str, tuple[Path, int]] = {}
+        live_objects: dict[str, tuple[str, str]] = {}
         stamps: dict[str, object] = {}
         orphan_stamps: dict[str, orphan_marker.Marker] = {}
         marker_governed: set[str] = set()
@@ -3724,6 +3919,8 @@ class App:
                 created = 0
             live[parts[0]] = (Path(parts[1]), created)
             if len(parts) == 7:
+                if parts[3] and parts[4]:
+                    live_objects[parts[0]] = (parts[3], parts[4])
                 if parts[5]:
                     # Presence alone fences every legacy adoption path. A
                     # corrupt/newer v2 marker is unresolved authority, never a
@@ -3853,7 +4050,11 @@ class App:
                                         and len(value) <= 256
                                         for value in values)):
                             pre_launch_ids = frozenset(values)
-                            pre_launch_complete = True
+                            complete = saved.get(
+                                "pre_launch_complete", True)
+                            pre_launch_complete = (
+                                complete if isinstance(complete, bool)
+                                else False)
                         break
                 running = _Running(
                     key=marker.placeholder_key,
@@ -3894,7 +4095,12 @@ class App:
                         enriched = dict(raw)
                         if "pre_launch_ids" in saved:
                             enriched["pre_launch_ids"] = saved["pre_launch_ids"]
-                            enriched["pre_launch_complete"] = True
+                            # Older state omitted this field and always carried
+                            # a complete launch snapshot. Legacy migration
+                            # writes False explicitly because it must remain
+                            # visible without ever enabling UUID heuristics.
+                            enriched["pre_launch_complete"] = saved.get(
+                                "pre_launch_complete", True)
                         break
             running = self._valid_running_binding(
                 enriched,
@@ -3906,6 +4112,22 @@ class App:
                 continue
             if running.key in self._running:
                 continue
+            identities = live_objects.get(name)
+            if identities is not None:
+                mode = self._modes().for_tmux_name(name)
+                if mode is not None:
+                    marker = self._migrate_legacy_v2_marker(
+                        name=name,
+                        cwd=live[name][0],
+                        created=live[name][1],
+                        session_id=identities[0],
+                        pane_id=identities[1],
+                        mode=mode,
+                        resolved_session_id=(
+                            None if running.is_placeholder else running.key),
+                    )
+                    if marker is not None:
+                        running.orphan = marker
             self._running[running.key] = running
             claimed_tmux.add(name)
             found += 1
@@ -3951,24 +4173,44 @@ class App:
                 # State-free recovery is exact on Linux: the live Codex process
                 # tells us which rollout(s) it has open.  Restrict matches to
                 # indexed metadata in this cwd; ambiguity is never guessed.
-                if mode.project_source != ProjectSource.CODEX:
+                full_id = None
+                if mode.project_source == ProjectSource.CODEX:
+                    try:
+                        open_ids = tmux_ctl.session_rollout_ids(
+                            name, self._codex_home_path() / "sessions")
+                    except Exception:
+                        open_ids = None
+                    if open_ids:
+                        matches = [
+                            session_id for session_id in open_ids
+                            if (meta := self._codex_index.get(
+                                session_id, refresh=False)) is not None
+                            and self._path_key(meta.project.real_path)
+                            == self._path_key(cwd)
+                        ]
+                        if len(matches) == 1:
+                            full_id = matches[0]
+                if full_id is None:
+                    identities = live_objects.get(name)
+                    legacy = (
+                        self._legacy_unresolved_running(
+                            name=name,
+                            cwd=cwd,
+                            created=_created,
+                            session_id=identities[0],
+                            pane_id=identities[1],
+                            mode=mode,
+                            project=project,
+                        )
+                        if identities is not None else None
+                    )
+                    if legacy is None or legacy.key in self._running:
+                        continue
+                    self._running[legacy.key] = legacy
+                    claimed_tmux.add(name)
+                    self._stamp_running(legacy)
+                    found += 1
                     continue
-                try:
-                    open_ids = tmux_ctl.session_rollout_ids(
-                        name, self._codex_home_path() / "sessions")
-                except Exception:
-                    open_ids = None
-                if not open_ids:
-                    continue
-                matches = [
-                    session_id for session_id in open_ids
-                    if (meta := self._codex_index.get(session_id, refresh=False))
-                    is not None
-                    and self._path_key(meta.project.real_path) == self._path_key(cwd)
-                ]
-                if len(matches) != 1:
-                    continue
-                full_id = matches[0]
             else:
                 # Resolve the truncated key back to the full session_id.
                 if mode.project_source == ProjectSource.CODEX:

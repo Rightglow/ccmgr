@@ -1,6 +1,6 @@
 """State model for the tmux panes that display up to two agents.
 
-Primary retains the established single-pane behavior. The experimental split
+Primary retains the established single-pane behavior. The split
 exposes secondary without duplicating pane, focus, and transport state in
 ``App``.
 """

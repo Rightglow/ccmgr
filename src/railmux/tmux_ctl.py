@@ -512,6 +512,45 @@ def session_topology(session_name: str) -> SessionTopology | None:
         return None
 
 
+def detached_single_pane_start_command(
+    session_name: str,
+    *,
+    session_id: str,
+    pane_id: str,
+) -> str | None:
+    """Return a detached session's immutable launch command after revalidation.
+
+    This is intentionally narrower than a general pane query.  It is used only
+    to migrate pre-marker Railmux agent sessions, so a name match is not enough:
+    the session must still be detached, contain exactly one live pane, and have
+    the same immutable tmux session/pane identities observed by discovery.
+    """
+    topology = session_topology(session_name)
+    pane = topology.single_live_pane if topology is not None else None
+    if (topology is None or topology.attached_clients != 0 or pane is None
+            or topology.session_id != session_id
+            or pane.session_id != session_id or pane.pane_id != pane_id):
+        return None
+    try:
+        command = subprocess.check_output(
+            ["tmux", "display-message", "-p", "-t", pane_id,
+             "#{pane_start_command}"],
+            stderr=subprocess.DEVNULL,
+        ).decode().rstrip("\n")
+    except (OSError, subprocess.CalledProcessError, UnicodeError):
+        return None
+    # Close the query race: the immutable objects must still identify the same
+    # live pane after reading its command.  Width/height may legitimately move.
+    current = pane_identity(pane_id)
+    if (not command or current is None or current.dead
+            or current.pane_id != pane.pane_id
+            or current.pane_pid != pane.pane_pid
+            or current.session_id != pane.session_id
+            or current.window_id != pane.window_id):
+        return None
+    return command
+
+
 def session_ids() -> frozenset[str] | None:
     """Return all immutable tmux session IDs, including outside tmux."""
     try:
@@ -935,6 +974,21 @@ def resize_pane(pane_id: str, direction: str, amount: int) -> bool:
     try:
         subprocess.check_call(
             ["tmux", "resize-pane", "-t", pane_id, direction, str(amount)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
+def resize_pane_width(pane_id: str, width: int) -> bool:
+    """Set one pane to an exact positive width in cells."""
+    if width <= 0:
+        return False
+    try:
+        subprocess.check_call(
+            ["tmux", "resize-pane", "-t", pane_id, "-x", str(width)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )

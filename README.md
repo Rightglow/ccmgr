@@ -101,7 +101,7 @@ The rename popup starts with the current title pre-filled. Press
 `Ctrl-U` to clear the entire input, `Enter` to save a non-empty title, or `Esc`
 to cancel.
 
-### Experimental dual-agent split
+### Dual-agent split
 
 Railmux distinguishes the **Focused pane** from the **Target pane**. The Focused
 pane currently receives keyboard input. The Target pane is the remembered P1 or
@@ -121,6 +121,11 @@ and keeps the displaced live agent in Running. Killing a displayed session
 safely detaches it first and keeps the chosen layout open; its agent pane returns
 to the resize-aware Railmux empty surface instead of disappearing or retaining a
 stale interactive client.
+
+The sidebar uses roughly 30% of the window in single-agent mode. Dual-agent
+layouts reduce it to roughly 20%, with a 30-column floor, so both agents gain
+working width without making session metadata unusably narrow. Returning to
+single restores the 30% sidebar.
 
 The bottom brand keeps a one-cell workspace indicator after the provider name:
 `▣` is single-pane; `◧`/`◨` are side-by-side with the filled half naming the
@@ -159,6 +164,10 @@ update immediately.
 | Left-click (running) | Switch the last agent pane to that session |
 | Double-click | Open/attach in the last agent pane and move focus there |
 | Right-click | Context menu (Open, Preview, Info, Rename, Star, Kill, Term, Delete) |
+
+The terminal must report mouse buttons to applications for these actions to
+reach Railmux. Right-click reporting is sometimes a separate setting from
+ordinary mouse reporting; see [FAQ 2](#2-mouse-buttons-or-f8f9-dont-work--whats-wrong).
 
 ## History preview
 
@@ -293,20 +302,29 @@ Selection → "Applications in terminal may access clipboard"*.)
 > `Ctrl-B z` also toggles fullscreen (built into tmux) but zooms whichever
 > pane has focus — it may fullscreen the sidebar instead of the agent.
 
-### 2. Mouse clicks or F9 don't work — what's wrong?
+### 2. Mouse buttons or F8/F9 don't work — what's wrong?
 
 These are usually terminal‑side settings, not tmux or railmux.
 
-**Mouse**: your terminal must forward mouse events to tmux. Check your terminal's
-profile settings for "Report mouse events" or "Mouse reporting" and make sure
-it's enabled. tmux's `set -g mouse on` should already be in place (railmux
-sets it for its own session).
+**Mouse**: enable your terminal's “Report mouse events” or “Mouse reporting”
+setting. Railmux already enables tmux mouse support for its own sessions, but it
+cannot receive an event that the terminal keeps for its own UI.
 
-**F9 (fullscreen)**: on macOS, F9 is often captured by Mission Control.
-Fix: *System Settings → Keyboard → "Use F1, F2, etc. keys as standard function
-keys"*. On Windows laptops the Fn‑lock key (`Fn+Esc`) toggles function‑key
-behaviour. If your terminal has a "Pass function keys to terminal" option,
-enable it.
+Right-click may have a separate forwarding switch. In iTerm2, open *Settings →
+Pointer → General*, then enable **“Right click reported to apps, does not open
+menu.”** Without it, iTerm2 opens its own menu instead of sending the click to
+Railmux.
+
+![iTerm2 Pointer settings with “Right click reported to apps, does not open menu” enabled](https://raw.githubusercontent.com/Rightglow/Railmux/main/docs/assets/iterm2-right-click.png)
+
+**F8 (layout) and F9 (fullscreen)**: the operating system or terminal may
+consume function keys before tmux sees them. On macOS, either hold `Fn` when
+pressing the key or enable *System Settings → Keyboard → “Use F1, F2, etc. keys
+as standard function keys”*; also remove any Mission Control shortcut using the
+same key. On Windows laptops, `Fn+Esc` commonly toggles Fn Lock. If the terminal
+has its own shortcut or key-mapping editor, remove the conflicting mapping or
+configure it to send the corresponding F8/F9 function-key sequence to the
+terminal session.
 
 ### 3. Using railmux over SSH
 

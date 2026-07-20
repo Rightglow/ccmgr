@@ -22,7 +22,7 @@ heuristic adoption when its complete pre-launch fence is unavailable.
 
 ### Dual-agent workspace
 
-An experimental UI now exposes the prepared primary/secondary `AgentWorkspace`
+A shipped UI exposes the prepared primary/secondary `AgentWorkspace`
 model through `F8`, which can create an empty Pane 2 and cycles single,
 side-by-side, and stacked layouts. Single-click/`␣` previews stopped rows or
 switches running rows, while double-click/Enter opens and transfers focus in the
@@ -91,7 +91,7 @@ Proven implementation facts:
 - Cross-session swap and direct-outer-kill recovery pass on Linux with tmux 2.7
   and 3.4. The CI smoke runs the same private-socket path on Linux and macOS.
 - Primary and secondary ownership records are separate, and one real pane
-  cannot be claimed by both slots; the experimental split interaction exposes
+  cannot be claimed by both slots; the dual-agent interaction exposes
   secondary ownership and same-instance soft restart restores both slots after
   validating their exact local identities.
 - Real tmux active/last-pane focus drives the workspace Target pane. Both-slot

@@ -307,9 +307,12 @@ routing with focus, selection, or history.
 - Layout names are `stacked` and `side-by-side`, avoiding ambiguous
   horizontal/vertical terminology.
 - Orientation changes only through F8 and must not flip during terminal resize.
+  Single-agent layout assigns about 30% of the outer width to the sidebar;
+  either dual layout assigns about 20%, clamped to at least 30 columns. Ratio
+  changes are best-effort and must not make layout creation or recovery fail.
 - Narrow screens should prefer stacked panes because three side-by-side columns
   make agent TUIs unusably narrow.
-- The prototype globally routes `F8` to the sidebar controller and cycles
+- Railmux globally routes `F8` to the sidebar controller and cycles
   single → side-by-side → stacked even while an agent owns keyboard focus.
   `F9` similarly reaches the controller and uses the Target pane resolved
   from real tmux focus.
