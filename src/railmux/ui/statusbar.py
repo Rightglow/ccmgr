@@ -43,7 +43,7 @@ def split_at_width(text: str, maxcol: int) -> tuple[str, str]:
         return text, ""
     # When even one glyph won't fit (e.g. CJK character in a 1-column
     # terminal, pos == 0), force one character so callers that loop on
-    # "remaining" (reflow_pages) always make progress.
+    # "remaining" (the reflow helpers) always make progress.
     if pos == 0:
         return text[:1], text[1:]
     # Prefer a word boundary, but only if it doesn't waste most of the
@@ -74,6 +74,75 @@ def reflow_pages(text: str, maxcol: int, lines: int = 2) -> list[tuple[str, ...]
             head, remaining = split_at_width(remaining, maxcol)
             page.append(head)
         pages.append(tuple(page))
+    return pages
+
+
+def reflow_hint_pages(
+    text: str,
+    maxcol: int,
+    lines: int = 2,
+    separator: str = " · ",
+) -> list[tuple[str, ...]]:
+    """Page a hint bar without separating one binding from its description.
+
+    Each separator-delimited hint is an atomic visual group. Groups may share
+    a line, but a group that fits on one page always moves whole to the next
+    page instead of leaving its key or description behind during auto-flip.
+    """
+    maxcol = max(1, maxcol)
+    lines = max(1, lines)
+    items = [item.strip() for item in text.split(separator) if item.strip()]
+    pages: list[tuple[str, ...]] = []
+    page: list[str] = []
+    current_line = ""
+
+    def finish_page() -> None:
+        nonlocal page
+        if page:
+            pages.append(tuple(page + [""] * (lines - len(page))))
+            page = []
+
+    for item in items:
+        combined = (
+            f"{current_line}{separator}{item}" if current_line else item
+        )
+        if current_line and urwid.calc_width(
+                combined, 0, len(combined)) <= maxcol:
+            current_line = combined
+            continue
+
+        if current_line:
+            page.append(current_line)
+            current_line = ""
+
+        item_lines: list[str] = []
+        remaining = item
+        while remaining:
+            head, remaining = split_at_width(remaining, maxcol)
+            item_lines.append(head)
+
+        if len(item_lines) == 1:
+            if len(page) >= lines:
+                finish_page()
+            current_line = item_lines[0]
+            continue
+
+        # Keep a wrapped item together whenever it can fit on an empty page.
+        if page and len(item_lines) <= lines \
+                and len(page) + len(item_lines) > lines:
+            finish_page()
+        for item_line in item_lines:
+            if len(page) >= lines:
+                finish_page()
+            page.append(item_line)
+        if len(page) >= lines:
+            finish_page()
+
+    if current_line:
+        if len(page) >= lines:
+            finish_page()
+        page.append(current_line)
+    finish_page()
     return pages
 
 
@@ -263,7 +332,7 @@ class HintBar(urwid.WidgetWrap):
         self._reflow(80)
 
     def _reflow(self, maxcol: int) -> None:
-        new_pages = reflow_pages(self._text, maxcol, lines=2)
+        new_pages = reflow_hint_pages(self._text, maxcol, lines=2)
         # Cast each page to exactly 2 strings to keep the type narrow.
         new_pages = [(p[0] if len(p) > 0 else "",
                        p[1] if len(p) > 1 else "") for p in new_pages]

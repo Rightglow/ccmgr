@@ -14,13 +14,13 @@ from railmux import restart_state, tmux_ctl
 from railmux.atomic_file import atomic_write_text
 
 
-_VERSION = 2
+_VERSION = 3
 _KEYS = ("F8", "F9")
 _MAX_STATE_BYTES = 64 * 1024
 
 
 class SharedTmuxBindingManager:
-    """Share marker-owned F8/F9 and prefix-Tab wrappers across instances."""
+    """Share Railmux-scoped root/prefix bindings across instances."""
 
     def __init__(self, server_digest: str, owner_pane_id: str) -> None:
         key = "".join(ch for ch in server_digest if ch.isalnum())[:32]
@@ -32,6 +32,7 @@ class SharedTmuxBindingManager:
         self._state_path: Path | None = None
         self._registered = False
         self._prefix_tab_managed = False
+        self._right_click_managed = False
 
     @property
     def target_toggle_available(self) -> bool:
@@ -66,7 +67,7 @@ class SharedTmuxBindingManager:
         except (OSError, ValueError, json.JSONDecodeError):
             return None
         if (not isinstance(raw, dict)
-                or raw.get("version") not in {1, _VERSION}):
+                or raw.get("version") not in {1, 2, _VERSION}):
             return None
         token = raw.get("token")
         phase = raw.get("phase")
@@ -74,11 +75,19 @@ class SharedTmuxBindingManager:
         backup = raw.get("backup")
         prefix_backup = raw.get("prefix_tab_backup")
         prefix_managed = raw.get("prefix_tab_managed")
+        right_click_backup = raw.get("right_click_backup")
+        right_click_managed = raw.get("right_click_managed")
         prefix_valid = (
             isinstance(prefix_backup, dict)
             and set(prefix_backup) == {"Tab"}
             and all(value is None or isinstance(value, str)
                     for value in prefix_backup.values())
+        )
+        right_click_valid = (
+            isinstance(right_click_backup, dict)
+            and set(right_click_backup) == {"MouseDown3Pane"}
+            and all(value is None or isinstance(value, str)
+                    for value in right_click_backup.values())
         )
         if (not isinstance(token, str) or not token or len(token) > 64
                 or phase not in {"installing", "active"}
@@ -89,9 +98,12 @@ class SharedTmuxBindingManager:
                 or not isinstance(backup, dict) or set(backup) != set(_KEYS)
                 or any(value is not None and not isinstance(value, str)
                        for value in backup.values())
-                or (raw["version"] == _VERSION
+                or (raw["version"] >= 2
                     and (not prefix_valid
-                         or not isinstance(prefix_managed, bool)))):
+                         or not isinstance(prefix_managed, bool)))
+                or (raw["version"] == _VERSION
+                    and (not right_click_valid
+                         or not isinstance(right_click_managed, bool)))):
             return None
         return raw
 
@@ -160,6 +172,7 @@ class SharedTmuxBindingManager:
                     return False
                 state = self._load()
                 if state is not None:
+                    upgraded = False
                     if state["version"] == 1:
                         prefix_tab_backup = (
                             tmux_ctl.prepare_prefix_target_binding())
@@ -168,16 +181,25 @@ class SharedTmuxBindingManager:
                         # phase so an existing live/stale v1 lease upgrades in
                         # place instead of leaving its marker permanently
                         # unclaimable after a code update.
-                        state["version"] = _VERSION
-                        state["phase"] = "installing"
                         state["prefix_tab_managed"] = (
                             prefix_tab_backup is not None)
                         state["prefix_tab_backup"] = (
                             prefix_tab_backup or {"Tab": None})
-                        # Persist the newly captured original before prefix
-                        # Tab is mutated. A crash after the tmux write must
-                        # leave a v2/installing record that can recognize and
-                        # restore its marker-owned live binding.
+                        upgraded = True
+                    if state["version"] < _VERSION:
+                        right_click_backup = (
+                            tmux_ctl.prepare_root_right_click_binding())
+                        # Right-click routing joined the same lease in v3. Its
+                        # original must be durable before any root-table write.
+                        state["right_click_managed"] = (
+                            right_click_backup is not None)
+                        state["right_click_backup"] = (
+                            right_click_backup
+                            or {"MouseDown3Pane": None})
+                        upgraded = True
+                    if upgraded:
+                        state["version"] = _VERSION
+                        state["phase"] = "installing"
                         if not self._save(state):
                             return False
                     token = state["token"]
@@ -201,6 +223,20 @@ class SharedTmuxBindingManager:
                                     token,
                                 )
                             )
+                        if state["right_click_managed"]:
+                            current_right = (
+                                tmux_ctl.read_root_right_click_binding()
+                                ["MouseDown3Pane"]
+                            )
+                            safe = (
+                                safe
+                                and tmux_ctl.root_right_click_binding_is_original_or_owned(
+                                    current_right,
+                                    state["right_click_backup"].get(
+                                        "MouseDown3Pane"),
+                                    token,
+                                )
+                            )
                         if not safe:
                             if state["owners"]:
                                 return False
@@ -209,6 +245,9 @@ class SharedTmuxBindingManager:
                             if state["prefix_tab_managed"]:
                                 tmux_ctl.restore_prefix_target_binding(
                                     state["prefix_tab_backup"], token=token)
+                            if state["right_click_managed"]:
+                                tmux_ctl.restore_root_right_click_binding(
+                                    state["right_click_backup"], token=token)
                             self._remove_state()
                             state = None
                         else:
@@ -223,12 +262,24 @@ class SharedTmuxBindingManager:
                                 state["prefix_tab_managed"] = False
                                 if not self._save(state):
                                     return False
+                            if (state["right_click_managed"]
+                                    and not tmux_ctl.set_root_right_click_forwarding(
+                                        state["right_click_backup"], token)):
+                                tmux_ctl.restore_root_right_click_binding(
+                                    state["right_click_backup"], token=token)
+                                state["right_click_managed"] = False
+                                if not self._save(state):
+                                    return False
                             state["phase"] = "active"
                     elif not (
                         tmux_ctl.root_function_bindings_owned_by(token)
                         and (
                             not state["prefix_tab_managed"]
                             or tmux_ctl.prefix_target_binding_owned_by(token)
+                        )
+                        and (
+                            not state["right_click_managed"]
+                            or tmux_ctl.root_right_click_binding_owned_by(token)
                         )
                     ):
                         if state["owners"]:
@@ -238,6 +289,9 @@ class SharedTmuxBindingManager:
                         if state["prefix_tab_managed"]:
                             tmux_ctl.restore_prefix_target_binding(
                                 state["prefix_tab_backup"], token=token)
+                        if state["right_click_managed"]:
+                            tmux_ctl.restore_root_right_click_binding(
+                                state["right_click_backup"], token=token)
                         self._remove_state()
                         state = None
                     if state is not None:
@@ -262,10 +316,14 @@ class SharedTmuxBindingManager:
                             return False
                         self._registered = True
                         self._prefix_tab_managed = state["prefix_tab_managed"]
+                        self._right_click_managed = (
+                            state["right_click_managed"])
                         return True
 
                 backup = tmux_ctl.prepare_root_function_bindings()
                 prefix_tab_backup = tmux_ctl.prepare_prefix_target_binding()
+                right_click_backup = (
+                    tmux_ctl.prepare_root_right_click_binding())
                 if backup is None:
                     return False
                 token = secrets.token_hex(8)
@@ -277,6 +335,9 @@ class SharedTmuxBindingManager:
                     "backup": backup,
                     "prefix_tab_managed": prefix_tab_backup is not None,
                     "prefix_tab_backup": prefix_tab_backup or {"Tab": None},
+                    "right_click_managed": right_click_backup is not None,
+                    "right_click_backup": (
+                        right_click_backup or {"MouseDown3Pane": None}),
                 }
                 if not self._save(state):
                     return False
@@ -296,6 +357,20 @@ class SharedTmuxBindingManager:
                             backup, token=token)
                         self._remove_state()
                         return False
+                if (state["right_click_managed"]
+                        and not tmux_ctl.set_root_right_click_forwarding(
+                            state["right_click_backup"], token)):
+                    tmux_ctl.restore_root_right_click_binding(
+                        state["right_click_backup"], token=token)
+                    state["right_click_managed"] = False
+                    if not self._save(state):
+                        tmux_ctl.restore_root_function_bindings(
+                            backup, token=token)
+                        if state["prefix_tab_managed"]:
+                            tmux_ctl.restore_prefix_target_binding(
+                                state["prefix_tab_backup"], token=token)
+                        self._remove_state()
+                        return False
                 state["phase"] = "active"
                 if not self._save(state) or not self._set_controller():
                     tmux_ctl.restore_root_function_bindings(
@@ -303,10 +378,14 @@ class SharedTmuxBindingManager:
                     if state["prefix_tab_managed"]:
                         tmux_ctl.restore_prefix_target_binding(
                             state["prefix_tab_backup"], token=token)
+                    if state["right_click_managed"]:
+                        tmux_ctl.restore_root_right_click_binding(
+                            state["right_click_backup"], token=token)
                     self._remove_state()
                     return False
                 self._registered = True
                 self._prefix_tab_managed = state["prefix_tab_managed"]
+                self._right_click_managed = state["right_click_managed"]
                 return True
         except OSError:
             return False
@@ -351,6 +430,9 @@ class SharedTmuxBindingManager:
                     if state["prefix_tab_managed"]:
                         tmux_ctl.restore_prefix_target_binding(
                             state["prefix_tab_backup"], token=state["token"])
+                    if state["right_click_managed"]:
+                        tmux_ctl.restore_root_right_click_binding(
+                            state["right_click_backup"], token=state["token"])
                     self._remove_state()
             except OSError:
                 pass
@@ -363,3 +445,4 @@ class SharedTmuxBindingManager:
                 )
             self._registered = False
             self._prefix_tab_managed = False
+            self._right_click_managed = False

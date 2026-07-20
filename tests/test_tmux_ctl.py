@@ -516,6 +516,40 @@ def test_root_function_restore_does_not_overwrite_user_change():
     assert call.call_args.args[0][:2] == ["tmux", "source-file"]
 
 
+def test_root_right_click_selects_pointer_pane_only_in_railmux_window():
+    backup = {
+        "MouseDown3Pane": (
+            "bind-key -T root MouseDown3Pane display-menu original"),
+    }
+
+    with _mock_check_call() as call:
+        assert tmux_ctl.set_root_right_click_forwarding(backup, "owner123")
+
+    argv = call.call_args.args[0]
+    assert argv[:5] == [
+        "tmux", "bind-key", "-T", "root", "MouseDown3Pane"]
+    assert argv[5:9] == ["if-shell", "-F", "-t", "="]
+    assert any("railmux-right-click-forward-v1-owner123" in arg
+               for arg in argv)
+    assert any(tmux_ctl.RAILMUX_CONTROLLER_OPTION in arg for arg in argv)
+    assert "select-pane -t = ; send-keys -M" in argv
+    assert argv[-1] == "display-menu original"
+
+
+def test_root_right_click_restore_does_not_overwrite_user_change():
+    backup = {"MouseDown3Pane": None}
+    current = {
+        "MouseDown3Pane": (
+            "bind-key -T root MouseDown3Pane display-message user-custom"),
+    }
+    with patch("railmux.tmux_ctl.read_root_right_click_binding",
+               return_value=current), _mock_check_call() as call:
+        tmux_ctl.restore_root_right_click_binding(
+            backup, token="owner123")
+
+    call.assert_not_called()
+
+
 def test_prefix_target_binding_scopes_toggle_and_preserves_fallback():
     backup = {
         "Tab": "bind-key -T prefix Tab display-message original-tab",

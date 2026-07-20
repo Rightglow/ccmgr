@@ -361,8 +361,11 @@ teardown operate on explicit slots. Direct agent focus is resolved from tmux's
 active pane while the sidebar is unfocused and from `pane_last` when focus
 returns. A direct P1/P2 focus change must repaint the workspace map when that
 resolution changes the Target pane; it must not wait for sidebar focus to
-return. Preview/open actions use that Target pane; the primary compatibility
-entry points remain only for established single-pane integrations.
+return. Terminal `focus in`/`focus out` reports are advisory because hosts may
+deliver them after a programmatic pane transition; both event handling and the
+normal refresh converge on tmux's actual active pane. Preview/open actions use
+that Target pane; the primary compatibility entry points remain only for
+established single-pane integrations.
 
 If secondary disappears, restore its live target into the same orientation or
 collapse truthfully to single. If primary disappears while secondary survives,
@@ -385,6 +388,13 @@ owner restores each original binding only while that key still carries the
 transaction marker, so a user tmux configuration reload takes precedence.
 Dead owners and interrupted installs are repaired by the next instance under a
 non-blocking, server-keyed runtime lock.
+
+`MouseDown3Pane` shares that controller-scoped transaction. Inside a Railmux
+window, a mouse-aware pane is selected by pointer location before the event is
+forwarded, matching tmux's stock left-click routing and allowing an unfocused
+sidebar to receive its context-menu click. Other windows replay the exact prior
+right-click command. Teardown restores it only while Railmux's marker still
+owns the binding, so a user configuration reload remains newer authority.
 
 tmux routes wheel events by pointer location rather than keyboard focus. Each
 sidebar pane therefore consumes buttons 4/5 at its outer widget boundary and
@@ -422,6 +432,11 @@ Each agent display pane independently recommends 80x20 and treats anything
 below 50x12 as critically cramped. Check it after attach, explicit divider
 movement, and terminal-size transitions; do not poll tmux for dimensions every
 second when the outer size is unchanged.
+
+Modal overlays must remain inside the current sidebar pane after responsive
+scaling. Long editable or read-only content scrolls within the modal while its
+action legend remains visible; confirmation heights continue to derive from
+wrapped content and clamp to the available terminal rows.
 
 Detached agent sessions commonly begin at 80x24. Before attaching a nested
 tmux client, create/identify the outer display pane, read its exact dimensions,

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock
+
+import urwid
 
 from railmux.models import (
     AttentionCategory,
@@ -188,6 +191,19 @@ def test_rename_legend_documents_clear_shortcut():
     assert "Ctrl+U = clear" in text
 
 
+def test_rename_height_grows_for_long_wrapped_original_and_keeps_actions():
+    short = RenameModal("short", lambda _title: None, lambda: None)
+    long = RenameModal("很长的原始会话名称" * 30,
+                       lambda _title: None, lambda: None)
+
+    assert short.preferred_height(24) < long.preferred_height(24)
+    assert long.preferred_height(24) == 18
+    text = _rendered_text(long, size=(24, 10))
+    assert "save" in text
+    assert "clear" in text
+    assert "cancel" in text
+
+
 def test_app_uses_compact_fixed_height_for_short_delete_confirm():
     app = App.__new__(App)
     app._loop = MagicMock()
@@ -228,6 +244,46 @@ def test_app_sizes_quit_confirm_for_wrapped_choices():
         "height": modal.preferred_height(24),
         "fixed_height": True,
     }
+
+
+def test_app_sizes_rename_for_wrapped_existing_title():
+    app = App.__new__(App)
+    app._loop = MagicMock()
+    app._loop.screen.get_cols_rows.return_value = (30, 24)
+    app._right_pane_open = MagicMock(return_value=True)
+    app._show_overlay = MagicMock()
+    modal = RenameModal("long original title " * 10,
+                        lambda _title: None, lambda: None)
+
+    app._show_rename_modal(modal)
+
+    assert app._show_overlay.call_args.kwargs == {
+        "width": 50,
+        "height": modal.preferred_height(24),
+        "fixed_height": True,
+    }
+
+
+def test_overlay_dimensions_stay_inside_a_cramped_sidebar():
+    app = App.__new__(App)
+    app._frame = urwid.SolidFill(" ")
+    app._loop = MagicMock()
+    app._loop.screen.get_cols_rows.return_value = (20, 10)
+    app._right_pane_open = MagicMock(return_value=True)
+
+    app._show_overlay(
+        urwid.SolidFill(" "), width=60, height=80,
+        fixed_width=False, fixed_height=False,
+    )
+    assert app._loop.widget.width == ("relative", 96)
+    assert app._loop.widget.height == ("relative", 96)
+
+    app._show_overlay(
+        urwid.SolidFill(" "), width=36, height=15,
+        fixed_width=True, fixed_height=True,
+    )
+    assert app._loop.widget.width == 18
+    assert app._loop.widget.height == 8
 
 
 def test_delete_confirm_keeps_actions_visible_for_long_name():
@@ -303,6 +359,17 @@ def test_running_info_renders_attention_in_narrow_width(tmp_path: Path):
 
     assert "! attention:" in text
     assert "unknown error" in text
+
+
+def test_info_modal_keeps_close_legend_visible_when_body_overflows(
+        tmp_path: Path):
+    session = _attention_session(tmp_path)
+    session = replace(session, last_user_message="very long input " * 80)
+    modal = SessionInfoModal(session, None, lambda: None)
+
+    text = _rendered_text(modal, size=(24, 8))
+
+    assert "↵ / Esc = close" in text
 
 
 # ── basic rendering ─────────────────────────────────────────────────────

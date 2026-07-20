@@ -133,6 +133,8 @@ def test_focus_return_activates_the_agent_tmux_reports_as_last(monkeypatch):
     app._divider_active = None
     app._double_focus_visual_pending = False
     monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.active_pane_id", lambda _target: "%1")
+    monkeypatch.setattr(
         "railmux.ui.app.tmux_ctl.last_pane_id", lambda _target: "%3")
     monkeypatch.setattr(
         "railmux.ui.app.tmux_ctl.set_window_border_styles", lambda *_a: True)
@@ -142,6 +144,38 @@ def test_focus_return_activates_the_agent_tmux_reports_as_last(monkeypatch):
     assert app._workspace.target_slot_key == AgentWorkspace.SECONDARY
     app._sessions_pane.set_active_session.assert_called_once_with(
         "secondary-session")
+
+
+def test_stale_focus_in_cannot_gray_actually_focused_second_pane(monkeypatch):
+    """tmux focus wins when a terminal host delivers a late focus report."""
+    app = App.__new__(App)
+    app._workspace = AgentWorkspace()
+    app._workspace.layout = WorkspaceLayout.SIDE_BY_SIDE
+    app._workspace.primary.pane_id = "%2"
+    app._workspace.secondary.pane_id = "%3"
+    app._workspace.set_target(AgentWorkspace.SECONDARY)
+    app._frame = _FocusAwareFrame(urwid.SolidFill(" "))
+    app._frame.set_window_active(True)
+    app._railmux_pane_id = "%1"
+    app._railmux_has_focus = True  # stale all-gray model
+    app._divider_active = None
+    app._double_focus_visual_pending = False
+    app._in_paste = False
+    app._paste_passthrough = False
+    app._sync_border_indicators = MagicMock(return_value=True)
+    app._apply_tmux_bar = MagicMock()
+    set_border = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.active_pane_id", lambda _target: "%3")
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.set_window_border_styles", set_border)
+
+    assert app._filter_input(["focus in"], []) == []
+
+    assert app._railmux_has_focus is False
+    assert app._frame._window_active is False
+    assert app._workspace.target_slot_key == AgentWorkspace.SECONDARY
+    set_border.assert_called_once_with("fg=colour240", "fg=#5faf00")
 
 
 def test_agent_to_agent_click_repaints_layout_indicator(monkeypatch):

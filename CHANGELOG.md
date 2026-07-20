@@ -92,6 +92,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reconcile terminal focus reports with tmux's actual active pane on every
+  refresh, preventing a delayed `focus in` after a Pane 2 open/new-session
+  action from leaving every agent border gray.
+- Route right-click through a crash-safe, Railmux-window-only tmux wrapper that
+  first selects the pane under the pointer, so an unfocused sidebar can open
+  its context menu. Preserve and restore the exact prior right-click binding
+  everywhere else.
+- Size Rename from its wrapped title, keep modal action legends visible, make
+  information popups scrollable, and clamp every overlay inside cramped
+  sidebar dimensions.
+- Keep each key-and-action hint together on one auto-flip page instead of
+  separating combinations such as `C-b ←` from their destination.
 - Route every displayed-session kill through the display transport, including
   ordinary resolved sessions. Swap panes now return home and nested clients
   detach before the exact tmux session is killed; the affected slot remains in

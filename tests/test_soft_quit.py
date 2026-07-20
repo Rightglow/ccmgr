@@ -1844,6 +1844,12 @@ def test_begin_exit_paints_progress_before_synchronous_cleanup():
         app._begin_exit(soft=False)
 
     assert events[:3] == ["overlay", "draw", "teardown"]
+    assert app._show_overlay.call_args.kwargs == {
+        "width": 44,
+        "height": 7,
+        "fixed_width": True,
+        "fixed_height": True,
+    }
     app._teardown_tmux.assert_called_once_with(defer_outer=True)
 
 

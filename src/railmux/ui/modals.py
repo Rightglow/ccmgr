@@ -44,11 +44,47 @@ def _attention_lines(attention: AttentionState | None) -> list:
     return lines
 
 
-class ProjectInfoModal(urwid.WidgetWrap):
+class _ReadOnlyInfoModal(urwid.WidgetWrap):
+    """Scrollable details with an always-visible close legend."""
+
+    _NAV_KEYS = {"up", "down", "page up", "page down", "home", "end"}
+
+    def __init__(self, rows: list, *, title: str,
+                 on_close: Callable[[], None]) -> None:
+        self._on_close = on_close
+        self._listbox = urwid.ListBox(urwid.SimpleFocusListWalker(rows))
+        footer = urwid.Pile([
+            urwid.Divider(),
+            _action_legend([("↵ / Esc", "close")]),
+        ])
+        self._footer = footer
+        frame = urwid.Frame(
+            body=self._listbox,
+            footer=footer,
+            focus_part="body",
+        )
+        super().__init__(urwid.LineBox(frame, title=title))
+
+    def selectable(self) -> bool:
+        return True
+
+    def keypress(self, size, key):
+        if key in ("enter", "esc"):
+            self._on_close()
+            return None
+        if key in self._NAV_KEYS:
+            inner_cols = max(1, size[0] - 2)
+            footer_rows = self._footer.rows((inner_cols,))
+            inner_rows = max(1, size[1] - 2 - footer_rows)
+            self._listbox.keypress((inner_cols, inner_rows), key)
+            return None
+        return key
+
+
+class ProjectInfoModal(_ReadOnlyInfoModal):
     """Read-only popup with details of the focused project."""
 
     def __init__(self, project: Project | None, on_close: Callable[[], None]) -> None:
-        self._on_close = on_close
         if project is None:
             body_lines = [urwid.Text("No project selected.")]
         else:
@@ -65,20 +101,7 @@ class ProjectInfoModal(urwid.WidgetWrap):
                 urwid.Text(f"sessions:       {project.session_count}"),
                 urwid.Text(f"last activity:  {ts}"),
             ]
-        body_lines.append(urwid.Divider())
-        body_lines.append(_action_legend([
-            ("↵ / Esc", "close"),
-        ]))
-        super().__init__(urwid.LineBox(urwid.Filler(urwid.Pile(body_lines), valign="top"), title="Project info"))
-
-    def selectable(self) -> bool:
-        return True
-
-    def keypress(self, size, key):
-        if key in ("enter", "esc"):
-            self._on_close()
-            return None
-        return key
+        super().__init__(body_lines, title="Project info", on_close=on_close)
 
 
 class QuitConfirmModal(urwid.WidgetWrap):
@@ -303,14 +326,13 @@ class HelpModal(urwid.WidgetWrap):
     # dismiss" contract by checking the overlay's screen-space rectangle.
 
 
-class SessionInfoModal(urwid.WidgetWrap):
+class SessionInfoModal(_ReadOnlyInfoModal):
     """Read-only popup showing details of the currently-focused session.
 
     Dismissed with Esc or Enter.
     """
 
     def __init__(self, session: SessionMeta | None, running_label: str | None, on_close: Callable[[], None]) -> None:
-        self._on_close = on_close
         if session is None:
             body_lines = [urwid.Text("No session selected.")]
         else:
@@ -330,31 +352,16 @@ class SessionInfoModal(urwid.WidgetWrap):
             if running_label:
                 body_lines.append(urwid.Divider())
                 body_lines.append(urwid.Text(("live", f"▶ running in tmux: {running_label}")))
-        body_lines.append(urwid.Divider())
-        body_lines.append(_action_legend([
-            ("↵ / Esc", "close"),
-        ]))
-        super().__init__(urwid.LineBox(urwid.Filler(urwid.Pile(body_lines), valign="top"), title="Session info"))
-
-    def selectable(self) -> bool:
-        return True
-
-    def keypress(self, size, key):
-        if key in ("enter", "esc"):
-            self._on_close()
-            return None
-        return key
+        super().__init__(body_lines, title="Session info", on_close=on_close)
 
 
 
-class RunningInfoModal(urwid.WidgetWrap):
+class RunningInfoModal(_ReadOnlyInfoModal):
     """Read-only popup with details of a running session entry."""
 
     def __init__(self, label: str, tmux_name: str, project: "Project | None",
                  session: "SessionMeta | None", is_placeholder: bool,
                  on_close: Callable[[], None]) -> None:
-        self._on_close = on_close
-
         body_lines: list = [
             urwid.Text(("title", label), wrap="clip"),
             urwid.Divider(),
@@ -378,21 +385,8 @@ class RunningInfoModal(urwid.WidgetWrap):
             body_lines.append(urwid.Divider())
             body_lines.append(urwid.Text(("dim", "(session metadata not available)")))
 
-        body_lines.append(urwid.Divider())
-        body_lines.append(_action_legend([
-            ("↵ / Esc", "close"),
-        ]))
-        super().__init__(urwid.LineBox(urwid.Filler(urwid.Pile(body_lines), valign="top"), title="Running session"))
-
-
-    def selectable(self) -> bool:
-        return True
-
-    def keypress(self, size, key):
-        if key in ("enter", "esc"):
-            self._on_close()
-            return None
-        return key
+        super().__init__(
+            body_lines, title="Running session", on_close=on_close)
 
 
 class DeleteConfirmModal(urwid.WidgetWrap):
@@ -479,24 +473,28 @@ class YoloConfirmModal(urwid.WidgetWrap):
         self._on_confirm = on_confirm
         self._on_cancel = on_cancel
         rows = [
-            _Selectable(urwid.Text("Enable Codex auto-run (YOLO)?", align="center")),
-            _Selectable(urwid.Divider()),
-            _Selectable(urwid.Text(
+            urwid.Text("Enable Codex auto-run (YOLO)?", align="center"),
+            urwid.Divider(),
+            urwid.Text(
                 "Codex will run shell commands WITHOUT approval prompts and "
                 "WITHOUT sandboxing — full access to your files. Only enable "
-                "this if you trust what you run here.", align="center")),
-            _Selectable(urwid.Divider()),
-            _Selectable(urwid.Text(
+                "this if you trust what you run here.", align="center"),
+            urwid.Divider(),
+            urwid.Text(
                 ("dim", "Change later in ~/.config/railmux/settings.json"),
-                align="center")),
-            _Selectable(urwid.Divider()),
-            _Selectable(_action_legend([
+                align="center"),
+        ]
+        footer = urwid.Pile([
+            urwid.Divider(),
+            _action_legend([
                 ("y", "enable"),
                 ("↵ / n / Esc", "keep off"),
-            ], align="center")),
-        ]
+            ], align="center", wrap="space"),
+        ])
         self._listbox = urwid.ListBox(urwid.SimpleFocusListWalker(rows))
-        super().__init__(urwid.LineBox(self._listbox, title="Codex auto-run"))
+        self._footer = footer
+        frame = urwid.Frame(body=self._listbox, footer=footer, focus_part="body")
+        super().__init__(urwid.LineBox(frame, title="Codex auto-run"))
 
     def selectable(self) -> bool:
         return True
@@ -508,33 +506,55 @@ class YoloConfirmModal(urwid.WidgetWrap):
         if key in ("n", "N", "esc", "enter"):
             self._on_cancel()
             return None
-        if key in ("up", "down"):
-            self._listbox.keypress(size, key)
+        if key in ("up", "down", "page up", "page down", "home", "end"):
+            inner_cols = max(1, size[0] - 2)
+            footer_rows = self._footer.rows((inner_cols,))
+            inner_rows = max(1, size[1] - 2 - footer_rows)
+            self._listbox.keypress((inner_cols, inner_rows), key)
             return None
         return key
 
 
 class RenameModal(urwid.WidgetWrap):
-    """Inline rename popup with a terminal-standard Ctrl-U clear action."""
+    """Scrollable rename field with an always-visible action legend."""
 
     def __init__(self, current_title: str,
                  on_submit: Callable[[str], None],
                  on_cancel: Callable[[], None]) -> None:
         self._on_submit = on_submit
         self._on_cancel = on_cancel
-        self._edit = urwid.Edit(caption="title: ", edit_text=current_title)
-        body = urwid.Pile([
-            urwid.Text("Rename session:"),
+        self._edit = urwid.Edit(
+            caption="title: ", edit_text=current_title, wrap="any")
+        self._intro = urwid.Text("Rename session:")
+        self._walker = urwid.SimpleFocusListWalker([
+            self._intro,
             urwid.Divider(),
             self._edit,
-            urwid.Divider(),
-            _action_legend([
-                ("↵", "save"),
-                ("Ctrl+U", "clear"),
-                ("Esc", "cancel"),
-            ]),
         ])
-        super().__init__(urwid.LineBox(urwid.Filler(body, valign="top"), title="Rename"))
+        self._walker.set_focus(2)
+        self._listbox = urwid.ListBox(self._walker)
+        self._actions = _action_legend([
+            ("↵", "save"),
+            ("Ctrl+U", "clear"),
+            ("Esc", "cancel"),
+        ])
+        footer = urwid.Pile([
+            urwid.Divider(),
+            self._actions,
+        ])
+        body = urwid.Frame(
+            body=self._listbox,
+            footer=footer,
+            focus_part="body",
+        )
+        super().__init__(urwid.LineBox(body, title="Rename"))
+
+    def preferred_height(self, maxcol: int) -> int:
+        """Grow for wrapped titles, then scroll while keeping actions visible."""
+        inner = max(1, maxcol - 2)
+        body_rows = self._intro.rows((inner,)) + 1 + self._edit.rows((inner,))
+        footer_rows = 1 + self._actions.rows((inner,))
+        return min(18, max(10, body_rows + footer_rows + 2))
 
     def selectable(self) -> bool:
         return True

@@ -281,6 +281,21 @@ def test_hintbar_narrow_splits_into_multiple_pages():
     assert len(bar._pages) >= 2, "narrow width should need multiple pages"
 
 
+def test_hintbar_keeps_each_shortcut_whole_during_page_flip():
+    bar = HintBar()
+    bar.set_context(keymap.CTX_AGENT_P1_SIDE_BY_SIDE)
+    bar._reflow(30)
+
+    page_text = [" ".join(page) for page in bar._pages]
+    for hint in (
+        "F8 layout",
+        "F9 fullscreen",
+        "C-b Tab/← Sidebar",
+        "C-b → Pane 2",
+    ):
+        assert any(hint in page for page in page_text)
+
+
 def test_hintbar_no_paging_when_text_fits():
     """Single page when the full hint fits in 2 lines — no timer needed."""
     bar = HintBar()

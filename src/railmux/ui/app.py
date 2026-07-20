@@ -1016,6 +1016,39 @@ class App:
                 self._hint_bar.set_context(self._help_context())
         return slot
 
+    def _reconcile_focus_from_tmux(self) -> bool:
+        """Converge delayed terminal focus reports on tmux's active pane.
+
+        Some terminal hosts can deliver ``focus in`` after a programmatic
+        select-pane has already moved input to an agent.  Treating that report
+        as final leaves Railmux's model on the sidebar and every agent border
+        gray.  The tmux window is the routing authority, so focus events and
+        the periodic refresh both use this bounded reconciliation.
+        """
+        owner = getattr(self, "_railmux_pane_id", None)
+        if owner is None:
+            return False
+        active_pane = tmux_ctl.active_pane_id(owner)
+        if active_pane is None:
+            return False
+        if active_pane == owner:
+            # Double-click paints agent focus just before its delayed
+            # select-pane. Do not undo that intentional transitional frame.
+            if getattr(self, "_double_focus_visual_pending", False):
+                return True
+            if not getattr(self, "_railmux_has_focus", True):
+                self._sync_target_slot_from_tmux(previous=True)
+                self._set_railmux_focus(True, force_border=True)
+            return True
+
+        slot = self._agent_workspace().slot_for_pane(active_pane)
+        if slot is None:
+            return False
+        self._sync_target_slot_from_tmux()
+        if getattr(self, "_railmux_has_focus", True):
+            self._set_railmux_focus(False, force_border=True)
+        return True
+
     def _schedule_right_pane_focus_after_double(self) -> None:
         """Show the right-focus state now, then move tmux focus once settled."""
         self._cancel_pending_double_focus(restore_visual=False)
@@ -1157,14 +1190,17 @@ class App:
                 # Stray close with no matching open — nothing to do.
                 pass
             elif key == "focus in":
-                # Ignore the late left-pane report while a double-click transfer
-                # is pending; cancellation restores it for newer sidebar input.
-                if not self._double_focus_visual_pending:
-                    self._sync_target_slot_from_tmux(previous=True)
-                    self._set_railmux_focus(True)
+                # Cursor/terminal focus reports can arrive after a tmux pane
+                # transition. Reconcile against the active pane instead of
+                # allowing a stale report to gray every agent border.
+                if not self._reconcile_focus_from_tmux():
+                    if not self._double_focus_visual_pending:
+                        self._sync_target_slot_from_tmux(previous=True)
+                        self._set_railmux_focus(True)
             elif key == "focus out":
-                self._sync_target_slot_from_tmux()
-                self._set_railmux_focus(False)
+                if not self._reconcile_focus_from_tmux():
+                    self._sync_target_slot_from_tmux()
+                    self._set_railmux_focus(False)
                 # Belt-and-suspenders: if the paste-end marker was lost the
                 # sidebar would swallow every key forever.  Focus leaving the
                 # pane is a natural reset point — the paste is over.
@@ -2894,6 +2930,8 @@ class App:
             ExitProgressModal(len(self._running), soft=soft),
             width=44,
             height=7,
+            fixed_width=True,
+            fixed_height=True,
         )
         if self._loop is not None:
             try:
@@ -4346,6 +4384,11 @@ class App:
                        on_click_outside: Callable[[], None] | None = None) -> None:
         if self._loop is None:
             return
+        columns, rows = 80, 24
+        try:
+            columns, rows = self._loop.screen.get_cols_rows()
+        except Exception:
+            pass
         # When the right pane is open the railmux sidebar is only ~30% of the
         # terminal.  Bump relative dimensions so overlays stay readable.
         # Fixed-pixel overlays (context menus) are left alone.
@@ -4353,8 +4396,17 @@ class App:
             width = int(width * 1.6)
         if not fixed_height and self._right_pane_open():
             height = int(height * 1.35)
-        width_spec = width if fixed_width else ("relative", width)
-        height_spec = height if fixed_height else ("relative", height)
+        # Never let a proportional overlay grow beyond its pane after the
+        # narrow-sidebar multiplier. Fixed menus likewise shrink inside the
+        # available pane instead of being clipped on both sides.
+        width_spec = (
+            min(width, max(1, columns - 2))
+            if fixed_width else ("relative", min(96, max(1, width)))
+        )
+        height_spec = (
+            min(height, max(1, rows - 2))
+            if fixed_height else ("relative", min(96, max(1, height)))
+        )
         overlay_cls = _CloseOnClickOverlay if click_outside_to_close else urwid.Overlay
         kw = {}
         if click_outside_to_close:
@@ -4367,17 +4419,18 @@ class App:
         )
         self._loop.widget = overlay
 
-    def _show_delete_confirm(self, modal: DeleteConfirmModal) -> None:
-        """Show a compact confirmation that grows only for wrapped content."""
+    def _show_preferred_height_modal(
+        self, modal: urwid.Widget, *, width: int,
+    ) -> None:
+        """Size a wrapping/scrolling modal from its rendered content."""
         columns, rows = 80, 24
         if self._loop is not None:
             try:
                 columns, rows = self._loop.screen.get_cols_rows()
             except Exception:
                 pass
-        width = 54
         effective_width = min(
-            100,
+            96,
             int(width * 1.6) if self._right_pane_open() else width,
         )
         overlay_columns = max(8, columns * effective_width // 100)
@@ -4392,30 +4445,17 @@ class App:
             fixed_height=True,
         )
 
+    def _show_delete_confirm(self, modal: DeleteConfirmModal) -> None:
+        """Show a compact confirmation that grows only for wrapped content."""
+        self._show_preferred_height_modal(modal, width=54)
+
     def _show_quit_confirm(self, modal: QuitConfirmModal) -> None:
         """Show the quit choices at a height derived from their wrapped text."""
-        columns, rows = 80, 24
-        if self._loop is not None:
-            try:
-                columns, rows = self._loop.screen.get_cols_rows()
-            except Exception:
-                pass
-        width = 50
-        effective_width = min(
-            100,
-            int(width * 1.6) if self._right_pane_open() else width,
-        )
-        overlay_columns = max(8, columns * effective_width // 100)
-        height = min(
-            modal.preferred_height(overlay_columns),
-            max(1, rows - 2),
-        )
-        self._show_overlay(
-            modal,
-            width=width,
-            height=height,
-            fixed_height=True,
-        )
+        self._show_preferred_height_modal(modal, width=50)
+
+    def _show_rename_modal(self, modal: RenameModal) -> None:
+        """Keep wrapped existing titles and the rename actions reachable."""
+        self._show_preferred_height_modal(modal, width=50)
 
     def _close_modal(self) -> None:
         if self._loop is not None:
@@ -4984,9 +5024,7 @@ class App:
     def _refresh_impl(self) -> None:
         self._retry_pending_codex_recovery()
         self._scroll_manager.maintain()
-        if (not getattr(self, "_railmux_has_focus", True)
-                and self._agent_workspace().secondary.is_open):
-            self._sync_target_slot_from_tmux()
+        self._reconcile_focus_from_tmux()
         self._retry_pending_divider_style()
         transport = self._display_transport()
         if transport.outer_session_lost():
@@ -5946,7 +5984,7 @@ class App:
             on_submit=lambda new_title, s=session: self._do_rename(s, new_title),
             on_cancel=self._close_modal,
         )
-        self._show_overlay(modal, width=50, height=22)
+        self._show_rename_modal(modal)
 
     def _do_rename(self, session: SessionMeta, new_title: str) -> None:
         """Persist a rename for the session.
@@ -6083,7 +6121,7 @@ class App:
             on_submit=lambda new_title, s=session: self._do_rename(s, new_title),
             on_cancel=self._close_modal,
         )
-        self._show_overlay(modal, width=50, height=22)
+        self._show_rename_modal(modal)
 
     def _do_context_info(self, session: SessionMeta) -> None:
         r = self._running.get(session.session_id)
@@ -6623,14 +6661,10 @@ class App:
                         "custom root wheel bindings.",
                         "warn",
                     )
-                # Unbind tmux's built-in right-click context menu so right-click
-                # passes through to the application (Claude / less) instead of
-                # flashing display-menu.  Left-click (MouseDown1Pane) is left at
-                # its default: tmux switches pane focus then forwards the event.
-                _sp.run(
-                    ["tmux", "unbind-key", "-T", "root", "MouseDown3Pane"],
-                    stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
-                )
+                # Shared binding ownership below scopes right-click forwarding
+                # to Railmux windows and preserves the user's original command
+                # everywhere else. Left-click keeps tmux's stock
+                # select-pane-and-forward behavior.
                 # The outer tmux status bar is now railmux's only status surface (the
                 # in-pane StatusBar was removed). Apply the static options (window
                 # list blanked, bar forced on, length cap) here; the bar background

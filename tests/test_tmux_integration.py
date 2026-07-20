@@ -836,12 +836,15 @@ def test_real_tmux_binding_manager_round_trip_and_user_reload(
     )
     original = tmux_ctl.read_root_function_bindings()
     original_prefix_tab = tmux_ctl.read_prefix_target_binding()
+    original_right_click = tmux_ctl.read_root_right_click_binding()
     assert original["F8"] is not None and original["F9"] is None
 
     manager = SharedTmuxBindingManager("integration-server", owner_pane)
     assert manager.open()
     current = tmux_ctl.read_root_function_bindings()
     current_prefix_tab = tmux_ctl.read_prefix_target_binding()["Tab"]
+    current_right_click = (
+        tmux_ctl.read_root_right_click_binding()["MouseDown3Pane"])
     assert all(
         binding is not None
         and "railmux-function-forward-v1-" in binding
@@ -852,8 +855,13 @@ def test_real_tmux_binding_manager_round_trip_and_user_reload(
     assert "railmux-target-toggle-v1-" in current_prefix_tab
     assert tmux_ctl.RAILMUX_CONTROLLER_OPTION in current_prefix_tab
     assert tmux_ctl.RAILMUX_TARGET_OPTION in current_prefix_tab
+    assert current_right_click is not None
+    assert "railmux-right-click-forward-v1-" in current_right_click
+    assert "select-pane -t =" in current_right_click
+    assert "send-keys -M" in current_right_click
     assert tmux_ctl.show_window_user_option(
         owner_pane, tmux_ctl.RAILMUX_CONTROLLER_OPTION) == owner_pane
+    subprocess.run(["tmux", "set-option", "-g", "mouse", "on"], check=True)
 
     # Installation alone does not exercise if-shell's second parsing pass.
     # Send a real F8 through an attached client's root key table and prove it
@@ -862,7 +870,7 @@ def test_real_tmux_binding_manager_round_trip_and_user_reload(
         pytest.skip("script(1) is required to emulate an attached client")
     subprocess.run(
         ["tmux", "respawn-pane", "-k", "-t", owner_pane,
-         "bash --noprofile --norc"],
+         "printf '\\033[?1000h\\033[?1006h'; exec bash --noprofile --norc"],
         check=True,
     )
     other_pane = subprocess.check_output(
@@ -901,6 +909,22 @@ def test_real_tmux_binding_manager_round_trip_and_user_reload(
                 text=True,
             )
         )
+        # A right-click over an unfocused mouse-aware Railmux pane must select
+        # that pointer pane before forwarding the event. This executes the
+        # wrapper's second parsing pass; inspecting list-keys alone would not
+        # catch a routing command that installs but cannot run.
+        assert client_process.stdin is not None
+        client_process.stdin.write(b"\x1b[<2;2;2M")
+        client_process.stdin.flush()
+        assert _wait_until(
+            lambda: tmux_ctl.active_pane_id(owner_pane) == owner_pane)
+        subprocess.run(
+            ["tmux", "respawn-pane", "-k", "-t", owner_pane,
+             "bash --noprofile --norc"],
+            check=True,
+        )
+        subprocess.run(
+            ["tmux", "select-pane", "-t", other_pane], check=True)
         subprocess.run(
             ["tmux", "send-keys", "-K", "-c", client_name, "F8"],
             check=True,
@@ -955,6 +979,7 @@ def test_real_tmux_binding_manager_round_trip_and_user_reload(
     assert restored["F8"] == original["F8"]
     assert restored["F9"] is not None and "new-user-f9" in restored["F9"]
     assert tmux_ctl.read_prefix_target_binding() == original_prefix_tab
+    assert tmux_ctl.read_root_right_click_binding() == original_right_click
     assert tmux_ctl.show_window_user_option(
         owner_pane, tmux_ctl.RAILMUX_CONTROLLER_OPTION) is None
 

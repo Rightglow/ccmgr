@@ -1135,11 +1135,14 @@ _SCROLL_KEYS = ("WheelUpPane", "WheelDownPane")
 ScrollBindingBackup = dict[tuple[str, str], Optional[str]]
 RootWheelBindingBackup = dict[str, Optional[str]]
 RootFunctionBindingBackup = dict[str, Optional[str]]
+RootRightClickBindingBackup = dict[str, Optional[str]]
 PrefixTargetBindingBackup = dict[str, Optional[str]]
 _ROOT_WHEEL_KEYS = ("WheelUpPane", "WheelDownPane")
 _ROOT_WHEEL_MARKER = "railmux-wheel-forward-v1"
 _ROOT_FUNCTION_KEYS = ("F8", "F9")
 _ROOT_FUNCTION_MARKER = "railmux-function-forward-v1"
+_ROOT_RIGHT_CLICK_KEY = "MouseDown3Pane"
+_ROOT_RIGHT_CLICK_MARKER = "railmux-right-click-forward-v1"
 _PREFIX_TARGET_KEY = "Tab"
 _PREFIX_TARGET_MARKER = "railmux-target-toggle-v1"
 RAILMUX_CONTROLLER_OPTION = "@railmux_controller_pane"
@@ -1486,6 +1489,126 @@ def restore_root_function_bindings(
                     os.unlink(path)
         except (OSError, subprocess.CalledProcessError, FileNotFoundError):
             pass
+
+
+def read_root_right_click_binding() -> RootRightClickBindingBackup:
+    """Capture the root-table binding that owns right-click routing."""
+    return {
+        _ROOT_RIGHT_CLICK_KEY:
+        _read_key_binding("root", _ROOT_RIGHT_CLICK_KEY),
+    }
+
+
+def prepare_root_right_click_binding() -> RootRightClickBindingBackup | None:
+    """Return a replayable right-click binding safe for a scoped wrapper."""
+    if tmux_version() < (2, 7):
+        return None
+    backup = read_root_right_click_binding()
+    binding = backup[_ROOT_RIGHT_CLICK_KEY]
+    if binding and _ROOT_RIGHT_CLICK_MARKER in binding:
+        return None
+    if binding is not None:
+        try:
+            _binding_command(binding)
+        except ValueError:
+            return None
+    return backup
+
+
+def set_root_right_click_forwarding(
+    backup: RootRightClickBindingBackup, token: str,
+) -> bool:
+    """Select and forward right-click only inside a Railmux window.
+
+    tmux's stock left-click binding selects the pane under the pointer before
+    forwarding the mouse event.  Right-click normally opens tmux's own menu,
+    and merely unbinding it leaves an unfocused Railmux sidebar unable to
+    receive the event.  This wrapper gives Railmux the same select-and-forward
+    behavior while replaying the exact prior binding in every other window.
+    """
+    marker = f"{_ROOT_RIGHT_CLICK_MARKER}-{token}"
+    condition = (
+        "#{&&:#{mouse_any_flag},"
+        "#{!=:#{@railmux_controller_pane},},"
+        f"#{{==:{marker},{marker}}}}}"
+    )
+    original = backup.get(_ROOT_RIGHT_CLICK_KEY)
+    try:
+        fallback = (
+            _binding_command(original)
+            if original is not None else 'run-shell "true"'
+        )
+        subprocess.check_call(
+            [
+                "tmux", "bind-key",
+                "-T", "root", _ROOT_RIGHT_CLICK_KEY,
+                "if-shell", "-F", "-t", "=", condition,
+                "select-pane -t = ; send-keys -M",
+                fallback,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except (ValueError, subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
+def root_right_click_binding_owned_by(token: str) -> bool:
+    marker = f"{_ROOT_RIGHT_CLICK_MARKER}-{token}"
+    binding = read_root_right_click_binding().get(_ROOT_RIGHT_CLICK_KEY)
+    return bool(
+        binding
+        and marker in binding
+        and RAILMUX_CONTROLLER_OPTION in binding
+        and "select-pane -t =" in binding
+        and "send-keys -M" in binding
+    )
+
+
+def root_right_click_binding_is_original_or_owned(
+    binding: str | None,
+    original: str | None,
+    token: str,
+) -> bool:
+    if binding == original:
+        return True
+    marker = f"{_ROOT_RIGHT_CLICK_MARKER}-{token}"
+    return bool(binding and marker in binding)
+
+
+def restore_root_right_click_binding(
+    backup: RootRightClickBindingBackup, *, token: str,
+) -> None:
+    """Restore right-click only while the live wrapper is still ours."""
+    live = read_root_right_click_binding().get(_ROOT_RIGHT_CLICK_KEY)
+    marker = f"{_ROOT_RIGHT_CLICK_MARKER}-{token}"
+    if live is None or marker not in live:
+        return
+    original = backup.get(_ROOT_RIGHT_CLICK_KEY)
+    try:
+        if original is None:
+            subprocess.check_call(
+                ["tmux", "unbind-key", "-T", "root",
+                 _ROOT_RIGHT_CLICK_KEY],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            fd, path = tempfile.mkstemp(
+                prefix="railmux-root-right-click-", suffix=".conf")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(original + "\n")
+                subprocess.check_call(
+                    ["tmux", "source-file", path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            finally:
+                os.unlink(path)
+    except (OSError, subprocess.CalledProcessError, FileNotFoundError):
+        pass
 
 
 def read_prefix_target_binding() -> PrefixTargetBindingBackup:
