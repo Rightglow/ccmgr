@@ -18,90 +18,27 @@ old identity cannot kill a newly created session reusing the same name. The
 macOS/no-procfs path deliberately favors a recoverable unresolved entry over a
 heuristic adoption when its complete pre-launch fence is unavailable.
 
-## Under discussion
+## Follow-up candidates
 
-### Dual-agent workspace
+### Dual-agent workspace follow-ups
 
-A shipped UI exposes the prepared primary/secondary `AgentWorkspace`
-model through `F8`, which can create an empty Pane 2 and cycles single,
-side-by-side, and stacked layouts. Single-click/`␣` previews stopped rows or
-switches running rows, while double-click/Enter opens and transfers focus in the
-Target pane remembered from tmux focus. In a dual layout, sidebar focus removes
-agent focus while preserving that Target pane for subsequent actions. Returning
-to single remembers the collapsed agent without stopping it. Validate
-Claude+Claude, Codex+Codex, mixed-provider layouts, and native tmux focus-border
-behavior on macOS and Linux. Same-instance soft restart now restores the full
-validated workspace; cross-instance portable state remains intentionally
-single-display and non-authoritative.
-
-Open questions:
-
-- Whether swapping primary/secondary belongs in the first public iteration.
-- Whether the current 50x12 minimum and 80x20 preferred size thresholds remain
-  comfortable across the supported agent TUIs.
+Railmux 0.2 ships the bounded two-slot workspace, layout cycling, Target-pane
+routing, responsive sidebar sizing, native focus presentation, and full managed
+soft-restart recovery described in `docs/ARCHITECTURE.md`. Explicitly swapping
+the physical primary/secondary positions is deferred because it does not yet
+solve a demonstrated workflow problem. Revisit only if field use shows that the
+current spatial navigation is insufficient. The 50x12 minimum and 80x20
+preferred pane thresholds may be tuned from real-agent feedback without
+changing the workspace model.
 
 ### Default swap transport follow-up
 
-The default transport replaces the right-side nested `tmux attach-session`
-client with the real agent pane. It uses a tracked placeholder plus
-cross-session `swap-pane`, durable tmux metadata, and a zero-extra-pane
-session-group keeper. The keeper preserves a displayed agent even if the
-original outer session is directly killed; startup repair returns only exact
-marked panes. Nested attach remains an explicit compatibility choice and the
-automatic fallback for unsupported topology, an external client, an unmanaged
-outer session, old tmux, or any unproven operation. See
-`docs/DENESTED_AGENT_PANE.md` for evidence.
-
-This is primarily a responsiveness project, not just an internal refactor.
-Codex over the same SSH connection should feel close to a directly launched
-Codex: the first wheel input should paint without a fixed 500 ms delay, a burst
-should render only the newest useful viewport at roughly 20--30 FPS, and
-scrolling must stop promptly when input stops instead of replaying queued
-intermediate frames. Benchmark the current nested path, the prototype, and a
-direct Codex baseline at the same pane size and SSH link before choosing the
-default frame budget.
-
-The low-risk scheduling step remains independent of pane migration:
-copy-mode now renders the leading wheel update immediately and coalesces the
-remainder of a burst on a 100 ms frame (10 FPS). A faster user-configurable
-frame still requires real-provider measurements. Do not add periodic ping,
-SSH/TCP probing, or automatic frame-rate selection: the server cannot observe
-local terminal paint, so those signals cannot reliably choose a redraw budget.
-
-Lifecycle invariants for the prototype:
-
-- Detached agent sessions remain the source of process persistence; removing
-  the nested display client must not make an agent a child of Railmux.
-- Graceful close and soft restart swap every displayed agent back to its home
-  session before the sidebar exits.
-- Persist enough pane/home/placeholder identity to recover after SIGKILL and
-  return a stranded agent pane on the next launch without killing it.
-- Switching, closing a display slot, transcript preview, terminal placement,
-  F9, and future dual-agent layouts must never kill the background agent.
-- Refuse or safely fall back to nested attach when the agent session has an
-  independent attached client or its pane topology is not the supported
-  single-agent shape.
-- Keep scroll routing scoped to marked agent panes. Evolve the current fixed
-  100 ms frame toward a configurable 33--50 ms interval only after measurements
-  justify it; disabling coalescing remains a diagnostic fallback, not the
-  intended performance solution.
-
-Proven implementation facts:
-
-- Cross-session swap and direct-outer-kill recovery pass on Linux with tmux 2.7
-  and 3.4. The CI smoke runs the same private-socket path on Linux and macOS.
-- Primary and secondary ownership records are separate, and one real pane
-  cannot be claimed by both slots; the dual-agent interaction exposes
-  secondary ownership and same-instance soft restart restores both slots after
-  validating their exact local identities.
-- Real tmux active/last-pane focus drives the workspace Target pane. Both-slot
-  liveness reconciliation safely rebuilds a missing primary or collapses a
-  missing secondary without relabelling swap markers in memory.
-- Total PTY count does not fall because the hidden home placeholder replaces
-  the visible nested-client PTY. The visible update path does remove the nested
-  client/parser/composition hop.
-
-Follow-up evidence and compatibility work:
+`swap` is the shipped default; `nested` remains an explicit compatibility
+choice and the automatic fallback whenever exact pane ownership cannot be
+proven. Its transaction and recovery invariants are authoritative in
+`docs/ARCHITECTURE.md`, with reproducible evidence in
+`docs/DENESTED_AGENT_PANE.md`. Remaining work is field evidence, not a second
+default-selection experiment:
 
 - Acceptable real-provider geometry/reflow, especially on tmux 2.7/2.8 where
   `resize-window` is unavailable and with long inline Codex transcripts.
@@ -111,9 +48,10 @@ Follow-up evidence and compatibility work:
   output, clipboard/mouse behavior, and CPU. A reproducible local synthetic
   server benchmark now places swap close to direct and consistently ahead of
   nested marker observation. It cannot observe client terminal paint or real
-  providers, so it must not be cited as proof of perceived latency. If same-link
-  client-paint results show a material regression for both Codex and Claude,
-  reconsider the default rather than carry transport complexity by inertia.
+  providers, so it must not be cited as proof of perceived latency.
+- Whether real measurements justify changing the current 100 ms copy-mode
+  coalescing frame. Do not infer a redraw budget from ping or SSH/TCP metrics:
+  the server cannot observe local terminal paint.
 
 ### Codex interrupt transcript replay
 
@@ -126,8 +64,8 @@ back to the prompt.
 Do not silently force alternate-screen mode or truncate Codex history to hide
 this: both change native scrollback/copy behavior. Possible experiments are an
 explicit, documented Codex reflow-row limit, a future tmux version with proven
-application synchronized-output support, and the de-nested pane prototype
-above. Any workaround must remain opt-in until its history tradeoff and Codex
+application synchronized-output support, and the existing swap transport.
+Any workaround must remain opt-in until its history tradeoff and Codex
 version compatibility are clear.
 
 ### Compact/portrait navigation
@@ -154,22 +92,6 @@ status line could move to the top in compact mode and act as the small feedback/
 navigation surface; a dedicated menu pane would cost space and add another
 focus target. This remains a hypothesis to prototype, not an agreed design.
 
-### Sidebar chrome alternatives
-
-The current three independent `LineBox` sections are structurally correct and
-keep per-pane focus obvious, but they repeat adjacent top/bottom borders and
-cost two more rows than a shared container. Prototype a single outer frame with
-two labelled section dividers (`Projects`, `Sessions`, `Running`) before the
-dual-agent UI increases layout pressure. The experiment must preserve distinct
-per-section focus chrome, mouse-wheel routing over titles/dividers, and readable
-degradation at the existing minimum terminal size.
-
-Do not treat small vertical-line seams on macOS as proof of a missing canvas
-cell: compare Unicode versus `pane-border-lines simple`, terminal fonts, and
-`pane-border-indicators` first. Railmux should not take ownership of those tmux
-options without reproducible evidence that they cause the artifact and without
-exact restoration of the user's prior values.
-
 ### Provider adapters
 
 The mode registry now supports a third stable mode and independent view state.
@@ -184,7 +106,23 @@ Soft-restart persistence is split between exact-owner runtime recovery and a
 portable per-mode view. Runtime files are keyed by tmux server lifetime and
 immutable pane ID, so same-named sessions on private servers and multiple
 windows on one server cannot restore one another. Legacy ownerless files
-migrate view fields only; process recovery remains fail-closed.
+migrate view fields only; process recovery remains fail-closed. The uniquely
+managed CLI session uses a same-server, dead-owner handoff because its
+controller pane is recreated during a graceful restart.
+
+### Dual-agent workspace
+
+The primary/secondary workspace ships with single, side-by-side, and stacked
+layouts, one explicit Target pane, shared mouse/keyboard actions, responsive
+sidebar sizing, liveness reconciliation, and managed soft-restart restoration.
+The same detached agent cannot be displayed in both slots.
+
+### Unified sidebar chrome
+
+Projects, Sessions, and Running share one pair of vertical rails and labelled
+horizontal boundaries. Focus outlines, pointer-local scrolling, stable weighted
+heights, narrow-title truncation, and neutral agent-focus presentation no
+longer depend on three independent boxes.
 
 ### Background Codex session index
 
@@ -199,6 +137,6 @@ limitations are recorded in `docs/BACKGROUND_SESSION_INDEX.md`.
 
 Railmux now uses distinct meanings for grass-green pane chrome and live-session
 titles, the deep-green cursor, the slate persistent target, and red/yellow/green
-agent status dots. The shared two-pane divider is painted continuously. A
-dual-agent layout must still prototype border ownership rather than assuming
-tmux active-border style can outline one slot.
+agent status dots. The focused agent uses native tmux border colour and, where
+supported, directional indicators; sidebar focus returns agent borders to gray
+while the compact workspace map retains the Target pane.

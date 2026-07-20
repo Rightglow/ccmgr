@@ -353,8 +353,9 @@ routing with focus, selection, or history.
   presenting it as current input focus. A single layout uses `▣` because P1 is
   the only possible target. While side-by-side Pane 1 has keyboard focus, the
   hint bar includes `C-b → Pane 2`; Pane 2 shows `C-b ← Pane 1`. Direct P1/P2
-  focus changes refresh that hint with the workspace map. Teardown restores the
-  exact inherited or explicit `pane-border-indicators` window option. Border
+  focus changes refresh that hint with the workspace map and briefly confirm
+  `Agent Pane 1 focused` or `Agent Pane 2 focused`. Teardown restores the exact
+  inherited or explicit `pane-border-indicators` window option. Border
   colours and indicators form one applied state: if either tmux update fails,
   the periodic refresh retries both until the visible focus state converges.
   Hint-bar directions follow geometry: left/right names side-by-side neighbors,

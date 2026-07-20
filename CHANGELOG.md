@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-20
+
 ### Changed
 
 - Document terminal-side right-click and F8/F9 forwarding, including the iTerm2
@@ -74,7 +76,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resolve the Target pane from real tmux focus (including the last pane
   when returning to the sidebar). F9, transcript preview, terminal placement,
   status/attention targeting, scrolling, and soft-restart display selection no
-  longer silently default to Pane 1.
+  longer silently default to Pane 1. Moving directly between agent panes now
+  briefly confirms `Agent Pane 1 focused` or `Agent Pane 2 focused`.
 - Reconcile liveness and outer-pane disappearance across both slots and both
   providers. A lost Pane 2 collapses or rebuilds safely; if Pane 1 disappears,
   Railmux returns Pane 2 home before rebuilding or promoting its surviving
@@ -407,7 +410,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial PyPI release under the Railmux name.
 
-[Unreleased]: https://github.com/Rightglow/Railmux/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/Rightglow/Railmux/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Rightglow/Railmux/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/Rightglow/Railmux/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/Rightglow/Railmux/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Rightglow/Railmux/releases/tag/v0.1.1

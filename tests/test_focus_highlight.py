@@ -191,6 +191,7 @@ def test_agent_to_agent_click_repaints_layout_indicator(monkeypatch):
     app._railmux_has_focus = False
     app._apply_tmux_bar = MagicMock()
     app._hint_bar = MagicMock()
+    app._set_status = MagicMock()
     focused = ["%3"]
     monkeypatch.setattr(
         "railmux.ui.app.tmux_ctl.active_pane_id", lambda _target: focused[0])
@@ -201,12 +202,15 @@ def test_agent_to_agent_click_repaints_layout_indicator(monkeypatch):
     app._apply_tmux_bar.assert_called_once_with(app._tmux_error_bar)
     app._hint_bar.set_context.assert_called_once_with(
         keymap.CTX_AGENT_P2_SIDE_BY_SIDE)
+    app._set_status.assert_called_once_with("Agent Pane 2 focused")
 
     app._apply_tmux_bar.reset_mock()
     app._hint_bar.set_context.reset_mock()
+    app._set_status.reset_mock()
     app._sync_target_slot_from_tmux()
     app._apply_tmux_bar.assert_not_called()
     app._hint_bar.set_context.assert_not_called()
+    app._set_status.assert_not_called()
 
     focused[0] = "%2"
     app._sync_target_slot_from_tmux()
@@ -214,6 +218,7 @@ def test_agent_to_agent_click_repaints_layout_indicator(monkeypatch):
     assert app._workspace.target_slot_key == AgentWorkspace.PRIMARY
     app._hint_bar.set_context.assert_called_once_with(
         keymap.CTX_AGENT_P1_SIDE_BY_SIDE)
+    app._set_status.assert_called_once_with("Agent Pane 1 focused")
 
 
 def test_target_transition_projects_outer_pane_for_prefix_tab(monkeypatch):

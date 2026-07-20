@@ -73,8 +73,9 @@ critical cases in `tests/test_tmux_integration.py`.
 10. **Two slots.** Two distinct placeholders displayed A and B concurrently,
     then returned both home with unchanged PIDs. `AgentWorkspace` and durable
     transaction ownership reject a second claim on the same real pane. The
-    public UI still exposes only primary, but transport ownership is slot-keyed
-    for primary and secondary.
+    public UI exposes both slots through single, side-by-side, and stacked
+    layouts; transport ownership remains independently keyed for primary and
+    secondary.
 
 ## Transaction and recovery model
 
@@ -229,5 +230,3 @@ claims and scroll policy without weakening lifecycle safety.
   controlled Railmux close/preview/quit paths always return it home first.
 - Synthetic marker and switch timings are not evidence that Claude or Codex
   feels faster over SSH or that a local terminal painted sooner.
-- The public dual-agent layout and its focus/border interaction remain separate
-  roadmap work even though transport ownership is two-slot safe.

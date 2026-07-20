@@ -1016,6 +1016,10 @@ class App:
             if (hasattr(self, "_hint_bar")
                     and not self._railmux_has_focus):
                 self._hint_bar.set_context(self._help_context())
+            if not self._railmux_has_focus and not previous:
+                pane_number = (
+                    2 if slot.key == AgentWorkspace.SECONDARY else 1)
+                self._set_status(f"Agent Pane {pane_number} focused")
         return slot
 
     def _reconcile_focus_from_tmux(self) -> bool:
