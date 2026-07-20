@@ -233,6 +233,77 @@ def test_real_restart_identity_isolates_windows_sessions_and_servers(
         shutil.rmtree(second_root, ignore_errors=True)
 
 
+def test_real_managed_restart_handoff_crosses_recreated_controller_pane(
+    isolated_tmux, monkeypatch, tmp_path,
+):
+    """The CLI's replacement session must still find the saved dual layout."""
+    session_name, old_pane, socket_path = isolated_tmux
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        App, "_portable_state_path",
+        staticmethod(lambda: tmp_path / "portable.json"),
+    )
+    source = restart_state.capture_outer_identity()
+    assert source is not None and source.pane_id == old_pane
+    payload = {
+        "schema_version": restart_state.SCHEMA_VERSION,
+        "kind": "instance",
+        "owner": source.to_json(),
+        "view": restart_state.build_view({"mode": "codex"}),
+        "recovery": {
+            "right_kind": "empty",
+            "workspace": {
+                "version": 1,
+                "layout": "stacked",
+                "target": "secondary",
+                "focus": "sidebar",
+                "slots": {
+                    "primary": {"kind": "empty"},
+                    "secondary": {"kind": "empty"},
+                },
+            },
+        },
+    }
+    assert restart_state.write_instance(source, payload)
+    assert restart_state.write_managed_handoff(source)
+
+    subprocess.run(
+        ["tmux", "-S", socket_path, "new-session", "-d", "-s", "keeper",
+         "sleep 60"],
+        check=True,
+    )
+    subprocess.run(
+        ["tmux", "-S", socket_path, "kill-session", "-t", session_name],
+        check=True,
+    )
+    subprocess.run(
+        ["tmux", "-S", socket_path, "new-session", "-d", "-s", session_name,
+         "sleep 60"],
+        check=True,
+    )
+    new_pane = subprocess.check_output(
+        ["tmux", "-S", socket_path, "display-message", "-p", "-t",
+         session_name, "#{pane_id}"],
+        text=True,
+    ).strip()
+    monkeypatch.setenv("TMUX_PANE", new_pane)
+    replacement_identity = restart_state.capture_outer_identity()
+    assert replacement_identity is not None
+    assert replacement_identity.pane_id != source.pane_id
+
+    app = App.__new__(App)
+    app._restart_identity = replacement_identity
+    app._auto_launched = True
+    app._loaded_restart_source = None
+    app._loaded_restart_state_path = None
+    state = app._load_state()
+
+    assert state is not None
+    assert state["workspace"]["layout"] == "stacked"
+    assert state["workspace"]["target"] == "secondary"
+    assert app._loaded_restart_source == source
+
+
 def test_real_marked_holder_persists_identity_before_provider_runs(
     isolated_tmux, tmp_path,
 ):

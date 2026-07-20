@@ -147,6 +147,12 @@ def instance_state_path(identity: OuterTmuxIdentity) -> Path:
     return instances_dir() / f"instance-{identity.storage_key}.json"
 
 
+def managed_handoff_path(identity: OuterTmuxIdentity) -> Path:
+    """One graceful-restart pointer for the managed session on this server."""
+    return runtime_base() / "railmux" / (
+        f"managed-handoff-{identity.server_digest[:32]}.json")
+
+
 def portable_state_path() -> Path:
     return default_config_path().parent / "view-state.json"
 
@@ -222,6 +228,88 @@ def write_instance(
             json.dumps(payload, separators=(",", ":"), sort_keys=True),
             encoding="utf-8",
         )
+        return True
+    except OSError:
+        return False
+
+
+def write_managed_handoff(identity: OuterTmuxIdentity) -> bool:
+    """Publish an exact state owner for the next managed Railmux pane.
+
+    The auto-launched ``railmux`` tmux session disappears when its only
+    remaining pane exits, so its replacement receives a new immutable pane id.
+    This server-scoped pointer is written only at graceful soft-quit time; it
+    lets that replacement find the old pane-owned state without weakening the
+    normal per-pane isolation model.
+    """
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "managed-handoff",
+        "server_digest": identity.server_digest,
+        "source_owner": identity.to_json(),
+        "source_storage_key": identity.storage_key,
+    }
+    target = managed_handoff_path(identity)
+    try:
+        _ensure_private_runtime_tree()
+        atomic_write_text(
+            target,
+            json.dumps(payload, separators=(",", ":"), sort_keys=True),
+            encoding="utf-8",
+        )
+        return True
+    except OSError:
+        return False
+
+
+def read_managed_handoff(
+    current: OuterTmuxIdentity,
+) -> OuterTmuxIdentity | None:
+    """Validate a graceful handoff on the same live tmux server.
+
+    A different still-live pane can never be adopted. Same-pane handoff is
+    accepted for launchers that keep their controller pane alive.
+    """
+    raw = read_json_object(managed_handoff_path(current))
+    if (not isinstance(raw, dict)
+            or len(raw) > 6
+            or raw.get("schema_version") != SCHEMA_VERSION
+            or raw.get("kind") != "managed-handoff"
+            or raw.get("server_digest") != current.server_digest):
+        return None
+    owner = raw.get("source_owner")
+    if not isinstance(owner, dict):
+        return None
+    server_digest = _bounded_string(owner.get("server_digest"), 64)
+    server_pid = owner.get("server_pid")
+    pane_id = _bounded_string(owner.get("pane_id"), 64)
+    session_id = _bounded_string(owner.get("session_id"), 64)
+    window_id = _bounded_string(owner.get("window_id"), 64)
+    if (server_digest != current.server_digest
+            or server_pid != current.server_pid
+            or isinstance(server_pid, bool)
+            or not pane_id or not session_id or not window_id):
+        return None
+    source = OuterTmuxIdentity(
+        server_digest, server_pid, pane_id, session_id, window_id)
+    if raw.get("source_storage_key") != source.storage_key:
+        return None
+    if source.pane_id != current.pane_id:
+        pane = tmux_ctl.pane_identity(source.pane_id)
+        if pane is not None and not pane.dead:
+            return None
+    return source
+
+
+def clear_managed_handoff(
+    current: OuterTmuxIdentity,
+    expected_source: OuterTmuxIdentity,
+) -> bool:
+    """Remove only the handoff still pointing at *expected_source*."""
+    if read_managed_handoff(current) != expected_source:
+        return False
+    try:
+        managed_handoff_path(current).unlink(missing_ok=True)
         return True
     except OSError:
         return False

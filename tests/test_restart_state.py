@@ -146,6 +146,30 @@ def test_instance_write_is_atomic_and_private(tmp_path):
     )["right_kind"] == "empty"
 
 
+def test_managed_handoff_accepts_only_dead_owner_on_same_server(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(restart_state, "runtime_base", lambda: tmp_path)
+    source = _identity(pane="%1", session="$1", window="@1")
+    replacement = _identity(pane="%2", session="$2", window="@2")
+
+    assert restart_state.write_managed_handoff(source)
+    monkeypatch.setattr(
+        restart_state.tmux_ctl,
+        "pane_identity",
+        lambda _pane: MagicMock(dead=False),
+    )
+    assert restart_state.read_managed_handoff(replacement) is None
+
+    monkeypatch.setattr(
+        restart_state.tmux_ctl, "pane_identity", lambda _pane: None)
+    assert restart_state.read_managed_handoff(replacement) == source
+    assert not restart_state.clear_managed_handoff(
+        replacement, _identity(pane="%9"))
+    assert restart_state.clear_managed_handoff(replacement, source)
+    assert restart_state.read_managed_handoff(replacement) is None
+
+
 def test_tmp_fallback_hardens_every_railmux_owned_directory(
     monkeypatch, tmp_path,
 ):

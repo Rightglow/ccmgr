@@ -871,6 +871,8 @@ def test_pending_restore_consumes_state_after_success(tmp_path, monkeypatch):
         App, "_state_path", staticmethod(lambda: state_path))
     app = App.__new__(App)
     app._pending_restore_state = {"right_kind": "empty"}
+    app._loaded_restart_state_path = state_path
+    app._loaded_restart_source = None
     app._restore_right_pane = MagicMock()
 
     app._restore_pending_right_pane(None, None)

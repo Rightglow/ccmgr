@@ -375,6 +375,55 @@ def test_local_state_keeps_full_dual_workspace_but_portable_does_not(
     assert "workspace" not in portable_path.read_text()
 
 
+def test_managed_soft_restart_loads_dual_layout_after_controller_pane_changes(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(restart_state, "runtime_base", lambda: tmp_path)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.session_topology",
+        lambda _session: MagicMock(session_name="railmux"),
+    )
+    monkeypatch.setattr(
+        "railmux.restart_state.tmux_ctl.pane_identity", lambda _pane: None)
+    source = _minimal_app(selected_project=_project("dual"))
+    source._auto_launched = True
+    source._agent_workspace().layout = WorkspaceLayout.SIDE_BY_SIDE
+    source._agent_workspace().set_target(AgentWorkspace.SECONDARY)
+    source._railmux_has_focus = True
+
+    source._save_state(portable_right=True)
+    assert source._publish_managed_restart_handoff()
+
+    replacement = _minimal_app()
+    replacement._auto_launched = True
+    replacement._restart_identity = OuterTmuxIdentity(
+        server_digest=source._restart_identity.server_digest,
+        server_pid=source._restart_identity.server_pid,
+        pane_id="%2",
+        session_id="$2",
+        window_id="@2",
+    )
+    replacement._loaded_restart_source = None
+    replacement._loaded_restart_state_path = None
+
+    restored = replacement._load_state()
+
+    assert restored is not None
+    assert restored["workspace"]["layout"] == "side-by-side"
+    assert restored["workspace"]["target"] == "secondary"
+    assert replacement._loaded_restart_source == source._restart_identity
+
+    replacement._pending_restore_state = restored
+    replacement._running_recovery_ok = True
+    replacement._restore_right_pane = MagicMock(return_value=True)
+    replacement._restore_pending_right_pane(None, None)
+
+    replacement._restore_right_pane.assert_called_once_with(restored)
+    assert not restart_state.instance_state_path(
+        source._restart_identity).exists()
+    assert not restart_state.managed_handoff_path(
+        replacement._restart_identity).exists()
+
+
 def test_local_state_snapshots_actual_agent_focus_before_save(
         tmp_path, monkeypatch):
     monkeypatch.setattr(

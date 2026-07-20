@@ -598,6 +598,8 @@ class App:
         self._outer_teardown_done: bool = False
         self._exit_in_progress: bool = False
         self._pending_restore_state: dict | None = None
+        self._loaded_restart_source: restart_state.OuterTmuxIdentity | None = None
+        self._loaded_restart_state_path: Path | None = None
         self._pending_project: Project | None = None
         self._pending_scroll_session: str | None = None
         self._scroll_alarm_pending: bool = False
@@ -1317,13 +1319,18 @@ class App:
         restored = self._restore_right_pane(state)
         if not restored or not getattr(self, "_running_recovery_ok", True):
             return
-        path = self._state_path()
-        if path is None:
-            return
+        path = getattr(self, "_loaded_restart_state_path", None)
+        source = getattr(self, "_loaded_restart_source", None)
+        identity = getattr(self, "_restart_identity", None)
         try:
-            path.unlink(missing_ok=True)
+            if path is not None:
+                path.unlink(missing_ok=True)
         except OSError:
             pass
+        if identity is not None and source is not None:
+            restart_state.clear_managed_handoff(identity, source)
+        self._loaded_restart_state_path = None
+        self._loaded_restart_source = None
 
     def _schedule_scroll_acceleration(self, claude_tmux_name: str) -> None:
         """Configure scrolling after the pane switch has had a chance to draw."""
@@ -2910,6 +2917,7 @@ class App:
         # have been open for a while and placeholder bindings can resolve in
         # the meantime.
         self._save_state(portable_right=True)
+        self._publish_managed_restart_handoff()
         self._begin_exit(soft=True)
 
     def _begin_exit(self, *, soft: bool) -> None:
@@ -2962,6 +2970,29 @@ class App:
             restart_state.instance_state_path(identity)
             if identity is not None else None
         )
+
+    def _managed_restart_context(self) -> bool:
+        """Whether this pane is the CLI-owned, uniquely named Railmux UI."""
+        if not getattr(self, "_auto_launched", False):
+            return False
+        identity = getattr(self, "_restart_identity", None)
+        if identity is None:
+            return False
+        topology = tmux_ctl.session_topology(identity.session_id)
+        return topology is not None and topology.session_name == "railmux"
+
+    def _publish_managed_restart_handoff(self) -> bool:
+        """Make a successfully written local snapshot discoverable next run."""
+        identity = getattr(self, "_restart_identity", None)
+        path = self._state_path()
+        if (identity is None or path is None
+                or not self._managed_restart_context()):
+            return False
+        saved = restart_state.decode_instance(
+            restart_state.read_json_object(path), identity)
+        if saved is None:
+            return False
+        return restart_state.write_managed_handoff(identity)
 
     @staticmethod
     def _portable_state_path() -> Path:
@@ -3174,6 +3205,18 @@ class App:
                 and not isinstance(local_raw.get("schema_version"), bool)
                 and local_raw["schema_version"] > restart_state.SCHEMA_VERSION
             )
+            if local is not None:
+                self._loaded_restart_source = identity
+                self._loaded_restart_state_path = path
+            elif self._managed_restart_context():
+                source = restart_state.read_managed_handoff(identity)
+                if source is not None:
+                    source_path = restart_state.instance_state_path(source)
+                    source_raw = restart_state.read_json_object(source_path)
+                    local = restart_state.decode_instance(source_raw, source)
+                    if local is not None:
+                        self._loaded_restart_source = source
+                        self._loaded_restart_state_path = source_path
             restart_state.cleanup_stale_instances(identity)
         if portable is None and local is None:
             return None

@@ -74,6 +74,13 @@ payload repeats that owner identity and is rejected unless it matches the live
 instance. Session/window IDs are recorded as context but a move of the same
 pane does not change ownership. Different panes, windows, sessions, and private
 tmux servers therefore cannot overwrite or restore one another's local state.
+The managed CLI session is the deliberate graceful-restart exception: its
+controller pane exits with the session, so a private server-scoped handoff
+points the replacement `railmux` session at that exact former owner. The
+pointer is published only after the pane-owned snapshot validates, is accepted
+only on the same tmux server after the former pane is dead, and is removed only
+after restoration succeeds. Direct in-tmux instances retain strict
+immutable-pane ownership and cannot consume this handoff.
 
 The local schema may contain the right-pane target and validated running
 bindings. It duplicates the current sidebar view so a shared portable

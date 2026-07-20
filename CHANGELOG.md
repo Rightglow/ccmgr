@@ -88,7 +88,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rollback target, and a collapsed secondary agent. Portable state remains a
   single stable display wish with no tmux process authority; invalid content or
   newly constrained geometry degrades to branded empty or single-pane UI while
-  live agents remain discoverable in Running.
+  live agents remain discoverable in Running. Graceful restarts of the managed
+  `railmux` tmux session now explicitly hand this snapshot to its replacement
+  controller pane, whose immutable pane ID necessarily changes on relaunch.
 
 ### Fixed
 
