@@ -58,6 +58,7 @@ _HISTORY_CONTENT_PANES = 8
 _REMOTE_HELLO_TIMEOUT = 60.0
 _REMOTE_HELLO_LIMIT = 16 * 1024
 _DISPLAY_MAGIC_PREFIX = b"RMUXD"
+_REMOTE_VENV = ".local/share/railmux/ssh-venv"
 
 
 @dataclass(frozen=True)
@@ -155,7 +156,6 @@ class RemoteHello:
 
 class RemoteStartKind(Enum):
     HELLO = "hello"
-    LEGACY = "legacy"
     MISSING = "missing"
     FAILED = "failed"
     TIMEOUT = "timeout"
@@ -165,7 +165,6 @@ class RemoteStartKind(Enum):
 class RemoteStartup:
     kind: RemoteStartKind
     hello: RemoteHello | None = None
-    initial_bytes: bytes = b""
     returncode: int | None = None
 
 
@@ -216,10 +215,6 @@ def await_remote_startup(
         if magic_start >= 0:
             magic_end = magic_start + len(DISPLAY_MAGIC)
             if len(received) >= magic_end:
-                if received[magic_start:magic_end] == DISPLAY_MAGIC:
-                    return RemoteStartup(
-                        RemoteStartKind.LEGACY, initial_bytes=bytes(received)
-                    )
                 return RemoteStartup(RemoteStartKind.FAILED)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -409,14 +404,6 @@ class LocalHistoryView:
             self._next_request_id = 1
         return request_id
 
-    @staticmethod
-    def _contains(snapshot: HistorySnapshot, event: SgrMouseEvent) -> bool:
-        pointer_x, pointer_y = event.x - 1, event.y - 1
-        return (
-            snapshot.x <= pointer_x < snapshot.x + snapshot.width
-            and snapshot.y <= pointer_y < snapshot.y + snapshot.height
-        )
-
     def begin_prefetch(self, now: float) -> bytes:
         if (
             self.prefetch_pending_id is not None
@@ -484,14 +471,7 @@ class LocalHistoryView:
         self.content_cache.clear()
 
     def _route_at(self, event: SgrMouseEvent) -> HistorySnapshot | None:
-        return next(
-            (
-                route
-                for route in self.visible_routes
-                if self._contains(route, event)
-            ),
-            None,
-        )
+        return self._route_at_position(event.x - 1, event.y - 1)
 
     @staticmethod
     def _contains_position(
@@ -601,7 +581,9 @@ class LocalHistoryView:
             (
                 viewport.snapshot
                 for viewport in self.viewports.values()
-                if self._contains(viewport.snapshot, event)
+                if self._contains_position(
+                    viewport.snapshot, event.x - 1, event.y - 1
+                )
             ),
             None,
         )
@@ -921,24 +903,24 @@ def _remote_server_args(
     ]
 
 
-def _remote_launch_command(
-    remote_command: str,
-    server_args: Sequence[str],
-) -> str:
-    executable = shlex.quote(remote_command)
-    direct = shlex.join([remote_command, *server_args])
+def _remote_launch_command(server_args: Sequence[str]) -> str:
+    direct = shlex.join(["railmux", *server_args])
+    managed_python = f'"$HOME/{_REMOTE_VENV}/bin/python"'
+    managed_args = shlex.join(["-m", "railmux", *server_args])
     branches = [
-        f"if command -v {executable} >/dev/null 2>&1; "
+        f"if [ -x {managed_python} ] "
+        f"&& {managed_python} -c 'import railmux' >/dev/null 2>&1; "
+        f"then exec {managed_python} {managed_args}",
+        "elif command -v railmux >/dev/null 2>&1; "
         f"then exec {direct}",
     ]
-    if remote_command == "railmux":
-        for python in ("python3", "python"):
-            probe = shlex.join([python, "-c", "import railmux"])
-            launch = shlex.join([python, "-m", "railmux", *server_args])
-            branches.append(
-                f"elif command -v {python} >/dev/null 2>&1 "
-                f"&& {probe} >/dev/null 2>&1; then exec {launch}"
-            )
+    for python in ("python3", "python"):
+        probe = shlex.join([python, "-c", "import railmux"])
+        launch = shlex.join([python, "-m", "railmux", *server_args])
+        branches.append(
+            f"elif command -v {python} >/dev/null 2>&1 "
+            f"&& {probe} >/dev/null 2>&1; then exec {launch}"
+        )
     branches.append("else exit 127; fi")
     return "; ".join(branches)
 
@@ -950,13 +932,12 @@ def build_ssh_argv(
     width: int,
     height: int,
     fps: float,
-    remote_command: str,
     ssh_args: Sequence[str],
 ) -> list[str]:
     server_args = _remote_server_args(
         session=session, width=width, height=height, fps=fps
     )
-    command = _remote_launch_command(remote_command, server_args)
+    command = _remote_launch_command(server_args)
     return ["ssh", "-T", *ssh_args, destination, command]
 
 
@@ -975,14 +956,24 @@ def build_ssh_install_argv(
         session=session, width=width, height=height, fps=fps
     )
     requirement = f"railmux[ssh]=={version}"
-    branches: list[str] = []
+    managed_python = f'"$HOME/{_REMOTE_VENV}/bin/python"'
+    managed_install = shlex.join([
+        "-m", "pip", "install", "--upgrade", requirement,
+    ])
+    managed_launch = shlex.join(["-m", "railmux", *server_args])
+    branches = [
+        f"if [ -x {managed_python} ] "
+        f"&& {managed_python} -m pip --version >/dev/null 2>&1; "
+        f"then {managed_python} {managed_install} 1>&2 "
+        f"&& exec {managed_python} {managed_launch}; exit $?"
+    ]
     candidates = (
         (("python3", "-m", "pip"), ("python3", "-m", "railmux")),
         (("python", "-m", "pip"), ("python", "-m", "railmux")),
         (("pip3",), ("python3", "-m", "railmux")),
         (("pip",), ("python", "-m", "railmux")),
     )
-    for index, (installer, runner) in enumerate(candidates):
+    for installer, runner in candidates:
         executable = installer[0]
         runner_executable = runner[0]
         pip_probe = shlex.join([*installer, "--version"])
@@ -1002,9 +993,8 @@ def build_ssh_install_argv(
             requirement,
         ])
         launch = shlex.join([*runner, *server_args])
-        keyword = "if" if index == 0 else "elif"
         branches.append(
-            f"{keyword} {condition}; then {install} 1>&2 "
+            f"elif {condition}; then {install} 1>&2 "
             f"&& exec {launch}; exit $?"
         )
     branches.append(
@@ -1020,6 +1010,10 @@ def remote_install_help(destination: str, version: str) -> str:
         f"Install it manually on {destination}, then retry:\n"
         f"  python3 -m pip install --user --upgrade {requirement}\n"
         f"or:\n  pip3 install --user --upgrade {requirement}\n"
+        "If pip reports an externally-managed environment, use a private "
+        "environment that Railmux discovers automatically:\n"
+        f"  python3 -m venv ~/{_REMOTE_VENV}\n"
+        f"  ~/{_REMOTE_VENV}/bin/python -m pip install --upgrade {requirement}\n"
         "If that version is not published, copy the matching wheel or source "
         "checkout to the remote host and install it with the same Python."
     )
@@ -1145,7 +1139,7 @@ def _confirm_remote_install(
 def prepare_remote_process(
     args: argparse.Namespace,
     current_size: os.terminal_size,
-) -> tuple[subprocess.Popen, bytes]:
+) -> subprocess.Popen:
     """Resolve compatibility and consent before the remote attaches to tmux."""
     argv = build_ssh_argv(
         args.destination,
@@ -1153,20 +1147,11 @@ def prepare_remote_process(
         width=current_size.columns,
         height=current_size.lines,
         fps=args.fps,
-        remote_command=args.remote_command,
         ssh_args=args.ssh_arg,
     )
     process = _spawn_remote(argv)
     startup = await_remote_startup(process)
     install_version = __version__
-
-    if startup.kind is RemoteStartKind.LEGACY:
-        print(
-            "warning: the remote Railmux uses the current wire protocol but "
-            "does not report package compatibility; continuing in legacy mode",
-            file=sys.stderr,
-        )
-        return process, startup.initial_bytes
 
     install_reason: str | None = None
     if startup.kind is RemoteStartKind.MISSING:
@@ -1252,7 +1237,7 @@ def prepare_remote_process(
                 raise ProbeError(
                     "remote Railmux exited before accepting the display"
                 ) from exc
-            return process, b""
+            return process
 
     assert install_reason is not None
     if not _confirm_remote_install(args, install_reason, install_version):
@@ -1289,7 +1274,7 @@ def prepare_remote_process(
         raise ProbeError(
             "remote Railmux exited after automatic installation"
         ) from exc
-    return process, b""
+    return process
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -1309,14 +1294,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--session", default="railmux")
     parser.add_argument("--fps", type=float, default=20.0)
     parser.add_argument(
-        "--duration", type=float, default=0.0,
-        help="run time in seconds; 0 runs until Ctrl-], detach, or Railmux exits",
-    )
-    parser.add_argument(
-        "--remote-command", default="railmux",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
         "--no-mouse", action="store_true",
         help="do not capture mouse events (allows ordinary terminal selection)",
     )
@@ -1328,8 +1305,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     args.raw_argv = tuple(raw_argv)
     if not 1.0 <= args.fps <= 60.0:
         parser.error("--fps must be between 1 and 60")
-    if args.duration < 0:
-        parser.error("--duration must be non-negative")
     return args
 
 
@@ -1344,7 +1319,7 @@ def run(args: argparse.Namespace) -> int:
         raise ProbeError("local terminal must be at least 40x12")
     if current_size.columns > 1000 or current_size.lines > 500:
         raise ProbeError("local terminal exceeds SSH display limits of 1000x500")
-    process, initial_remote_bytes = prepare_remote_process(args, current_size)
+    process = prepare_remote_process(args, current_size)
 
     surface = TerminalSurface(sys.stdout.buffer, mouse=not args.no_mouse)
     decoder = ServerMessageDecoder()
@@ -1441,9 +1416,6 @@ def run(args: argparse.Namespace) -> int:
     try:
         with RawTerminal(sys.stdin.fileno()):
             while True:
-                if args.duration and time.monotonic() - started >= args.duration:
-                    local_exit = True
-                    break
                 observed_size = os.get_terminal_size(sys.stdout.fileno())
                 if observed_size != current_size:
                     if observed_size.columns < 40 or observed_size.lines < 12:
@@ -1465,10 +1437,7 @@ def run(args: argparse.Namespace) -> int:
                 events = selector.select(timeout=terminal_input.next_timeout())
                 for key, _mask in events:
                     if key.data == "remote":
-                        chunk = initial_remote_bytes + os.read(
-                            process.stdout.fileno(), 65536
-                        )
-                        initial_remote_bytes = b""
+                        chunk = os.read(process.stdout.fileno(), 65536)
                         if not chunk:
                             remote_closed = True
                             break

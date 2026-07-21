@@ -352,8 +352,10 @@ available remotely. If the remote version is newer, the client asks before
 upgrading local Railmux with the current Python and then restarts the same
 command. Different package versions can connect when their protocol version is
 compatible. Declined or failed installation prints commands that can be copied
-manually; unpublished development versions may require copying the matching
-wheel or source checkout.
+manually. On a remote Python that enforces PEP 668, those instructions create
+`~/.local/share/railmux/ssh-venv`; later connections discover that private
+environment without PATH changes. Unpublished development versions may require
+copying the matching wheel or source checkout.
 
 The default remote session is started automatically when absent. `Ctrl-B d`
 detaches normally; `Ctrl-]` is an emergency local disconnect. Mouse forwarding

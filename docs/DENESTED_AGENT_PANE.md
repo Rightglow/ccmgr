@@ -231,76 +231,6 @@ claims and scroll policy without weakening lifecycle safety.
 - Synthetic marker and switch timings are not evidence that Claude or Codex
   feels faster over SSH or that a local terminal painted sooner.
 
-## Latest-state client prototype
-
-`tools/fast_client_probe.py` is a source-tree-only experiment for the remaining
-client-paint question. It opens one ordinary SSH connection, resolves the
-Railmux Target pane (or accepts an exact pane ID), samples `capture-pane` at a
-bounded rate, and paints only changed latest-state snapshots in the local
-terminal. Read-only mode remains the default, so an existing attached Railmux
-client can drive a workload while the two views are compared.
-
-The opt-in `--interactive` path forwards local terminal bytes to the agent with
-`send-keys -H`. It pins the outer session ID, controller pane, and Target pane
-at startup; each input batch revalidates them, then repeats the decisive checks
-and the send in one tmux command queue. A replaced outer session, missing
-controller, changed Target, vanished pane, or non-agent target stops the client
-instead of retargeting input. `Ctrl-]` is consumed locally as an emergency exit,
-while `Ctrl-C` and other bytes reach the agent.
-
-Run this script on the local machine after starting Railmux remotely. For a
-safe first comparison, leave the ordinary Railmux client attached and use the
-default read-only mode:
-
-```bash
-python3 tools/fast_client_probe.py your-server --duration 30 --fps 20
-```
-
-For direct agent input, first leave the managed Railmux session alive with
-`Ctrl-B d` (do not quit Railmux), then run:
-
-```bash
-python3 tools/fast_client_probe.py your-server \
-  --interactive --duration 0 --fps 20
-```
-
-The prototype intentionally issues none of `new-session`, `attach-session`,
-`split-window`, `swap-pane`, `resize-pane`, `kill-*`, or `set-option`. It never
-changes Railmux recovery files or tmux topology. Exiting it terminates only the
-SSH sampler. Interactive mode does mutate the agent application exactly as a
-normal terminal would by delivering the user's bytes; it is not a sandbox for
-commands typed or pasted by the user.
-
-The default run is bounded to 30 seconds at at most 20 samples per second and
-uses no daemon, listening port, or non-standard Python dependency. It is not an
-owner of tmux geometry and does not measure terminal compositor timestamps. A
-smoother view is evidence that bounding local paint work is promising; it does
-not by itself distinguish SSH byte volume, local parsing, and terminal
-rendering costs or establish a production frame protocol.
-
-### Prototype limitations
-
-- Railmux must already be running in the managed outer session. The prototype
-  cannot create or restore it, and quitting Railmux removes the object it needs.
-- It mirrors only the current Target agent pane. It does not render or control
-  the sidebar, switch sessions, change F8/F9 layouts, or run tmux key bindings.
-  If the Target changes, interactive mode exits and must be reconnected.
-- It never resizes the remote pane. Before detaching the ordinary client, set
-  the desired geometry there; the local client window must be at least as large
-  as the captured pane.
-- Keyboard bytes go directly to the agent pane, bypassing tmux client key
-  tables. `Ctrl-C` works in the agent, but tmux prefixes, Railmux function-key
-  bindings, mouse reporting, and native terminal shortcuts are not emulated.
-- Paste is forwarded as raw typed bytes. Multiline paste can submit input and
-  should be treated with the same care as pasting into a normal live agent.
-- Snapshots preserve tmux's visible text and SGR attributes, not a complete
-  terminal event history. OSC clipboard operations, hyperlinks, images,
-  notifications, cursor shape, alternate-screen history, and meaningful local
-  scrollback are outside this prototype.
-- Sampling runs one `capture-pane` plus a small state query per interval. At
-  20 FPS this adds bounded tmux server work and sends a full visible snapshot
-  whenever the screen changes; it is for validation, not a production daemon.
-
 ## Full-window SSH transport
 
 `railmux ssh` is the installable full-window transport. Instead of
@@ -340,7 +270,10 @@ missing dependency. It is limited to the remote user environment and checks
 `python3 -m pip`, `python -m pip`, `pip3`, and `pip` in that order; it never
 uses `sudo`, edits PATH, or installs tmux. The successful installer execs
 `python -m railmux` directly, so `~/.local/bin` need not already be on a
-non-interactive SSH PATH.
+non-interactive SSH PATH. If PEP 668 rejects user-site installation, the manual
+recovery instructions create `~/.local/share/railmux/ssh-venv`; the bootstrap
+discovers that fixed private environment on the next connection without
+editing PATH.
 A newer remote version prompts for a local upgrade through the current Python
 and re-execs the original command. Equal protocol versions remain compatible
 across differing package versions.
@@ -441,7 +374,7 @@ OSC, image, or hyperlink support. Bracketed-paste and focus-event modes are
 synchronized, but other input-affecting terminal modes remain delegated to
 tmux or unsupported. Local history preserves common SGR colour and character
 styles, but it still has no search, wrapped-line reflow, semantic selection, or
-history beyond its bounded cache. `pyte` remains an experimental compatibility
+history beyond its bounded cache. `pyte` remains a private compatibility
 dependency; wide characters, uncommon style combinations, terminal modes,
 copy-mode, resize behavior, and sustained Codex/Claude output still require
 real-terminal validation.

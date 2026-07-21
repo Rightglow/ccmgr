@@ -24,10 +24,18 @@ jobs:
 
       - run: python -m pip install --upgrade build twine
 
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
       - run: |
           python -m pip install -e ".[dev]"
           python -m ruff check src tests
           python -m pytest -q
+
+      - name: Run isolated real-tmux smoke test
+        env:
+          RAILMUX_RUN_TMUX_INTEGRATION: "1"
+        run: python -m pytest -q tests/test_tmux_integration.py
 
       - run: |
           rm -rf dist build src/*.egg-info

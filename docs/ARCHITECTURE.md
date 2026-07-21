@@ -88,6 +88,9 @@ environment. Installation normally selects the exact local version; repairing
 the SSH dependency after a declined local upgrade preserves an already newer
 remote version instead of downgrading it. Automatic setup may probe Python/pip
 commands but must never run `sudo`, edit shell startup files, or install tmux.
+When a remote Python rejects user-site installation, manual recovery may use
+the fixed `~/.local/share/railmux/ssh-venv`; the bootstrap probes that path
+without making it part of automatic environment lifecycle or PATH management.
 The local upgrade uses its current Python environment and re-execs the original
 `railmux ssh` invocation only after pip succeeds. Failure leaves tmux untouched
 and prints a reproducible manual command.

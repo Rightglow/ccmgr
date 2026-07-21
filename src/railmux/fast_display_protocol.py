@@ -294,25 +294,10 @@ def _unpack_rows(raw: bytes, height: int) -> tuple[tuple[int, bytes], ...]:
 
 
 def _unpack_history_lines(raw: bytes) -> tuple[bytes, ...]:
-    if len(raw) < 2:
-        raise ValueError("truncated history lines")
-    count = struct.unpack(">H", raw[:2])[0]
-    if count > MAX_HISTORY_LINES:
-        raise ValueError("too many history lines")
-    offset = 2
-    lines: list[bytes] = []
-    for _ in range(count):
-        if len(raw) - offset < 4:
-            raise ValueError("truncated history line header")
-        size = struct.unpack(">I", raw[offset:offset + 4])[0]
-        offset += 4
-        if size > len(raw) - offset:
-            raise ValueError("invalid history line")
-        lines.append(raw[offset:offset + size])
-        offset += size
+    lines, offset = _unpack_history_lines_at(raw, 0)
     if offset != len(raw):
         raise ValueError("trailing history line data")
-    return tuple(lines)
+    return lines
 
 
 def _unpack_history_lines_at(

@@ -930,7 +930,6 @@ def test_full_window_ssh_command_uses_railmux_remote_subcommand_and_protocol():
         width=120,
         height=40,
         fps=20.0,
-        remote_command="railmux",
         ssh_args=("-J", "jump"),
     )
 
@@ -938,6 +937,7 @@ def test_full_window_ssh_command_uses_railmux_remote_subcommand_and_protocol():
     assert "then exec railmux remote-server" in argv[-1]
     assert f"--protocol {PROTOCOL_VERSION}" in argv[-1]
     assert "python3 -m railmux remote-server" in argv[-1]
+    assert '"$HOME/.local/share/railmux/ssh-venv/bin/python"' in argv[-1]
     assert "--session 'rail mux'" in argv[-1]
     assert "--width 120 --height 40 --fps 20.0" in argv[-1]
 
@@ -959,6 +959,7 @@ def test_remote_install_command_uses_user_pip_then_matching_python_module():
     assert "'railmux[ssh]==1.2.3'" in argv[-1]
     assert "pip3 install --user --upgrade" in argv[-1]
     assert "&& exec python3 -m railmux remote-server" in argv[-1]
+    assert '"$HOME/.local/share/railmux/ssh-venv/bin/python" -m pip' in argv[-1]
     assert "sudo" not in argv[-1]
 
 
@@ -969,7 +970,6 @@ def test_generated_remote_bootstrap_and_install_commands_are_posix_shell_syntax(
         width=120,
         height=40,
         fps=20.0,
-        remote_command="railmux",
         ssh_args=(),
     )[-1]
     installer = build_ssh_install_argv(
@@ -997,6 +997,7 @@ def test_remote_install_help_is_exact_and_has_source_fallback():
 
     assert "python3 -m pip install --user --upgrade" in help_text
     assert "'railmux[ssh]==1.2.3'" in help_text
+    assert "~/.local/share/railmux/ssh-venv/bin/python" in help_text
     assert "matching wheel or source checkout" in help_text
 
 
@@ -1121,12 +1122,9 @@ def test_compatible_remote_is_confirmed_before_attach(monkeypatch):
         ),
     )
 
-    selected, initial = prepare_remote_process(
-        args, os.terminal_size((120, 40))
-    )
+    selected = prepare_remote_process(args, os.terminal_size((120, 40)))
 
     assert selected is process
-    assert initial == b""
     assert process.stdin.getvalue() == REMOTE_START
 
 
@@ -1157,9 +1155,7 @@ def test_missing_remote_prompts_then_installs_and_starts(monkeypatch):
         ),
     )
 
-    selected, _initial = prepare_remote_process(
-        args, os.terminal_size((120, 40))
-    )
+    selected = prepare_remote_process(args, os.terminal_size((120, 40)))
 
     assert selected is installed
     assert installed.stdin.getvalue() == REMOTE_START
@@ -1233,9 +1229,7 @@ def test_newer_compatible_remote_prompts_for_local_upgrade_but_can_continue(
         lambda question: questions.append(question) or False,
     )
 
-    selected, _initial = prepare_remote_process(
-        args, os.terminal_size((120, 40))
-    )
+    selected = prepare_remote_process(args, os.terminal_size((120, 40)))
 
     assert selected is process
     assert "Upgrade local Railmux to 999.0?" in questions[0]
@@ -1386,9 +1380,7 @@ def test_older_remote_protocol_prompts_for_matching_remote_upgrade(monkeypatch):
         ),
     )
 
-    selected, _initial = prepare_remote_process(
-        args, os.terminal_size((120, 40))
-    )
+    selected = prepare_remote_process(args, os.terminal_size((120, 40)))
 
     assert selected is upgraded
     assert "uses older SSH protocol" in questions[0]
@@ -1464,9 +1456,7 @@ def test_declining_local_upgrade_does_not_downgrade_remote_dependency_repair(
         fast_display_client, "_install_remote_and_start", install
     )
 
-    selected, _initial = prepare_remote_process(
-        args, os.terminal_size((120, 40))
-    )
+    selected = prepare_remote_process(args, os.terminal_size((120, 40)))
 
     assert selected is repaired
     assert installed_versions == ["999.0"]

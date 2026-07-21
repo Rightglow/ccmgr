@@ -109,7 +109,7 @@ class _ExtendedScreenMixin:
     scroll-up, scroll-down, and repeat-character sequences (CSI S/T/b). pyte
     0.8.2 silently dispatches all three to ``Screen.debug``, permanently
     diverging the headless display from tmux. Keep the compatibility layer
-    local to the experimental remote display instead of changing the terminal
+    local to the private remote display instead of changing the terminal
     advertised to tmux or forwarding raw control sequences to the client.
     """
 
@@ -829,7 +829,7 @@ def render_rows(screen: object) -> tuple[bytes, ...]:
 
 
 def terminal_modes_for_screen(screen: object) -> TerminalMode:
-    """Project pyte's private-mode set onto the bounded v3 wire allowlist."""
+    """Project pyte's private-mode set onto the bounded v6 wire allowlist."""
     terminal_modes = TerminalMode.NONE
     if 2004 << 5 in screen.mode:
         terminal_modes |= TerminalMode.BRACKETED_PASTE

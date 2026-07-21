@@ -40,15 +40,12 @@ dependencies = [
 ssh = [
   "pyte>=0.8.2,<0.9",
 ]
-# Compatibility alias for the pre-productization test wheels.
-fast-client = [
-  "pyte>=0.8.2,<0.9",
-]
 dev = [
   "pytest>=8.0",
   "build>=1.2",
   "twine>=5.0",
   "ruff>=0.9",
+  "pyte>=0.8.2,<0.9",
 ]
 
 [project.scripts]
