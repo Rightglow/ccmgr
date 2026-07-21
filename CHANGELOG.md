@@ -8,7 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 Development wheels from this tree identify themselves as
-`0.2.1.dev20260721` so they cannot be confused with the tagged 0.2.0 wheel.
+`0.2.1.dev2026072101` so they cannot be confused with the tagged 0.2.0 wheel
+or the earlier SSH-history test wheel.
 
 ### Added
 
@@ -30,6 +31,12 @@ Development wheels from this tree identify themselves as
 
 ### Fixed
 
+- Keep the experimental SSH display's headless terminal synchronized when
+  tmux uses xterm's parameterized scroll-up, scroll-down, or
+  repeat-character operations. The bounded pyte compatibility layer now
+  implements `CSI S`, `CSI T`, and `CSI b` for both live frames and styled
+  history; a real isolated tmux PTY regression compares the reconstructed
+  pane with `capture-pane` after the previously dropped scroll operation.
 - Isolate all Railmux workspaces and `railmux ssh` server-side tmux commands on
   a dedicated non-default socket, including launches from an outer tmux. The
   internal entry point now validates the full Unix socket identity, startup

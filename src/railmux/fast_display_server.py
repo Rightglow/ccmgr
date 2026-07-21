@@ -28,6 +28,8 @@ import termios
 import time
 from collections import deque
 from dataclasses import dataclass
+from functools import lru_cache
+from types import SimpleNamespace
 from typing import Sequence
 
 from railmux import restart_state, tmux_health, tmux_server
@@ -55,6 +57,107 @@ class DisplayServerError(RuntimeError):
 
 _WATCHDOG_INTERVAL = 5.0
 _WATCHDOG_FAILURES = 3
+
+
+class _ExtendedScreenMixin:
+    """Fill the row-mutating xterm gaps in pyte 0.8.2.
+
+    tmux's ``xterm-256color`` client capabilities include parameterized
+    scroll-up, scroll-down, and repeat-character sequences (CSI S/T/b). pyte
+    0.8.2 silently dispatches all three to ``Screen.debug``, permanently
+    diverging the headless display from tmux. Keep the compatibility layer
+    local to the experimental remote display instead of changing the terminal
+    advertised to tmux or forwarding raw control sequences to the client.
+    """
+
+    _last_graphic_character = ""
+    _character_width = staticmethod(lambda _character: 1)
+
+    def reset(self) -> None:
+        self._last_graphic_character = ""
+        super().reset()
+
+    def draw(self, data: str) -> None:
+        super().draw(data)
+        # ByteStream has already removed control syntax. pyte stops drawing at
+        # an unprintable character, so retain only the last graphic character
+        # that can be repeated with the current rendition attributes.
+        for character in reversed(data):
+            if self._character_width(character) > 0:
+                self._last_graphic_character = character
+                break
+
+    def scroll_up(self, count: int | None = None) -> None:
+        """Scroll the current DECSTBM region up without moving the cursor."""
+        top = 0 if self.margins is None else self.margins.top
+        bottom = self.lines - 1 if self.margins is None else self.margins.bottom
+        amount = min(max(1, count or 1), bottom - top + 1)
+        for row in range(top, bottom - amount + 1):
+            source = row + amount
+            if source in self.buffer:
+                self.buffer[row] = self.buffer[source]
+            else:
+                self.buffer.pop(row, None)
+        for row in range(bottom - amount + 1, bottom + 1):
+            self.buffer.pop(row, None)
+        self.dirty.update(range(top, bottom + 1))
+
+    def scroll_down(self, count: int | None = None) -> None:
+        """Scroll the current DECSTBM region down without moving the cursor."""
+        top = 0 if self.margins is None else self.margins.top
+        bottom = self.lines - 1 if self.margins is None else self.margins.bottom
+        amount = min(max(1, count or 1), bottom - top + 1)
+        for row in range(bottom, top + amount - 1, -1):
+            source = row - amount
+            if source in self.buffer:
+                self.buffer[row] = self.buffer[source]
+            else:
+                self.buffer.pop(row, None)
+        for row in range(top, top + amount):
+            self.buffer.pop(row, None)
+        self.dirty.update(range(top, bottom + 1))
+
+    def repeat_character(self, count: int | None = None) -> None:
+        """Repeat the preceding graphic character (REP / CSI Ps b)."""
+        if self._last_graphic_character:
+            self.draw(self._last_graphic_character * max(1, count or 1))
+
+
+@lru_cache(maxsize=4)
+def _build_extended_pyte(pyte: object) -> object:
+    """Return cached pyte-compatible types with Railmux's bounded fixes."""
+
+    class ExtendedScreen(_ExtendedScreenMixin, pyte.Screen):
+        _character_width = staticmethod(pyte.screens.wcwidth)
+
+    class ExtendedDiffScreen(_ExtendedScreenMixin, pyte.DiffScreen):
+        _character_width = staticmethod(pyte.screens.wcwidth)
+
+    class ExtendedByteStream(pyte.ByteStream):
+        csi = dict(pyte.ByteStream.csi)
+        csi.update({
+            "S": "scroll_up",
+            "T": "scroll_down",
+            "b": "repeat_character",
+        })
+        events = frozenset(
+            set(pyte.ByteStream.events)
+            | {"scroll_up", "scroll_down", "repeat_character"}
+        )
+
+    return SimpleNamespace(
+        Screen=ExtendedScreen,
+        DiffScreen=ExtendedDiffScreen,
+        ByteStream=ExtendedByteStream,
+        _railmux_extended=True,
+    )
+
+
+def _extended_pyte(pyte: object) -> object:
+    """Idempotently adapt one imported pyte module for tmux's VT stream."""
+    if getattr(pyte, "_railmux_extended", False):
+        return pyte
+    return _build_extended_pyte(pyte)
 
 
 @dataclass(frozen=True)
@@ -470,6 +573,7 @@ def capture_history_snapshot(
             import pyte as pyte_module
 
             pyte = pyte_module
+        pyte = _extended_pyte(pyte)
         snapshot = _capture_pane_history(
             pyte, pane, request_id, max_lines
         )
@@ -485,6 +589,7 @@ def capture_history_batch(
     max_lines: int,
 ) -> HistoryBatch:
     """Atomically describe and warm-cache every visible agent pane."""
+    pyte = _extended_pyte(pyte)
     snapshots = tuple(
         snapshot
         for pane in _list_agent_panes(session_id)
@@ -763,6 +868,7 @@ def serve(session: str, width: int, height: int, fps: float) -> int:
         raise DisplayServerError(
             "pyte is required remotely; install railmux[fast-client]"
         ) from exc
+    pyte = _extended_pyte(pyte)
 
     initial_session_id = _ensure_railmux_session(session)
     lock_fd = _acquire_display_lock(initial_session_id)

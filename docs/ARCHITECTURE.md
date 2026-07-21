@@ -57,6 +57,15 @@ server-PID/session-ID sentinel that is consumed once and expires after 30
 seconds. This sentinel is diagnostic evidence only; it never authorizes session
 mutation or recovery.
 
+The SSH display's headless terminal must implement every screen-content
+operation that its private tmux client advertises through `TERM`; sending a
+new keyframe cannot repair divergence already present in that server-side
+model. The current `xterm-256color` compatibility layer extends pyte 0.8.2 with
+parameterized scroll-up, scroll-down, and repeat-character (`CSI S/T/b`) and
+uses the same model for live frames and styled history. Tests against a real
+isolated tmux PTY must compare the reconstructed pane with tmux's own captured
+state whenever that advertised capability boundary changes.
+
 ## Modes are registered providers, not a boolean
 
 `railmux.modes.ModeRegistry` is the ordered source of shared mode metadata.

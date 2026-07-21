@@ -395,6 +395,14 @@ client freezes painting while continuing to ingest live frames, scrolls the
 cached pane viewport locally, and performs a full latest-state repaint on
 bottom, ordinary keyboard input, resize, or `Esc`.
 
+The private tmux client advertises `xterm-256color`, whose terminfo uses
+parameterized scroll-up/down and repeat-character operations. pyte 0.8.2 does
+not dispatch `CSI S`, `CSI T`, or `CSI b`, so Railmux supplies a bounded screen
+and stream extension for those operations in both live and history parsing.
+An isolated real-PTY regression verifies that tmux actually emits the scroll
+operation and that the reconstructed pane matches `capture-pane`; the stock
+pyte model demonstrably does not.
+
 History content and pointer authority have separate lifetimes. A bounded pane
 content snapshot may remain cached, but only the latest accepted visible-route
 generation can intercept mouse input. F8/F9, Help/modal transitions, cross-pane

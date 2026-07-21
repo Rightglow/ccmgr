@@ -1,13 +1,18 @@
 """Opt-in smoke coverage against a real, isolated tmux server."""
 from __future__ import annotations
 
+import fcntl
 import os
+import pty
+import select
 import signal
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import threading
 import time
 from pathlib import Path
@@ -117,6 +122,114 @@ def _script_command(command: str) -> list[str]:
     if sys.platform == "darwin":
         return ["script", "-q", "/dev/null", "sh", "-c", command]
     return ["script", "-qefc", command, "/dev/null"]
+
+
+def test_real_tmux_parameterized_scroll_matches_headless_screen():
+    """The advertised xterm client may use CSI S/T; its model must agree."""
+    if shutil.which("tmux") is None:
+        pytest.skip("tmux is not installed")
+    pyte = pytest.importorskip("pyte")
+    socket_root = Path(tempfile.mkdtemp(prefix="rx-vt-", dir="/tmp"))
+    socket_root.chmod(0o700)
+    socket_path = str(socket_root / "s")
+    master_fd, slave_fd = pty.openpty()
+    fcntl.ioctl(
+        slave_fd,
+        termios.TIOCSWINSZ,
+        struct.pack("HHHH", 8, 20, 0, 0),
+    )
+    env = os.environ.copy()
+    env.pop("TMUX", None)
+    env.pop("TMUX_PANE", None)
+    env["TERM"] = "xterm-256color"
+    client = None
+    try:
+        program = (
+            "import sys,time; time.sleep(.5); "
+            "sys.stdout.write('\\x1b[2J\\x1b[H' + "
+            "''.join(str(i) * 20 for i in range(1, 9))); "
+            "sys.stdout.flush(); time.sleep(.5); "
+            "sys.stdout.write('\\x1b[2;7r\\x1b[2S'); "
+            "sys.stdout.flush(); time.sleep(5)"
+        )
+        subprocess.run(
+            [
+                "tmux", "-S", socket_path, "-f", "/dev/null",
+                "new-session", "-d", "-x", "20", "-y", "8",
+                "-s", "probe", sys.executable, "-c", program,
+            ],
+            check=True,
+            capture_output=True,
+        )
+        client = subprocess.Popen(
+            ["tmux", "-S", socket_path, "attach-session", "-t", "probe"],
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            env=env,
+            start_new_session=True,
+        )
+        os.close(slave_fd)
+        slave_fd = -1
+        os.set_blocking(master_fd, False)
+        raw = bytearray()
+        deadline = time.monotonic() + 4.0
+        quiet_since = None
+        while time.monotonic() < deadline:
+            readable, _, _ = select.select([master_fd], [], [], 0.1)
+            if readable:
+                try:
+                    chunk = os.read(master_fd, 65536)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    break
+                raw.extend(chunk)
+                quiet_since = None
+            elif b"\033[2S" in raw:
+                quiet_since = quiet_since or time.monotonic()
+                if time.monotonic() - quiet_since >= 0.2:
+                    break
+
+        # This is real tmux output, not a synthetic sequence: it proves that
+        # the TERM advertised by the display helper selects parameterized SU.
+        assert b"\033[2S" in raw
+        captured = subprocess.check_output(
+            ["tmux", "-S", socket_path, "capture-pane", "-p", "-t", "probe"],
+            text=True,
+        ).splitlines()
+        terminal = fast_display_server._extended_pyte(pyte)
+        screen = terminal.Screen(20, 8)
+        terminal.ByteStream(screen).feed(bytes(raw))
+
+        assert [row.rstrip() for row in screen.display[:len(captured)]] == captured
+
+        stock_screen = pyte.Screen(20, 8)
+        pyte.ByteStream(stock_screen).feed(bytes(raw))
+        assert [
+            row.rstrip() for row in stock_screen.display[:len(captured)]
+        ] != captured
+    finally:
+        if slave_fd >= 0:
+            os.close(slave_fd)
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+        subprocess.run(
+            ["tmux", "-S", socket_path, "kill-server"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if client is not None and client.poll() is None:
+            client.terminate()
+            try:
+                client.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                client.kill()
+                client.wait(timeout=2.0)
+        shutil.rmtree(socket_root, ignore_errors=True)
 
 
 def test_dedicated_label_routes_fast_server_to_private_tmux(monkeypatch):

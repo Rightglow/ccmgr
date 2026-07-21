@@ -987,6 +987,61 @@ def test_server_renderer_preserves_wide_cells_and_filters_terminal_controls():
     assert rendered.endswith(b"\033[0m")
 
 
+@pytest.mark.parametrize(
+    ("operation", "expected"),
+    [
+        (b"\033[2S", ["11111", "44444", "     ", "     ", "55555"]),
+        (b"\033[2T", ["11111", "     ", "     ", "22222", "55555"]),
+    ],
+)
+def test_server_terminal_model_applies_parameterized_scroll_inside_margins(
+    operation,
+    expected,
+):
+    pyte = pytest.importorskip("pyte")
+    terminal = fast_display_server._extended_pyte(pyte)
+    screen = terminal.Screen(5, 5)
+    stream = terminal.ByteStream(screen)
+    for row, value in enumerate(b"12345", 1):
+        stream.feed(f"\033[{row};1H".encode() + bytes((value,)) * 5)
+
+    # Restrict scrolling to rows 2-4 and keep the cursor outside that region.
+    # SU/SD operate on DECSTBM regardless of cursor position and must not move
+    # the cursor; pyte 0.8.2 silently ignored both sequences.
+    stream.feed(b"\033[2;4r\033[5;3H")
+    screen.dirty.clear()
+    stream.feed(operation)
+
+    assert screen.display == expected
+    assert (screen.cursor.x, screen.cursor.y) == (2, 4)
+    assert screen.dirty == {1, 2, 3}
+
+
+def test_server_terminal_model_repeats_character_with_current_style():
+    pyte = pytest.importorskip("pyte")
+    terminal = fast_display_server._extended_pyte(pyte)
+    with pytest.warns(DeprecationWarning):
+        screen = terminal.DiffScreen(8, 1)
+    stream = terminal.ByteStream(screen)
+
+    stream.feed(b"\033[31m#\033[4b")
+
+    assert screen.display == ["#####   "]
+    assert [screen.buffer[0][column].fg for column in range(5)] == ["red"] * 5
+
+
+def test_server_history_renderer_uses_extended_terminal_sequences():
+    pyte = pytest.importorskip("pyte")
+    rendered = fast_display_server._render_history_line(
+        fast_display_server._extended_pyte(pyte),
+        b"\033[31m#\033[4b\033[0m",
+        8,
+    )
+
+    assert rendered.count(b"#") == 5
+    assert b";31;" in rendered
+
+
 def test_server_projects_only_allowlisted_private_terminal_modes():
     assert terminal_modes_for_screen(_FakeScreen()) == (
         TerminalMode.BRACKETED_PASTE | TerminalMode.FOCUS_EVENTS
