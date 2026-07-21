@@ -361,10 +361,11 @@ local history layer: the first wheel-up paints the hot cache immediately and
 requests up to 2000 lines in the background, while wheel-down at the live
 bottom is consumed instead of also entering tmux copy-mode. Reported clicks
 and drags are consumed without discarding the frozen viewport only when the
-gesture begins inside that history pane. A press that
-begins over another agent or the sidebar first repaints the latest screen, then
-forwards the complete mouse sequence so tmux focus remains authoritative. A
-wheel over another region never changes the old pane's history offset. Short
+gesture begins inside that history pane. A press that begins over another
+agent is forwarded through release so tmux focus remains authoritative without
+moving any existing history viewport; a sidebar press restores all overlays
+before forwarding. A wheel over another agent starts or moves that pane's
+independent viewport without changing the old pane's offset. Short
 same-direction vertical-wheel bursts destined for the sidebar or a modal are
 bounded once per local stdin read; locally handled agent history is not.
 A terminal-native selection override can still bypass mouse reporting before
@@ -391,9 +392,15 @@ control sequences are parsed through `pyte`; only reconstructed text and
 allowlisted SGR character styles cross the protocol. OSC and other terminal
 actions are not forwarded. A response contains at most 4096 physical lines
 (the client requests 300 for the hot cache and 2000 for the deep cache). The
-client freezes painting while continuing to ingest live frames, scrolls the
-cached pane viewport locally, and performs a full latest-state repaint on
-bottom, ordinary keyboard input, resize, or `Esc`.
+client keeps ingesting and painting live frames, then composes every frozen
+pane rectangle over the affected live rows in the same terminal write. Each
+pane has an immutable snapshot and independent offset. Reaching bottom or
+typing restores only the routed pane; resize, layout uncertainty, sidebar
+input, or `Esc` restores all panes. A periodic prefetch refreshes routes and
+future cache content without moving a frozen viewport. The 2000-line response
+replaces its hot snapshot only when its visible multi-line anchor has one exact
+match, so repeated content or newly appended output cannot shift the user's
+view.
 
 The private tmux client advertises `xterm-256color`, whose terminfo uses
 parameterized scroll-up/down and repeat-character operations. pyte 0.8.2 does
@@ -405,8 +412,8 @@ pyte model demonstrably does not.
 
 History content and pointer authority have separate lifetimes. A bounded pane
 content snapshot may remain cached, but only the latest accepted visible-route
-generation can intercept mouse input. F8/F9, Help/modal transitions, cross-pane
-clicks, and resize invalidate the prior generation; request identity plus a
+generation can intercept mouse input. F8/F9, Help/modal transitions, sidebar
+input, and resize invalidate the prior generation; request identity plus a
 local monotonic epoch rejects late prefetch and deep-history responses. The
 server's geometry snapshot includes tmux's zoom and active-pane fields. When a
 window is zoomed, only its active agent is exposed, or no agent is exposed when

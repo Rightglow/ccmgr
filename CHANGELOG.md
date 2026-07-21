@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 Development wheels from this tree identify themselves as
-`0.2.1.dev2026072101` so they cannot be confused with the tagged 0.2.0 wheel
+`0.2.1.dev2026072103` so they cannot be confused with the tagged 0.2.0 wheel
 or the earlier SSH-history test wheel.
 
 ### Added
@@ -31,6 +31,13 @@ or the earlier SSH-history test wheel.
 
 ### Fixed
 
+- Let each agent pane in the experimental SSH display retain its own immutable
+  local-history viewport. Live patches are now painted continuously and
+  composed with every frozen pane in one terminal update, so the sidebar and
+  unfrozen agents remain live; changing focus, typing, or reaching the bottom
+  restores only the affected pane, while `Esc` and layout changes still restore
+  all panes safely. Deep-history responses anchor only to a unique exact match
+  of the visible lines instead of jumping when remote output advances.
 - Keep the experimental SSH display's headless terminal synchronized when
   tmux uses xterm's parameterized scroll-up, scroll-down, or
   repeat-character operations. The bounded pyte compatibility layer now

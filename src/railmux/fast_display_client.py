@@ -249,14 +249,20 @@ class HistoryAction:
     refresh_routes: bool = False
 
 
+@dataclass
+class _HistoryViewport:
+    """One immutable pane snapshot plus its local offset from the bottom."""
+
+    snapshot: HistorySnapshot
+    offset: int
+
+
 class LocalHistoryView:
     """Keep bounded history content separate from visible pointer routes."""
 
     def __init__(self) -> None:
-        self.snapshot: HistorySnapshot | None = None
-        self.offset = 0
-        self.deep_pending_id: int | None = None
-        self.deep_pending_epoch: int | None = None
+        self.viewports: dict[str, _HistoryViewport] = {}
+        self._deep_pending: dict[int, tuple[int, str]] = {}
         self.prefetch_pending_id: int | None = None
         self.prefetch_pending_epoch: int | None = None
         self.prefetch_started = 0.0
@@ -264,15 +270,16 @@ class LocalHistoryView:
         self.content_cache: dict[str, HistorySnapshot] = {}
         self.route_epoch = 1
         self._local_pointer_capture = False
+        self._forwarded_pointer_capture = False
         self._next_request_id = 1
 
     @property
     def active(self) -> bool:
-        return self.snapshot is not None
+        return bool(self.viewports)
 
     @property
     def pending(self) -> bool:
-        return self.deep_pending_id is not None
+        return bool(self._deep_pending)
 
     def _allocate_request_id(self) -> int:
         request_id = self._next_request_id
@@ -301,12 +308,12 @@ class LocalHistoryView:
         self.prefetch_started = now
         return encode_history_prefetch(request_id, _HISTORY_PREFETCH_LINES)
 
-    def accept_prefetch(self, batch: HistoryBatch) -> None:
+    def accept_prefetch(self, batch: HistoryBatch) -> HistoryAction:
         if (
             batch.request_id != self.prefetch_pending_id
             or self.prefetch_pending_epoch != self.route_epoch
         ):
-            return
+            return HistoryAction()
         self.prefetch_pending_id = None
         self.prefetch_pending_epoch = None
         self.prefetch_started = 0.0
@@ -316,6 +323,20 @@ class LocalHistoryView:
         for snapshot in batch.snapshots:
             if snapshot.pane_id is not None:
                 self._remember_content(snapshot)
+        routes = {
+            route.pane_id: route
+            for route in self.visible_routes
+            if route.pane_id is not None
+        }
+        restore_live = False
+        for pane_id, viewport in tuple(self.viewports.items()):
+            route = routes.get(pane_id)
+            if route is None or not self._same_geometry(
+                viewport.snapshot, route
+            ):
+                self.cancel_pane(pane_id)
+                restore_live = True
+        return HistoryAction(restore_live=restore_live)
 
     def _remember_content(self, snapshot: HistorySnapshot) -> None:
         assert snapshot.pane_id is not None
@@ -352,6 +373,29 @@ class LocalHistoryView:
         )
 
     @staticmethod
+    def _contains_position(
+        snapshot: HistorySnapshot, x: int, y: int,
+    ) -> bool:
+        return (
+            snapshot.x <= x < snapshot.x + snapshot.width
+            and snapshot.y <= y < snapshot.y + snapshot.height
+        )
+
+    def _route_at_position(self, x: int, y: int) -> HistorySnapshot | None:
+        return next(
+            (
+                route
+                for route in self.visible_routes
+                if self._contains_position(route, x, y)
+            ),
+            None,
+        )
+
+    def pane_id_at_position(self, x: int, y: int) -> str | None:
+        route = self._route_at_position(x, y)
+        return None if route is None else route.pane_id
+
+    @staticmethod
     def _same_geometry(left: HistorySnapshot, right: HistorySnapshot) -> bool:
         return (
             left.pane_id == right.pane_id
@@ -365,8 +409,6 @@ class LocalHistoryView:
         self,
         route: HistorySnapshot,
         event: SgrMouseEvent,
-        *,
-        restore_live: bool = False,
     ) -> HistoryAction:
         assert route.pane_id is not None
         cached = self.content_cache.get(route.pane_id, route)
@@ -374,50 +416,44 @@ class LocalHistoryView:
             cached = route
         maximum = max(0, len(cached.lines) - cached.height)
         if maximum == 0:
-            return HistoryAction(restore_live=restore_live)
-        self.snapshot = cached
-        self.offset = min(maximum, _HISTORY_SCROLL_LINES)
+            return HistoryAction()
+        self.cancel_pane(route.pane_id)
+        self.viewports[route.pane_id] = _HistoryViewport(
+            cached, min(maximum, _HISTORY_SCROLL_LINES)
+        )
         request_id = self._allocate_request_id()
-        self.deep_pending_id = request_id
-        self.deep_pending_epoch = self.route_epoch
+        self._deep_pending[request_id] = (self.route_epoch, route.pane_id)
         return HistoryAction(
             protocol_frame=encode_history_request(
                 request_id, event.x, event.y, _HISTORY_FULL_LINES
             ),
             render_history=True,
-            restore_live=restore_live,
         )
 
     def wheel(self, event: SgrMouseEvent) -> HistoryAction:
         direction = event.wheel_direction
         if direction == 0:
             return HistoryAction(forwarded_input=event.raw)
-        if self.active:
-            assert self.snapshot is not None
-            if self._contains(self.snapshot, event):
-                maximum = max(0, len(self.snapshot.lines) - self.snapshot.height)
-                self.offset = max(
-                    0,
-                    min(maximum, self.offset + direction * _HISTORY_SCROLL_LINES),
-                )
-                if self.offset == 0:
-                    self.cancel()
-                    return HistoryAction(restore_live=True)
-                return HistoryAction(render_history=True)
-            # A wheel over another region must never move the old pane.
-            self.cancel()
-            route = self._route_at(event)
-            if route is None:
-                return HistoryAction(
-                    forwarded_input=event.raw,
-                    restore_live=True,
-                )
-            if direction < 0:
-                return HistoryAction(restore_live=True)
-            return self._start_history(route, event, restore_live=True)
         route = self._route_at(event)
         if route is None:
             return HistoryAction(forwarded_input=event.raw)
+        assert route.pane_id is not None
+        viewport = self.viewports.get(route.pane_id)
+        if viewport is not None:
+            maximum = max(
+                0, len(viewport.snapshot.lines) - viewport.snapshot.height
+            )
+            viewport.offset = max(
+                0,
+                min(
+                    maximum,
+                    viewport.offset + direction * _HISTORY_SCROLL_LINES,
+                ),
+            )
+            if viewport.offset == 0:
+                self.cancel_pane(route.pane_id)
+                return HistoryAction(restore_live=True)
+            return HistoryAction(render_history=True)
         # Once a pointer is known to be over an agent pane, the local history
         # layer exclusively owns vertical wheel input. This avoids also
         # triggering tmux copy-mode or its pane scroll bindings.
@@ -425,54 +461,61 @@ class LocalHistoryView:
             return HistoryAction()
         return self._start_history(route, event)
 
-    def pointer_event(self, event: SgrMouseEvent) -> HistoryAction:
-        if event.wheel_direction:
-            return self.wheel(event)
+    def pointer_event(
+        self,
+        event: SgrMouseEvent,
+        focused_pane_id: str | None = None,
+    ) -> HistoryAction:
+        if self._forwarded_pointer_capture:
+            if not event.pressed:
+                self._forwarded_pointer_capture = False
+            return HistoryAction(forwarded_input=event.raw)
         if self._local_pointer_capture:
             if not event.pressed:
                 self._local_pointer_capture = False
             return HistoryAction()
-        if self.active:
-            assert self.snapshot is not None
-            if self._contains(self.snapshot, event):
-                if event.pressed and not event.button & 32:
-                    self._local_pointer_capture = True
-                return HistoryAction()
-            if self._route_at(event) is not None:
-                self.cancel()
-                return HistoryAction(
-                    forwarded_input=event.raw,
-                    restore_live=True,
-                    refresh_routes=True,
-                )
-            self.invalidate_routes()
-            return HistoryAction(
-                forwarded_input=event.raw,
-                restore_live=True,
-                refresh_routes=True,
-            )
+        if event.wheel_direction:
+            return self.wheel(event)
+        frozen = next(
+            (
+                viewport.snapshot
+                for viewport in self.viewports.values()
+                if self._contains(viewport.snapshot, event)
+            ),
+            None,
+        )
+        if frozen is not None:
+            if event.pressed and not event.button & 32:
+                if frozen.pane_id != focused_pane_id:
+                    self._forwarded_pointer_capture = True
+                    return HistoryAction(
+                        forwarded_input=event.raw,
+                        refresh_routes=True,
+                    )
+                self._local_pointer_capture = True
+            return HistoryAction()
         if event.pressed and not event.button & 32:
             if self._route_at(event) is not None:
+                self._forwarded_pointer_capture = True
                 return HistoryAction(
                     forwarded_input=event.raw,
                     refresh_routes=True,
                 )
-            self.invalidate_routes()
+            restore_live = self.invalidate_routes()
+            self._forwarded_pointer_capture = True
             return HistoryAction(
                 forwarded_input=event.raw,
+                restore_live=restore_live,
                 refresh_routes=True,
             )
-        return HistoryAction(forwarded_input=event.raw)
+        return HistoryAction()
 
     def accept(self, snapshot: HistorySnapshot) -> HistoryAction:
-        if (
-            snapshot.request_id != self.deep_pending_id
-            or self.deep_pending_epoch != self.route_epoch
-        ):
+        pending = self._deep_pending.pop(snapshot.request_id, None)
+        if pending is None:
             return HistoryAction()
-        self.deep_pending_id = None
-        self.deep_pending_epoch = None
-        if snapshot.pane_id is None:
+        pending_epoch, pane_id = pending
+        if pending_epoch != self.route_epoch or snapshot.pane_id != pane_id:
             return HistoryAction()
         route = next(
             (
@@ -485,34 +528,78 @@ class LocalHistoryView:
         if route is None or not self._same_geometry(route, snapshot):
             return HistoryAction()
         self._remember_content(snapshot)
-        if self.snapshot is None or self.snapshot.pane_id != snapshot.pane_id:
+        viewport = self.viewports.get(pane_id)
+        if viewport is None:
             return HistoryAction()
         maximum = max(0, len(snapshot.lines) - snapshot.height)
         if maximum == 0:
-            self.snapshot = None
-            self.offset = 0
+            self.cancel_pane(pane_id)
             return HistoryAction(restore_live=True)
-        self.snapshot = snapshot
-        self.offset = min(maximum, self.offset)
+        anchor = self._visible_lines(viewport)
+        aligned_offset = self._aligned_offset(snapshot, anchor)
+        if aligned_offset is None:
+            # The live pane moved while the deep capture was in flight and no
+            # unique exact visible anchor survived. Keep the immutable hot
+            # snapshot instead of jumping to newer or unrelated text.
+            return HistoryAction()
+        viewport.snapshot = snapshot
+        viewport.offset = aligned_offset
         return HistoryAction(render_history=True)
 
-    def visible_lines(self) -> tuple[bytes, ...]:
-        if self.snapshot is None:
-            return ()
-        end = len(self.snapshot.lines) - self.offset
-        start = max(0, end - self.snapshot.height)
-        lines = self.snapshot.lines[start:end]
-        if len(lines) < self.snapshot.height:
-            lines = (b"",) * (self.snapshot.height - len(lines)) + lines
+    @staticmethod
+    def _visible_lines(viewport: _HistoryViewport) -> tuple[bytes, ...]:
+        snapshot = viewport.snapshot
+        end = len(snapshot.lines) - viewport.offset
+        start = max(0, end - snapshot.height)
+        lines = snapshot.lines[start:end]
+        if len(lines) < snapshot.height:
+            lines = (b"",) * (snapshot.height - len(lines)) + lines
         return lines
+
+    @staticmethod
+    def _aligned_offset(
+        snapshot: HistorySnapshot, anchor: tuple[bytes, ...],
+    ) -> int | None:
+        if not anchor or len(anchor) > len(snapshot.lines):
+            return None
+        matched_offset: int | None = None
+        for start in range(len(snapshot.lines) - len(anchor), -1, -1):
+            if snapshot.lines[start:start + len(anchor)] == anchor:
+                if matched_offset is not None:
+                    return None
+                matched_offset = len(snapshot.lines) - (start + len(anchor))
+        return matched_offset
+
+    def overlays(
+        self,
+    ) -> tuple[tuple[HistorySnapshot, tuple[bytes, ...]], ...]:
+        return tuple(
+            (viewport.snapshot, self._visible_lines(viewport))
+            for viewport in self.viewports.values()
+        )
+
+    def cancel_pane(self, pane_id: str) -> bool:
+        was_active = self.viewports.pop(pane_id, None) is not None
+        self._deep_pending = {
+            request_id: pending
+            for request_id, pending in self._deep_pending.items()
+            if pending[1] != pane_id
+        }
+        return was_active
+
+    def cancel_for_input(self, x: int, y: int) -> bool:
+        """Restore only the input pane, or all panes if routing is unknown."""
+        route = self._route_at_position(x, y)
+        if route is None or route.pane_id is None:
+            return self.cancel()
+        return self.cancel_pane(route.pane_id)
 
     def cancel(self) -> bool:
         was_active = self.active
-        self.snapshot = None
-        self.offset = 0
-        self.deep_pending_id = None
-        self.deep_pending_epoch = None
+        self.viewports.clear()
+        self._deep_pending.clear()
         self._local_pointer_capture = False
+        self._forwarded_pointer_capture = False
         return was_active
 
 
@@ -601,7 +688,58 @@ class TerminalSurface:
             self.stream.flush()
         self.terminal_modes = requested
 
-    def paint(self, screen: AppliedScreen) -> None:
+    @staticmethod
+    def _cursor_is_covered(
+        screen: AppliedScreen,
+        overlays: tuple[tuple[HistorySnapshot, tuple[bytes, ...]], ...],
+    ) -> bool:
+        return any(
+            snapshot.x <= screen.cursor_x < snapshot.x + snapshot.width
+            and snapshot.y <= screen.cursor_y < snapshot.y + snapshot.height
+            for snapshot, _lines in overlays
+        )
+
+    @staticmethod
+    def _append_overlay_rows(
+        rendered: list[bytes],
+        overlays: tuple[tuple[HistorySnapshot, tuple[bytes, ...]], ...],
+        changed_rows: frozenset[int] | None = None,
+    ) -> None:
+        for snapshot, lines in overlays:
+            for index in range(snapshot.height):
+                row = snapshot.y + index
+                if changed_rows is not None and row not in changed_rows:
+                    continue
+                line = lines[index] if index < len(lines) else b""
+                rendered.extend((
+                    f"\033[{row + 1};{snapshot.x + 1}H".encode(),
+                    f"\033[{snapshot.width}X".encode(),
+                    line,
+                ))
+
+    @classmethod
+    def _append_cursor(
+        cls,
+        rendered: list[bytes],
+        screen: AppliedScreen,
+        overlays: tuple[tuple[HistorySnapshot, tuple[bytes, ...]], ...],
+    ) -> None:
+        rendered.extend((
+            b"\033[0m\033[?7h",
+            f"\033[{screen.cursor_y + 1};{screen.cursor_x + 1}H".encode(),
+            (
+                b"\033[?25h"
+                if screen.cursor_visible
+                and not cls._cursor_is_covered(screen, overlays)
+                else b"\033[?25l"
+            ),
+        ))
+
+    def paint(
+        self,
+        screen: AppliedScreen,
+        overlays: tuple[tuple[HistorySnapshot, tuple[bytes, ...]], ...] = (),
+    ) -> None:
         self.start()
         self._reconcile_terminal_modes(screen.terminal_modes)
         rendered = [b"\033[?7l"]
@@ -613,26 +751,22 @@ class TerminalSurface:
                 b"\033[2K",
                 screen.rows[row_index],
             ))
-        rendered.extend((
-            b"\033[0m\033[?7h",
-            f"\033[{screen.cursor_y + 1};{screen.cursor_x + 1}H".encode(),
-            b"\033[?25h" if screen.cursor_visible else b"\033[?25l",
-        ))
+        self._append_overlay_rows(
+            rendered, overlays, frozenset(screen.changed_rows)
+        )
+        self._append_cursor(rendered, screen, overlays)
         self.stream.write(b"".join(rendered))
         self.stream.flush()
 
-    def paint_history(
-        self, snapshot: HistorySnapshot, lines: tuple[bytes, ...],
+    def paint_overlays(
+        self,
+        screen: AppliedScreen,
+        overlays: tuple[tuple[HistorySnapshot, tuple[bytes, ...]], ...],
     ) -> None:
         self.start()
-        rendered: list[bytes] = [b"\033[?25l"]
-        for index in range(snapshot.height):
-            line = lines[index] if index < len(lines) else b""
-            rendered.extend((
-                f"\033[{snapshot.y + index + 1};{snapshot.x + 1}H".encode(),
-                f"\033[{snapshot.width}X".encode(),
-                line,
-            ))
+        rendered: list[bytes] = [b"\033[?7l"]
+        self._append_overlay_rows(rendered, overlays)
+        self._append_cursor(rendered, screen, overlays)
         self.stream.write(b"".join(rendered))
         self.stream.flush()
 
@@ -760,14 +894,11 @@ def run(args: argparse.Namespace) -> int:
 
     def apply_history_action(action: HistoryAction) -> None:
         nonlocal route_refresh_needed
+        overlays = history.overlays()
         if action.restore_live and latest_screen is not None:
-            surface.paint(full_repaint(latest_screen))
-        if (
-            action.render_history
-            and history.snapshot is not None
-            and latest_screen is not None
-        ):
-            surface.paint_history(history.snapshot, history.visible_lines())
+            surface.paint(full_repaint(latest_screen), overlays)
+        elif action.render_history and latest_screen is not None:
+            surface.paint_overlays(latest_screen, overlays)
         if action.protocol_frame:
             send_protocol_frame(action.protocol_frame)
         if action.forwarded_input:
@@ -783,7 +914,14 @@ def run(args: argparse.Namespace) -> int:
         if isinstance(part, SgrMouseEvent):
             # Keep a frozen viewport stable across reported clicks and drags.
             # Terminal-native selection overrides never arrive here.
-            action = history.pointer_event(part)
+            focused_pane_id = (
+                None
+                if latest_screen is None
+                else history.pane_id_at_position(
+                    latest_screen.cursor_x, latest_screen.cursor_y
+                )
+            )
+            action = history.pointer_event(part, focused_pane_id)
             apply_history_action(
                 coalesce_forwarded_wheel(action, part, forwarded_wheels)
             )
@@ -799,10 +937,15 @@ def run(args: argparse.Namespace) -> int:
                 apply_history_action(HistoryAction(restore_live=restore))
                 return
             if part not in (b"\x1b[I", b"\x1b[O"):
-                restore = history.cancel()
                 if may_change_routes:
-                    history.invalidate_routes()
+                    restore = history.invalidate_routes()
                     route_refresh_needed = True
+                elif latest_screen is not None:
+                    restore = history.cancel_for_input(
+                        latest_screen.cursor_x, latest_screen.cursor_y
+                    )
+                else:
+                    restore = history.cancel()
                 apply_history_action(HistoryAction(
                     forwarded_input=part,
                     restore_live=restore,
@@ -851,7 +994,9 @@ def run(args: argparse.Namespace) -> int:
                         saw_screen_update = False
                         for message in decoder.feed(chunk):
                             if isinstance(message, HistoryBatch):
-                                history.accept_prefetch(message)
+                                apply_history_action(
+                                    history.accept_prefetch(message)
+                                )
                                 continue
                             if isinstance(message, HistorySnapshot):
                                 apply_history_action(history.accept(message))
@@ -868,8 +1013,7 @@ def run(args: argparse.Namespace) -> int:
                             if update.kind is UpdateKind.KEYFRAME:
                                 awaiting_keyframe = False
                             latest_screen = applied
-                            if not history.active:
-                                surface.paint(applied)
+                            surface.paint(applied, history.overlays())
                             frames += 1
                             painted_rows += len(applied.changed_rows)
                         if saw_screen_update and route_refresh_needed:

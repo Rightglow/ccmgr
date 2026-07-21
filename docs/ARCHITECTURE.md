@@ -66,6 +66,16 @@ uses the same model for live frames and styled history. Tests against a real
 isolated tmux PTY must compare the reconstructed pane with tmux's own captured
 state whenever that advertised capability boundary changes.
 
+Local SSH history is an overlay, not a pause in the live screen model. Each
+visible agent pane may own one immutable snapshot and offset; incoming live
+rows are painted first and every intersecting frozen rectangle is repainted in
+the same terminal write. Periodic prefetch may refresh routing and bounded
+cache content but must not move an existing viewport. A deep response may
+replace its hot snapshot only when the visible multi-line anchor has one exact
+match.
+Input or bottom restores only the routed pane; layout uncertainty, resize,
+sidebar input, and `Esc` fail closed by removing every incompatible overlay.
+
 ## Modes are registered providers, not a boolean
 
 `railmux.modes.ModeRegistry` is the ordered source of shared mode metadata.

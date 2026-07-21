@@ -350,9 +350,12 @@ is on by default. The client refreshes a 300-line hot cache for each agent pane;
 wheel-up displays it immediately and fills up to 2000 lines in the background.
 Agent-pane wheel events are then handled only locally, while sidebar scrolling
 continues to reach Railmux normally. Scroll to the bottom or press `Esc` to
-return to live output. Reported clicks and drags are ignored while history is
-visible if the gesture starts inside that same pane; clicking another agent or
-the sidebar restores the latest screen and changes focus normally. F8/F9,
+return to live output. Each agent pane keeps an independent history position;
+the sidebar and other agents continue updating, and reaching the bottom or
+typing restores only that pane. Reported clicks and drags are ignored while
+history is visible if the gesture starts inside that same pane; clicking an
+other agent changes focus without moving either history pane, while a sidebar
+click safely restores them all. F8/F9,
 Help's controller-pane zoom, modal close, and resize invalidate the old pointer
 map before it can be reused. Terminal-native selection overrides remain
 terminal-dependent. Use `--no-mouse` when reliable ordinary terminal selection
