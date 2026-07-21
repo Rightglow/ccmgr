@@ -301,9 +301,9 @@ rendering costs or establish a production frame protocol.
   20 FPS this adds bounded tmux server work and sends a full visible snapshot
   whenever the screen changes; it is for validation, not a production daemon.
 
-## Full-window PTY prototype
+## Full-window SSH transport
 
-`railmux ssh` is the installable form of the full-window experiment. Instead of
+`railmux ssh` is the installable full-window transport. Instead of
 reconstructing Railmux from individual panes, the internal `remote-server`
 subcommand attaches one real tmux client inside a private PTY. tmux renders
 the complete window, including the sidebar, status line, borders, modals, and
@@ -311,17 +311,16 @@ both agent panes. The helper consumes that VT stream into a headless screen,
 sends one compressed keyframe, then transmits only changed rows and cursor
 state. Raw intermediate tmux output never crosses SSH.
 
-The implementation modules, optional-dependency name, and private protocol are
-still experimental and have no compatibility promise. The user-facing command
-shape is deliberately small: the local command invokes the matching remote
-Railmux command by name and supplies the protocol version itself. Users must
-not invoke `railmux remote-server` directly.
+The implementation modules and protocol remain private. The user-facing command
+shape is deliberately small: the local command invokes the remote Railmux
+command by name and negotiates package/protocol compatibility before either end
+can attach to tmux. Users must not invoke `railmux remote-server` directly.
 
 Install the optional dependency and helper entry point in the remote Railmux
 environment after updating the source checkout:
 
 ```bash
-python3 -m pip install -e '.[fast-client]'
+python3 -m pip install -e '.[ssh]'
 ```
 
 Install Railmux locally, then connect without supplying a remote executable
@@ -330,6 +329,21 @@ path:
 ```bash
 railmux ssh your-server
 ```
+
+Protocol v6 begins with a bounded remote hello containing package version,
+protocol version, SSH dependency readiness, and tmux availability. The server
+does not inspect or mutate tmux until the compatible client returns the exact
+start acknowledgement. Missing Railmux or its optional dependency can be
+installed after an explicit prompt. Installation selects the exact local
+version unless preserving an already newer compatible remote while adding its
+missing dependency. It is limited to the remote user environment and checks
+`python3 -m pip`, `python -m pip`, `pip3`, and `pip` in that order; it never
+uses `sudo`, edits PATH, or installs tmux. The successful installer execs
+`python -m railmux` directly, so `~/.local/bin` need not already be on a
+non-interactive SSH PATH.
+A newer remote version prompts for a local upgrade through the current Python
+and re-execs the original command. Equal protocol versions remain compatible
+across differing package versions.
 
 If the default `railmux` tmux session is absent, the server starts Railmux in a
 detached tmux session using the same installed Python environment. A custom
@@ -372,7 +386,7 @@ A terminal-native selection override can still bypass mouse reporting before
 the client sees it, but that behavior is terminal-dependent; `--no-mouse` is
 the reliable ordinary-selection option.
 
-Display protocol v5 uses monotonically sequenced, zlib-compressed keyframes and
+Display protocol v6 uses monotonically sequenced, zlib-compressed keyframes and
 row patches. Each update also carries a bounded terminal-mode bitmask. Only
 bracketed paste (`DECSET 2004`) and focus events (`DECSET 1004`) are projected;
 the client mirrors transitions and disables both modes before restoring the
@@ -383,7 +397,8 @@ finish, while a wholly unsent old update can be replaced by the latest screen.
 The diff base advances only after a complete packet is written, so replacement
 is recalculated from the last successfully sent rows, cursor, and terminal
 modes. Slow SSH output therefore does not stop the helper from draining the
-tmux PTY. This private protocol has no compatibility promise yet.
+tmux PTY. Different protocol versions fail before attach and enter the explicit
+upgrade flow instead of attempting wire compatibility.
 
 History is a separate bounded response in that same ordered output stream. The
 server resolves the pane from current tmux geometry, excludes the controller,

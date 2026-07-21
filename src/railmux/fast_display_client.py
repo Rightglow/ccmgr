@@ -1,4 +1,4 @@
-"""Interactive latest-state prototype for the complete Railmux tmux window.
+"""Interactive latest-state SSH client for the complete Railmux tmux window.
 
 The remote helper attaches one real tmux client inside a private PTY and
 coalesces its output before sending a compressed keyframe followed by changed
@@ -10,7 +10,9 @@ always consumed locally.
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import select
 import selectors
 import shlex
 import shutil
@@ -20,12 +22,19 @@ import termios
 import time
 import tty
 from dataclasses import dataclass, replace
-from typing import BinaryIO, Optional, Sequence
+from enum import Enum
+from typing import BinaryIO, NoReturn, Optional, Sequence
 
+from packaging.version import InvalidVersion, Version
+
+from railmux import __version__
 from railmux.fast_display_protocol import (
+    DISPLAY_MAGIC,
     HistoryBatch,
     HistorySnapshot,
     PROTOCOL_VERSION,
+    REMOTE_HELLO_PREFIX,
+    REMOTE_START,
     RemoteExit,
     ScreenUpdate,
     ServerMessageDecoder,
@@ -46,6 +55,9 @@ _HISTORY_FULL_LINES = 2000
 _HISTORY_PREFETCH_INTERVAL = 3.0
 _HISTORY_PREFETCH_TIMEOUT = 6.0
 _HISTORY_CONTENT_PANES = 8
+_REMOTE_HELLO_TIMEOUT = 60.0
+_REMOTE_HELLO_LIMIT = 16 * 1024
+_DISPLAY_MAGIC_PREFIX = b"RMUXD"
 
 
 @dataclass(frozen=True)
@@ -130,7 +142,116 @@ def full_repaint(screen: AppliedScreen) -> AppliedScreen:
 
 
 class ProbeError(RuntimeError):
-    """A bounded, user-facing prototype failure."""
+    """A bounded, user-facing SSH display failure."""
+
+
+@dataclass(frozen=True)
+class RemoteHello:
+    version: str
+    protocol: int
+    ready: bool
+    tmux: bool = True
+
+
+class RemoteStartKind(Enum):
+    HELLO = "hello"
+    LEGACY = "legacy"
+    MISSING = "missing"
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+
+
+@dataclass(frozen=True)
+class RemoteStartup:
+    kind: RemoteStartKind
+    hello: RemoteHello | None = None
+    initial_bytes: bytes = b""
+    returncode: int | None = None
+
+
+def parse_remote_hello(line: bytes) -> RemoteHello:
+    """Parse one bounded, untrusted compatibility line from the remote."""
+    if not line.startswith(REMOTE_HELLO_PREFIX):
+        raise ValueError("not a Railmux remote hello")
+    payload = line[len(REMOTE_HELLO_PREFIX):].rstrip(b"\r\n")
+    try:
+        value = json.loads(payload)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError("invalid Railmux remote hello") from exc
+    if not isinstance(value, dict):
+        raise ValueError("invalid Railmux remote hello")
+    version = value.get("version")
+    protocol = value.get("protocol")
+    ready = value.get("ready")
+    tmux = value.get("tmux")
+    if (
+        not isinstance(version, str)
+        or not version
+        or len(version) > 128
+        or not isinstance(protocol, int)
+        or isinstance(protocol, bool)
+        or not 1 <= protocol <= 65535
+        or not isinstance(ready, bool)
+        or not isinstance(tmux, bool)
+    ):
+        raise ValueError("invalid Railmux remote hello")
+    try:
+        version.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError("invalid Railmux remote version") from exc
+    return RemoteHello(version, protocol, ready, tmux)
+
+
+def await_remote_startup(
+    process: subprocess.Popen,
+    timeout: float = _REMOTE_HELLO_TIMEOUT,
+) -> RemoteStartup:
+    """Wait before raw mode until the remote proves its compatibility state."""
+    assert process.stdout is not None
+    deadline = time.monotonic() + timeout
+    received = bytearray()
+    line_start = 0
+    while len(received) < _REMOTE_HELLO_LIMIT:
+        magic_start = received.find(_DISPLAY_MAGIC_PREFIX)
+        if magic_start >= 0:
+            magic_end = magic_start + len(DISPLAY_MAGIC)
+            if len(received) >= magic_end:
+                if received[magic_start:magic_end] == DISPLAY_MAGIC:
+                    return RemoteStartup(
+                        RemoteStartKind.LEGACY, initial_bytes=bytes(received)
+                    )
+                return RemoteStartup(RemoteStartKind.FAILED)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return RemoteStartup(RemoteStartKind.TIMEOUT)
+        readable, _writable, _exceptional = select.select(
+            [process.stdout.fileno()], [], [], remaining
+        )
+        if not readable:
+            return RemoteStartup(RemoteStartKind.TIMEOUT)
+        chunk = os.read(process.stdout.fileno(), 1)
+        if not chunk:
+            returncode = process.wait()
+            kind = (
+                RemoteStartKind.MISSING
+                if returncode == 127
+                else RemoteStartKind.FAILED
+            )
+            return RemoteStartup(kind, returncode=returncode)
+        received.extend(chunk)
+        if chunk != b"\n":
+            continue
+        line = bytes(received[line_start:])
+        line_start = len(received)
+        marker = line.find(REMOTE_HELLO_PREFIX)
+        if marker < 0:
+            continue
+        try:
+            hello = parse_remote_hello(line[marker:])
+        except ValueError:
+            return RemoteStartup(RemoteStartKind.FAILED)
+        return RemoteStartup(RemoteStartKind.HELLO, hello=hello)
+    return RemoteStartup(RemoteStartKind.FAILED)
 
 
 @dataclass(frozen=True)
@@ -671,7 +792,7 @@ class TerminalSurface:
         self.active = True
 
     def _reconcile_terminal_modes(self, requested: TerminalMode) -> None:
-        """Mirror only input-affecting modes explicitly carried by protocol v5."""
+        """Mirror only input-affecting modes explicitly carried by protocol v6."""
         disabled = self.terminal_modes & ~requested
         enabled = requested & ~self.terminal_modes
         controls: list[bytes] = []
@@ -787,6 +908,41 @@ class TerminalSurface:
         self.active = False
 
 
+def _remote_server_args(
+    *, session: str, width: int, height: int, fps: float,
+) -> list[str]:
+    return [
+        "remote-server",
+        "--protocol", str(PROTOCOL_VERSION),
+        "--session", session,
+        "--width", str(width),
+        "--height", str(height),
+        "--fps", str(fps),
+    ]
+
+
+def _remote_launch_command(
+    remote_command: str,
+    server_args: Sequence[str],
+) -> str:
+    executable = shlex.quote(remote_command)
+    direct = shlex.join([remote_command, *server_args])
+    branches = [
+        f"if command -v {executable} >/dev/null 2>&1; "
+        f"then exec {direct}",
+    ]
+    if remote_command == "railmux":
+        for python in ("python3", "python"):
+            probe = shlex.join([python, "-c", "import railmux"])
+            launch = shlex.join([python, "-m", "railmux", *server_args])
+            branches.append(
+                f"elif command -v {python} >/dev/null 2>&1 "
+                f"&& {probe} >/dev/null 2>&1; then exec {launch}"
+            )
+    branches.append("else exit 127; fi")
+    return "; ".join(branches)
+
+
 def build_ssh_argv(
     destination: str,
     *,
@@ -797,22 +953,357 @@ def build_ssh_argv(
     remote_command: str,
     ssh_args: Sequence[str],
 ) -> list[str]:
-    remote_argv = [
-        remote_command, "remote-server",
-        "--protocol", str(PROTOCOL_VERSION),
-        "--session", session,
-        "--width", str(width),
-        "--height", str(height),
-        "--fps", str(fps),
-    ]
-    command = " ".join(shlex.quote(part) for part in remote_argv)
+    server_args = _remote_server_args(
+        session=session, width=width, height=height, fps=fps
+    )
+    command = _remote_launch_command(remote_command, server_args)
     return ["ssh", "-T", *ssh_args, destination, command]
 
 
+def build_ssh_install_argv(
+    destination: str,
+    *,
+    version: str,
+    session: str,
+    width: int,
+    height: int,
+    fps: float,
+    ssh_args: Sequence[str],
+) -> list[str]:
+    """Install into the remote user environment, then exec the same session."""
+    server_args = _remote_server_args(
+        session=session, width=width, height=height, fps=fps
+    )
+    requirement = f"railmux[ssh]=={version}"
+    branches: list[str] = []
+    candidates = (
+        (("python3", "-m", "pip"), ("python3", "-m", "railmux")),
+        (("python", "-m", "pip"), ("python", "-m", "railmux")),
+        (("pip3",), ("python3", "-m", "railmux")),
+        (("pip",), ("python", "-m", "railmux")),
+    )
+    for index, (installer, runner) in enumerate(candidates):
+        executable = installer[0]
+        runner_executable = runner[0]
+        pip_probe = shlex.join([*installer, "--version"])
+        condition = (
+            f"command -v {executable} >/dev/null 2>&1 "
+            f"&& {pip_probe} >/dev/null 2>&1"
+        )
+        if runner_executable != executable:
+            condition += (
+                f" && command -v {runner_executable} >/dev/null 2>&1"
+            )
+        install = shlex.join([
+            *installer,
+            "install",
+            "--user",
+            "--upgrade",
+            requirement,
+        ])
+        launch = shlex.join([*runner, *server_args])
+        keyword = "if" if index == 0 else "elif"
+        branches.append(
+            f"{keyword} {condition}; then {install} 1>&2 "
+            f"&& exec {launch}; exit $?"
+        )
+    branches.append(
+        "else echo 'error: no usable python/pip, python3/pip3, or pip was found' "
+        ">&2; exit 127; fi"
+    )
+    return ["ssh", "-T", *ssh_args, destination, "; ".join(branches)]
+
+
+def remote_install_help(destination: str, version: str) -> str:
+    requirement = shlex.quote(f"railmux[ssh]=={version}")
+    return (
+        f"Install it manually on {destination}, then retry:\n"
+        f"  python3 -m pip install --user --upgrade {requirement}\n"
+        f"or:\n  pip3 install --user --upgrade {requirement}\n"
+        "If that version is not published, copy the matching wheel or source "
+        "checkout to the remote host and install it with the same Python."
+    )
+
+
+def remote_tmux_help(destination: str) -> str:
+    return (
+        f"tmux is not installed or not on PATH on {destination}. Install it "
+        "with the remote operating system's package manager, then retry. "
+        "Railmux will not run sudo or install system packages automatically."
+    )
+
+
+def _confirm(question: str) -> bool:
+    try:
+        answer = input(f"{question} [y/N] ")
+    except (EOFError, KeyboardInterrupt):
+        print(file=sys.stderr)
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
+def _stop_unstarted_remote(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+def _local_upgrade_argv(version: str) -> list[str]:
+    argv = [sys.executable, "-m", "pip", "install"]
+    if sys.prefix == getattr(sys, "base_prefix", sys.prefix):
+        argv.append("--user")
+    argv.extend(("--upgrade", f"railmux=={version}"))
+    return argv
+
+
+def _upgrade_local_and_restart(version: str, raw_args: Sequence[str]) -> NoReturn:
+    argv = _local_upgrade_argv(version)
+    print(
+        f"railmux ssh: upgrading local Railmux to {version}...",
+        file=sys.stderr,
+    )
+    try:
+        result = subprocess.run(argv, check=False)
+    except OSError as exc:
+        raise ProbeError(
+            f"could not start local pip: {exc}\nRun manually:\n  "
+            f"{shlex.join(argv)}"
+        ) from exc
+    if result.returncode:
+        raise ProbeError(
+            "local Railmux upgrade failed. Run manually, then retry:\n  "
+            f"{shlex.join(argv)}"
+        )
+    restart = [sys.executable, "-m", "railmux", "ssh", *raw_args]
+    print("railmux ssh: local upgrade succeeded; restarting...", file=sys.stderr)
+    try:
+        os.execv(sys.executable, restart)
+    except OSError as exc:
+        raise ProbeError(
+            "local upgrade succeeded but Railmux could not restart; run:\n  "
+            f"{shlex.join(restart)}"
+        ) from exc
+    raise AssertionError("os.execv returned unexpectedly")
+
+
+def _spawn_remote(argv: Sequence[str]) -> subprocess.Popen:
+    try:
+        process = subprocess.Popen(
+            list(argv),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+        )
+    except OSError as exc:
+        raise ProbeError(f"could not start ssh: {exc}") from exc
+    assert process.stdin is not None
+    assert process.stdout is not None
+    return process
+
+
+def _install_remote_and_start(
+    args: argparse.Namespace,
+    current_size: os.terminal_size,
+    version: str,
+) -> tuple[subprocess.Popen, RemoteStartup]:
+    install_argv = build_ssh_install_argv(
+        args.destination,
+        version=version,
+        session=args.session,
+        width=current_size.columns,
+        height=current_size.lines,
+        fps=args.fps,
+        ssh_args=args.ssh_arg,
+    )
+    process = _spawn_remote(install_argv)
+    startup = await_remote_startup(process)
+    return process, startup
+
+
+def _version_pair(remote_version: str) -> tuple[Version, Version] | None:
+    try:
+        return Version(__version__), Version(remote_version)
+    except InvalidVersion:
+        return None
+
+
+def _confirm_remote_install(
+    args: argparse.Namespace,
+    reason: str,
+    version: str,
+) -> bool:
+    return _confirm(
+        f"{reason} Install Railmux {version} with SSH support into "
+        f"the remote user environment on {args.destination}?"
+    )
+
+
+def prepare_remote_process(
+    args: argparse.Namespace,
+    current_size: os.terminal_size,
+) -> tuple[subprocess.Popen, bytes]:
+    """Resolve compatibility and consent before the remote attaches to tmux."""
+    argv = build_ssh_argv(
+        args.destination,
+        session=args.session,
+        width=current_size.columns,
+        height=current_size.lines,
+        fps=args.fps,
+        remote_command=args.remote_command,
+        ssh_args=args.ssh_arg,
+    )
+    process = _spawn_remote(argv)
+    startup = await_remote_startup(process)
+    install_version = __version__
+
+    if startup.kind is RemoteStartKind.LEGACY:
+        print(
+            "warning: the remote Railmux uses the current wire protocol but "
+            "does not report package compatibility; continuing in legacy mode",
+            file=sys.stderr,
+        )
+        return process, startup.initial_bytes
+
+    install_reason: str | None = None
+    if startup.kind is RemoteStartKind.MISSING:
+        install_reason = "Railmux is not installed or discoverable remotely."
+    elif startup.kind is RemoteStartKind.TIMEOUT:
+        _stop_unstarted_remote(process)
+        raise ProbeError(
+            "timed out waiting for the remote Railmux compatibility handshake"
+        )
+    elif startup.kind is RemoteStartKind.FAILED:
+        _stop_unstarted_remote(process)
+        if startup.returncode == 255:
+            raise ProbeError("ssh could not connect to the remote host")
+        install_reason = (
+            "The remote Railmux does not support the compatibility handshake."
+        )
+    else:
+        assert startup.hello is not None
+        hello = startup.hello
+        versions = _version_pair(hello.version)
+        remote_is_newer = bool(
+            versions is not None and versions[1] > versions[0]
+        )
+        if remote_is_newer:
+            protocol_note = (
+                f"SSH protocol v{hello.protocol}"
+                if hello.protocol != PROTOCOL_VERSION
+                else f"compatible SSH protocol v{PROTOCOL_VERSION}"
+            )
+            if _confirm(
+                f"Remote Railmux {hello.version} is newer than local "
+                f"{__version__} and uses {protocol_note}. Upgrade local "
+                f"Railmux to {hello.version}?"
+            ):
+                _stop_unstarted_remote(process)
+                _upgrade_local_and_restart(hello.version, args.raw_argv)
+            if hello.protocol != PROTOCOL_VERSION:
+                _stop_unstarted_remote(process)
+                raise ProbeError(
+                    "the newer remote Railmux uses an incompatible SSH "
+                    "protocol; upgrade local Railmux and retry"
+                )
+            print(
+                f"warning: continuing with local Railmux {__version__} "
+                f"and compatible remote {hello.version}",
+                file=sys.stderr,
+            )
+            install_version = hello.version
+        if hello.protocol > PROTOCOL_VERSION:
+            _stop_unstarted_remote(process)
+            raise ProbeError(
+                f"remote Railmux {hello.version} reports newer SSH protocol "
+                f"v{hello.protocol}, but its package version is not newer "
+                f"than local {__version__}; refusing an unsafe automatic "
+                "local downgrade. Install matching Railmux builds manually."
+            )
+        if hello.protocol < PROTOCOL_VERSION:
+            install_reason = (
+                f"Remote Railmux {hello.version} uses older SSH protocol "
+                f"v{hello.protocol}; local {__version__} requires "
+                f"v{PROTOCOL_VERSION}."
+            )
+        elif not hello.tmux:
+            _stop_unstarted_remote(process)
+            raise ProbeError(remote_tmux_help(args.destination))
+        elif not hello.ready:
+            install_reason = (
+                f"Remote Railmux {hello.version} is missing its SSH display "
+                "dependency."
+            )
+        else:
+            if not remote_is_newer and hello.version != __version__:
+                print(
+                    f"warning: remote Railmux {hello.version} differs from "
+                    f"local {__version__}, but SSH protocol "
+                    f"v{PROTOCOL_VERSION} is compatible",
+                    file=sys.stderr,
+                )
+            try:
+                process.stdin.write(REMOTE_START)
+                process.stdin.flush()
+            except BrokenPipeError as exc:
+                raise ProbeError(
+                    "remote Railmux exited before accepting the display"
+                ) from exc
+            return process, b""
+
+    assert install_reason is not None
+    if not _confirm_remote_install(args, install_reason, install_version):
+        _stop_unstarted_remote(process)
+        raise ProbeError(remote_install_help(args.destination, install_version))
+    _stop_unstarted_remote(process)
+    process, startup = _install_remote_and_start(
+        args, current_size, install_version
+    )
+    if (
+        startup.kind is RemoteStartKind.HELLO
+        and startup.hello is not None
+        and not startup.hello.tmux
+    ):
+        _stop_unstarted_remote(process)
+        raise ProbeError(remote_tmux_help(args.destination))
+    if (
+        startup.kind is not RemoteStartKind.HELLO
+        or startup.hello is None
+        or startup.hello.version != install_version
+        or startup.hello.protocol != PROTOCOL_VERSION
+        or not startup.hello.ready
+        or not startup.hello.tmux
+    ):
+        _stop_unstarted_remote(process)
+        raise ProbeError(
+            "automatic remote installation did not produce a compatible "
+            f"Railmux.\n{remote_install_help(args.destination, install_version)}"
+        )
+    try:
+        process.stdin.write(REMOTE_START)
+        process.stdin.flush()
+    except BrokenPipeError as exc:
+        raise ProbeError(
+            "remote Railmux exited after automatic installation"
+        ) from exc
+    return process, b""
+
+
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(
         prog="railmux ssh",
-        description="Display the complete Railmux window with bounded latest-state frames"
+        description=(
+            "Connect to Railmux with a version-negotiated latest-state SSH "
+            "display"
+        ),
+        epilog=(
+            "Before attaching, missing or incompatible remote packages can "
+            "be installed after confirmation; automatic setup never uses sudo."
+        ),
     )
     parser.add_argument("destination", help="SSH destination or configured host alias")
     parser.add_argument("--session", default="railmux")
@@ -833,7 +1324,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--ssh-arg", action="append", default=[],
         help="extra ssh argument; repeat and use --ssh-arg=VALUE",
     )
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
+    args.raw_argv = tuple(raw_argv)
     if not 1.0 <= args.fps <= 60.0:
         parser.error("--fps must be between 1 and 60")
     if args.duration < 0:
@@ -851,23 +1343,8 @@ def run(args: argparse.Namespace) -> int:
     if current_size.columns < 40 or current_size.lines < 12:
         raise ProbeError("local terminal must be at least 40x12")
     if current_size.columns > 1000 or current_size.lines > 500:
-        raise ProbeError("local terminal exceeds prototype limits of 1000x500")
-    argv = build_ssh_argv(
-        args.destination,
-        session=args.session,
-        width=current_size.columns,
-        height=current_size.lines,
-        fps=args.fps,
-        remote_command=args.remote_command,
-        ssh_args=args.ssh_arg,
-    )
-    process = subprocess.Popen(
-        argv,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-    )
-    assert process.stdin is not None
-    assert process.stdout is not None
+        raise ProbeError("local terminal exceeds SSH display limits of 1000x500")
+    process, initial_remote_bytes = prepare_remote_process(args, current_size)
 
     surface = TerminalSurface(sys.stdout.buffer, mouse=not args.no_mouse)
     decoder = ServerMessageDecoder()
@@ -972,7 +1449,9 @@ def run(args: argparse.Namespace) -> int:
                     if observed_size.columns < 40 or observed_size.lines < 12:
                         raise ProbeError("resized terminal is smaller than 40x12")
                     if observed_size.columns > 1000 or observed_size.lines > 500:
-                        raise ProbeError("resized terminal exceeds prototype limits")
+                        raise ProbeError(
+                            "resized terminal exceeds SSH display limits"
+                        )
                     if history.active and latest_screen is not None:
                         surface.paint(full_repaint(latest_screen))
                     history.clear_cache()
@@ -986,7 +1465,10 @@ def run(args: argparse.Namespace) -> int:
                 events = selector.select(timeout=terminal_input.next_timeout())
                 for key, _mask in events:
                     if key.data == "remote":
-                        chunk = os.read(process.stdout.fileno(), 65536)
+                        chunk = initial_remote_bytes + os.read(
+                            process.stdout.fileno(), 65536
+                        )
+                        initial_remote_bytes = b""
                         if not chunk:
                             remote_closed = True
                             break

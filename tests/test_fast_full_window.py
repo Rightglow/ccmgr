@@ -5,6 +5,7 @@ import io
 import os
 import struct
 import subprocess
+import time
 from dataclasses import dataclass
 from unittest.mock import MagicMock
 
@@ -17,6 +18,8 @@ from railmux.fast_display_protocol import (
     InputFrameDecoder,
     InputKind,
     PROTOCOL_VERSION,
+    REMOTE_HELLO_PREFIX,
+    REMOTE_START,
     ScreenUpdate,
     ScreenUpdateDecoder as ClientScreenUpdateDecoder,
     ServerMessageDecoder,
@@ -33,22 +36,31 @@ from railmux.fast_display_protocol import (
 from railmux.fast_display_server import parse_args as parse_server_args
 from railmux.fast_display_server import render_rows
 from railmux.fast_display_server import terminal_modes_for_screen
-from railmux import fast_display_server
+from railmux import fast_display_client, fast_display_server
 from railmux.fast_display_client import (
     HistoryAction,
     LOCAL_ESCAPE,
     LocalHistoryView,
+    RemoteHello,
+    RemoteStartKind,
+    RemoteStartup,
     ScreenModel,
     SgrMouseEvent,
     TerminalInputDecoder,
     TerminalSurface,
     UpdateKind as ClientUpdateKind,
     build_ssh_argv,
+    build_ssh_install_argv,
+    await_remote_startup,
     coalesce_forwarded_wheel,
     encode_input as encode_client_input,
     encode_keyframe_request as encode_client_keyframe_request,
     encode_resize as encode_client_resize,
     input_may_change_routes,
+    parse_args as parse_client_args,
+    parse_remote_hello,
+    prepare_remote_process,
+    remote_install_help,
     split_local_escape,
 )
 
@@ -89,7 +101,7 @@ def test_compressed_keyframe_crosses_standalone_client_decoder_in_parts():
     assert update.terminal_modes is TerminalMode.NONE
 
 
-def test_v5_wire_round_trips_allowlisted_terminal_modes_and_rejects_unknown():
+def test_v6_wire_round_trips_allowlisted_terminal_modes_and_rejects_unknown():
     modes = TerminalMode.BRACKETED_PASTE | TerminalMode.FOCUS_EVENTS
     update = ClientScreenUpdateDecoder().feed(
         encode_update(_keyframe(terminal_modes=modes))
@@ -105,13 +117,13 @@ def test_v5_wire_round_trips_allowlisted_terminal_modes_and_rejects_unknown():
     assert ClientScreenUpdateDecoder().feed(malformed) == []
 
 
-def test_v5_decoder_does_not_accept_a_v4_packet_prefix():
-    old_packet = b"RMUXD4\x00" + struct.pack(">I", 32) + bytes(32)
+def test_v6_decoder_does_not_accept_a_v5_packet_prefix():
+    old_packet = b"RMUXD5\x00" + struct.pack(">I", 32) + bytes(32)
 
     assert ClientScreenUpdateDecoder().feed(old_packet) == []
 
 
-def test_v5_unified_decoder_round_trips_history_between_screen_updates():
+def test_v6_unified_decoder_round_trips_history_between_screen_updates():
     snapshot = HistorySnapshot(
         request_id=7,
         pane_id="%42",
@@ -154,7 +166,7 @@ def test_history_request_round_trip_validates_pointer_and_line_limit():
         encode_history_request(1, 80, 24, 5000)
 
 
-def test_v5_history_prefetch_batch_round_trip_is_atomic_and_bounded():
+def test_v6_history_prefetch_batch_round_trip_is_atomic_and_bounded():
     decoder = InputFrameDecoder()
     request = decoder.feed(encode_history_prefetch(17, 300))[0]
     assert request.kind is InputKind.PREFETCH_HISTORY
@@ -923,11 +935,572 @@ def test_full_window_ssh_command_uses_railmux_remote_subcommand_and_protocol():
     )
 
     assert argv[:5] == ["ssh", "-T", "-J", "jump", "server"]
-    assert argv[-1].startswith(
-        f"railmux remote-server --protocol {PROTOCOL_VERSION} "
-    )
+    assert "then exec railmux remote-server" in argv[-1]
+    assert f"--protocol {PROTOCOL_VERSION}" in argv[-1]
+    assert "python3 -m railmux remote-server" in argv[-1]
     assert "--session 'rail mux'" in argv[-1]
     assert "--width 120 --height 40 --fps 20.0" in argv[-1]
+
+
+def test_remote_install_command_uses_user_pip_then_matching_python_module():
+    argv = build_ssh_install_argv(
+        "server",
+        version="1.2.3",
+        session="rail mux",
+        width=120,
+        height=40,
+        fps=20.0,
+        ssh_args=("-J", "jump"),
+    )
+
+    assert argv[:5] == ["ssh", "-T", "-J", "jump", "server"]
+    assert "python3 -m pip --version" in argv[-1]
+    assert "python3 -m pip install --user --upgrade" in argv[-1]
+    assert "'railmux[ssh]==1.2.3'" in argv[-1]
+    assert "pip3 install --user --upgrade" in argv[-1]
+    assert "&& exec python3 -m railmux remote-server" in argv[-1]
+    assert "sudo" not in argv[-1]
+
+
+def test_generated_remote_bootstrap_and_install_commands_are_posix_shell_syntax():
+    bootstrap = build_ssh_argv(
+        "server",
+        session="rail mux",
+        width=120,
+        height=40,
+        fps=20.0,
+        remote_command="railmux",
+        ssh_args=(),
+    )[-1]
+    installer = build_ssh_install_argv(
+        "server",
+        version="1.2.3",
+        session="rail mux",
+        width=120,
+        height=40,
+        fps=20.0,
+        ssh_args=(),
+    )[-1]
+
+    for command in (bootstrap, installer):
+        result = subprocess.run(
+            ["/bin/sh", "-n", "-c", command],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr.decode()
+
+
+def test_remote_install_help_is_exact_and_has_source_fallback():
+    help_text = remote_install_help("server", "1.2.3")
+
+    assert "python3 -m pip install --user --upgrade" in help_text
+    assert "'railmux[ssh]==1.2.3'" in help_text
+    assert "matching wheel or source checkout" in help_text
+
+
+def test_remote_hello_is_strictly_bounded_and_typed():
+    hello = parse_remote_hello(
+        REMOTE_HELLO_PREFIX
+        + b'{"protocol":6,"ready":true,"tmux":true,"version":"1.2.3"}\n'
+    )
+
+    assert hello == RemoteHello("1.2.3", 6, True)
+    with pytest.raises(ValueError):
+        parse_remote_hello(
+            REMOTE_HELLO_PREFIX
+            + b'{"protocol":true,"ready":true,"tmux":true,'
+            b'"version":"1.2.3"}\n'
+        )
+    with pytest.raises(ValueError):
+        parse_remote_hello(REMOTE_HELLO_PREFIX + b"not-json\n")
+
+
+def test_remote_startup_wait_reads_hello_before_raw_mode():
+    script = (
+        "import sys; "
+        "sys.stdout.buffer.write("
+        "b'RAILMUX-REMOTE/1 {\"protocol\":6,\"ready\":true,\"tmux\":true,"
+        "\"version\":\"1.2.3\"}\\n'); "
+        "sys.stdout.buffer.flush()"
+    )
+    process = subprocess.Popen(
+        [fast_display_client.sys.executable, "-c", script],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+    )
+
+    startup = await_remote_startup(process, timeout=2.0)
+    process.wait(timeout=2.0)
+
+    assert startup == RemoteStartup(
+        RemoteStartKind.HELLO,
+        RemoteHello("1.2.3", PROTOCOL_VERSION, True),
+    )
+
+
+def test_remote_startup_tolerates_a_non_newline_shell_banner():
+    script = (
+        "import sys; "
+        "sys.stdout.buffer.write("
+        "b'banner: RAILMUX-REMOTE/1 {\"protocol\":6,\"ready\":true,"
+        "\"tmux\":true,\"version\":\"1.2.3\"}\\n'); "
+        "sys.stdout.buffer.flush()"
+    )
+    process = subprocess.Popen(
+        [fast_display_client.sys.executable, "-c", script],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+    )
+
+    startup = await_remote_startup(process, timeout=2.0)
+    process.wait(timeout=2.0)
+
+    assert startup == RemoteStartup(
+        RemoteStartKind.HELLO,
+        RemoteHello("1.2.3", PROTOCOL_VERSION, True),
+    )
+
+
+def test_remote_startup_rejects_an_old_wire_protocol_without_timing_out():
+    process = subprocess.Popen(
+        [
+            fast_display_client.sys.executable,
+            "-c",
+            "import sys,time;sys.stdout.buffer.write(b'RMUXD5\\0');"
+            "sys.stdout.buffer.flush();time.sleep(5)",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+    )
+    try:
+        started = time.monotonic()
+        startup = await_remote_startup(process, timeout=2.0)
+
+        assert startup == RemoteStartup(RemoteStartKind.FAILED)
+        assert time.monotonic() - started < 1.0
+    finally:
+        process.terminate()
+        process.wait(timeout=2.0)
+
+
+class _PreflightProcess:
+    def __init__(self, returncode=None):
+        self.returncode = returncode
+        self.stdin = io.BytesIO()
+        self.stdout = io.BytesIO()
+        self.terminated = False
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode or 0
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = -15
+
+    def kill(self):
+        self.returncode = -9
+
+
+def test_compatible_remote_is_confirmed_before_attach(monkeypatch):
+    process = _PreflightProcess()
+    args = parse_client_args(["server"])
+    monkeypatch.setattr(
+        fast_display_client, "_spawn_remote", lambda _argv: process
+    )
+    monkeypatch.setattr(
+        fast_display_client,
+        "await_remote_startup",
+        lambda _process: RemoteStartup(
+            RemoteStartKind.HELLO,
+            RemoteHello(fast_display_client.__version__, PROTOCOL_VERSION, True),
+        ),
+    )
+
+    selected, initial = prepare_remote_process(
+        args, os.terminal_size((120, 40))
+    )
+
+    assert selected is process
+    assert initial == b""
+    assert process.stdin.getvalue() == REMOTE_START
+
+
+def test_missing_remote_prompts_then_installs_and_starts(monkeypatch):
+    missing = _PreflightProcess(127)
+    installed = _PreflightProcess()
+    args = parse_client_args(["server"])
+    monkeypatch.setattr(
+        fast_display_client, "_spawn_remote", lambda _argv: missing
+    )
+    monkeypatch.setattr(
+        fast_display_client,
+        "await_remote_startup",
+        lambda _process: RemoteStartup(RemoteStartKind.MISSING, returncode=127),
+    )
+    monkeypatch.setattr(fast_display_client, "_confirm", lambda _question: True)
+    monkeypatch.setattr(
+        fast_display_client,
+        "_install_remote_and_start",
+        lambda _args, _size, _version: (
+            installed,
+            RemoteStartup(
+                RemoteStartKind.HELLO,
+                RemoteHello(
+                    fast_display_client.__version__, PROTOCOL_VERSION, True
+                ),
+            ),
+        ),
+    )
+
+    selected, _initial = prepare_remote_process(
+        args, os.terminal_size((120, 40))
+    )
+
+    assert selected is installed
+    assert installed.stdin.getvalue() == REMOTE_START
+
+
+def test_missing_remote_decline_returns_copyable_install_help(
+    monkeypatch,
+):
+    process = _PreflightProcess(127)
+    args = parse_client_args(["server"])
+    monkeypatch.setattr(
+        fast_display_client, "_spawn_remote", lambda _argv: process
+    )
+    monkeypatch.setattr(
+        fast_display_client,
+        "await_remote_startup",
+        lambda _process: RemoteStartup(RemoteStartKind.MISSING, returncode=127),
+    )
+    monkeypatch.setattr(fast_display_client, "_confirm", lambda _question: False)
+
+    with pytest.raises(fast_display_client.ProbeError) as exc:
+        prepare_remote_process(args, os.terminal_size((120, 40)))
+
+    assert "python3 -m pip install --user" in str(exc.value)
+    assert fast_display_client.__version__ in str(exc.value)
+
+
+def test_remote_without_tmux_gives_system_package_guidance(monkeypatch):
+    process = _PreflightProcess()
+    args = parse_client_args(["server"])
+    monkeypatch.setattr(
+        fast_display_client, "_spawn_remote", lambda _argv: process
+    )
+    monkeypatch.setattr(
+        fast_display_client,
+        "await_remote_startup",
+        lambda _process: RemoteStartup(
+            RemoteStartKind.HELLO,
+            RemoteHello(
+                fast_display_client.__version__, PROTOCOL_VERSION, True, False
+            ),
+        ),
+    )
+
+    with pytest.raises(fast_display_client.ProbeError, match="tmux is not"):
+        prepare_remote_process(args, os.terminal_size((120, 40)))
+
+    assert process.terminated
+
+
+def test_newer_compatible_remote_prompts_for_local_upgrade_but_can_continue(
+    monkeypatch, capsys,
+):
+    process = _PreflightProcess()
+    args = parse_client_args(["server"])
+    monkeypatch.setattr(
+        fast_display_client, "_spawn_remote", lambda _argv: process
+    )
+    monkeypatch.setattr(
+        fast_display_client,
+        "await_remote_startup",
+        lambda _process: RemoteStartup(
+            RemoteStartKind.HELLO,
+            RemoteHello("999.0", PROTOCOL_VERSION, True),
+        ),
+    )
+    questions = []
+    monkeypatch.setattr(
+        fast_display_client,
+        "_confirm",
+        lambda question: questions.append(question) or False,
+    )
+
+    selected, _initial = prepare_remote_process(
+        args, os.terminal_size((120, 40))
+    )
+
+    assert selected is process
+    assert "Upgrade local Railmux to 999.0?" in questions[0]
+    assert process.stdin.getvalue() == REMOTE_START
+    assert "continuing with local Railmux" in capsys.readouterr().err
+
+
+def test_newer_remote_protocol_can_upgrade_and_restart_local_client(monkeypatch):
+    process = _PreflightProcess()
+    args = parse_client_args(["server", "--fps", "30"])
+    monkeypatch.setattr(
+        fast_display_client, "_spawn_remote", lambda _argv: process
+    )
+    monkeypatch.setattr(
+        fast_display_client,
+        "await_remote_startup",
+        lambda _process: RemoteStartup(
+            RemoteStartKind.HELLO,
+            RemoteHello("999.0", PROTOCOL_VERSION + 1, True),
+        ),
+    )
+    monkeypatch.setattr(fast_display_client, "_confirm", lambda _question: True)
+
+    class Restarted(Exception):
+        pass
+
+    def restart(version, raw_args):
+        assert version == "999.0"
+        assert raw_args == ("server", "--fps", "30")
+        raise Restarted
+
+    monkeypatch.setattr(
+        fast_display_client, "_upgrade_local_and_restart", restart
+    )
+
+    with pytest.raises(Restarted):
+        prepare_remote_process(args, os.terminal_size((120, 40)))
+
+    assert process.terminated
+
+
+def test_newer_protocol_with_non_newer_package_cannot_downgrade_local(
+    monkeypatch,
+):
+    process = _PreflightProcess()
+    args = parse_client_args(["server"])
+    monkeypatch.setattr(
+        fast_display_client, "_spawn_remote", lambda _argv: process
+    )
+    monkeypatch.setattr(
+        fast_display_client,
+        "await_remote_startup",
+        lambda _process: RemoteStartup(
+            RemoteStartKind.HELLO,
+            RemoteHello(
+                fast_display_client.__version__, PROTOCOL_VERSION + 1, True
+            ),
+        ),
+    )
+    confirm = MagicMock()
+    monkeypatch.setattr(fast_display_client, "_confirm", confirm)
+
+    with pytest.raises(
+        fast_display_client.ProbeError, match="unsafe automatic local downgrade"
+    ):
+        prepare_remote_process(args, os.terminal_size((120, 40)))
+
+    confirm.assert_not_called()
+    assert process.terminated
+
+
+def test_local_upgrade_uses_current_python_user_site_and_restarts(monkeypatch):
+    monkeypatch.setattr(fast_display_client.sys, "prefix", "/usr")
+    monkeypatch.setattr(fast_display_client.sys, "base_prefix", "/usr")
+    run = MagicMock(return_value=subprocess.CompletedProcess([], 0))
+    monkeypatch.setattr(fast_display_client.subprocess, "run", run)
+
+    class Restarted(Exception):
+        pass
+
+    observed = {}
+
+    def execv(executable, argv):
+        observed["executable"] = executable
+        observed["argv"] = argv
+        raise Restarted
+
+    monkeypatch.setattr(fast_display_client.os, "execv", execv)
+
+    with pytest.raises(Restarted):
+        fast_display_client._upgrade_local_and_restart(
+            "1.2.3", ("server", "--fps", "30")
+        )
+
+    install = run.call_args.args[0]
+    assert install == [
+        fast_display_client.sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--user",
+        "--upgrade",
+        "railmux==1.2.3",
+    ]
+    assert observed["argv"] == [
+        fast_display_client.sys.executable,
+        "-m",
+        "railmux",
+        "ssh",
+        "server",
+        "--fps",
+        "30",
+    ]
+
+
+def test_older_remote_protocol_prompts_for_matching_remote_upgrade(monkeypatch):
+    old = _PreflightProcess()
+    upgraded = _PreflightProcess()
+    args = parse_client_args(["server"])
+    monkeypatch.setattr(
+        fast_display_client, "_spawn_remote", lambda _argv: old
+    )
+    monkeypatch.setattr(
+        fast_display_client,
+        "await_remote_startup",
+        lambda _process: RemoteStartup(
+            RemoteStartKind.HELLO,
+            RemoteHello("0.1.0", PROTOCOL_VERSION - 1, True),
+        ),
+    )
+    questions = []
+    monkeypatch.setattr(
+        fast_display_client,
+        "_confirm",
+        lambda question: questions.append(question) or True,
+    )
+    monkeypatch.setattr(
+        fast_display_client,
+        "_install_remote_and_start",
+        lambda _args, _size, _version: (
+            upgraded,
+            RemoteStartup(
+                RemoteStartKind.HELLO,
+                RemoteHello(
+                    fast_display_client.__version__, PROTOCOL_VERSION, True
+                ),
+            ),
+        ),
+    )
+
+    selected, _initial = prepare_remote_process(
+        args, os.terminal_size((120, 40))
+    )
+
+    assert selected is upgraded
+    assert "uses older SSH protocol" in questions[0]
+    assert old.terminated
+    assert upgraded.stdin.getvalue() == REMOTE_START
+
+
+def test_higher_remote_version_is_offered_to_local_before_protocol_direction(
+    monkeypatch,
+):
+    process = _PreflightProcess()
+    args = parse_client_args(["server"])
+    monkeypatch.setattr(
+        fast_display_client, "_spawn_remote", lambda _argv: process
+    )
+    monkeypatch.setattr(
+        fast_display_client,
+        "await_remote_startup",
+        lambda _process: RemoteStartup(
+            RemoteStartKind.HELLO,
+            RemoteHello("999.0", PROTOCOL_VERSION - 1, True),
+        ),
+    )
+    questions = []
+    monkeypatch.setattr(
+        fast_display_client,
+        "_confirm",
+        lambda question: questions.append(question) or False,
+    )
+
+    with pytest.raises(fast_display_client.ProbeError, match="newer remote"):
+        prepare_remote_process(args, os.terminal_size((120, 40)))
+
+    assert "Remote Railmux 999.0 is newer than local" in questions[0]
+    assert "Upgrade local Railmux to 999.0?" in questions[0]
+    assert process.terminated
+
+
+def test_declining_local_upgrade_does_not_downgrade_remote_dependency_repair(
+    monkeypatch,
+):
+    process = _PreflightProcess()
+    repaired = _PreflightProcess()
+    args = parse_client_args(["server"])
+    monkeypatch.setattr(
+        fast_display_client, "_spawn_remote", lambda _argv: process
+    )
+    monkeypatch.setattr(
+        fast_display_client,
+        "await_remote_startup",
+        lambda _process: RemoteStartup(
+            RemoteStartKind.HELLO,
+            RemoteHello("999.0", PROTOCOL_VERSION, False),
+        ),
+    )
+    answers = iter((False, True))
+    monkeypatch.setattr(
+        fast_display_client, "_confirm", lambda _question: next(answers)
+    )
+    installed_versions = []
+
+    def install(_args, _size, version):
+        installed_versions.append(version)
+        return (
+            repaired,
+            RemoteStartup(
+                RemoteStartKind.HELLO,
+                RemoteHello("999.0", PROTOCOL_VERSION, True),
+            ),
+        )
+
+    monkeypatch.setattr(
+        fast_display_client, "_install_remote_and_start", install
+    )
+
+    selected, _initial = prepare_remote_process(
+        args, os.terminal_size((120, 40))
+    )
+
+    assert selected is repaired
+    assert installed_versions == ["999.0"]
+    assert process.terminated
+    assert repaired.stdin.getvalue() == REMOTE_START
+
+
+def test_failed_remote_auto_install_returns_manual_recovery(monkeypatch):
+    missing = _PreflightProcess(127)
+    failed = _PreflightProcess(1)
+    args = parse_client_args(["server"])
+    monkeypatch.setattr(
+        fast_display_client, "_spawn_remote", lambda _argv: missing
+    )
+    monkeypatch.setattr(
+        fast_display_client,
+        "await_remote_startup",
+        lambda _process: RemoteStartup(RemoteStartKind.MISSING, returncode=127),
+    )
+    monkeypatch.setattr(fast_display_client, "_confirm", lambda _question: True)
+    monkeypatch.setattr(
+        fast_display_client,
+        "_install_remote_and_start",
+        lambda _args, _size, _version: (
+            failed,
+            RemoteStartup(RemoteStartKind.FAILED, returncode=1),
+        ),
+    )
+
+    with pytest.raises(fast_display_client.ProbeError) as exc:
+        prepare_remote_process(args, os.terminal_size((120, 40)))
+
+    assert "automatic remote installation" in str(exc.value)
+    assert "matching wheel or source checkout" in str(exc.value)
 
 
 def test_remote_server_has_no_bare_tmux_server_argv():
@@ -935,6 +1508,84 @@ def test_remote_server_has_no_bare_tmux_server_argv():
 
     assert '["tmux",' not in source
     assert "['tmux'," not in source
+
+
+def test_remote_server_hello_reports_version_protocol_and_dependency(monkeypatch):
+    output = io.BytesIO()
+    monkeypatch.setattr(fast_display_server.shutil, "which", lambda _name: "/tmux")
+    monkeypatch.setattr(
+        fast_display_server.sys, "stdout", MagicMock(buffer=output)
+    )
+
+    fast_display_server._emit_remote_hello(True)
+
+    hello = parse_remote_hello(output.getvalue())
+    assert hello == RemoteHello(
+        fast_display_client.__version__, PROTOCOL_VERSION, True
+    )
+
+
+def test_remote_server_waits_for_exact_start_confirmation(monkeypatch):
+    remote_input = MagicMock(buffer=io.BytesIO(REMOTE_START))
+    monkeypatch.setattr(fast_display_server.sys, "stdin", remote_input)
+    monkeypatch.setattr(
+        fast_display_server.select,
+        "select",
+        lambda *_args: ([remote_input.buffer], [], []),
+    )
+
+    assert fast_display_server._await_client_start() is True
+
+    remote_input.buffer = io.BytesIO(b"wrong\n")
+    assert fast_display_server._await_client_start() is False
+
+
+def test_remote_server_missing_dependency_never_touches_tmux(monkeypatch):
+    monkeypatch.setattr(
+        fast_display_server, "_fast_dependency_ready", lambda: False
+    )
+    emit = MagicMock()
+    monkeypatch.setattr(fast_display_server, "_emit_remote_hello", emit)
+    socket_label = MagicMock()
+    monkeypatch.setattr(
+        fast_display_server.tmux_server, "socket_label", socket_label
+    )
+
+    result = fast_display_server.main([
+        "--protocol", str(PROTOCOL_VERSION),
+        "--width", "80",
+        "--height", "24",
+    ])
+
+    assert result == 2
+    emit.assert_called_once_with(False)
+    socket_label.assert_not_called()
+
+
+def test_remote_server_attaches_only_after_start_confirmation(monkeypatch):
+    monkeypatch.setattr(
+        fast_display_server, "_fast_dependency_ready", lambda: True
+    )
+    monkeypatch.setattr(fast_display_server, "_emit_remote_hello", MagicMock())
+    monkeypatch.setattr(
+        fast_display_server, "_await_client_start", lambda: True
+    )
+    monkeypatch.setattr(
+        fast_display_server.tmux_server, "socket_label", lambda: "railmux"
+    )
+    serve = MagicMock(return_value=17)
+    monkeypatch.setattr(fast_display_server, "serve", serve)
+
+    result = fast_display_server.main([
+        "--protocol", str(PROTOCOL_VERSION),
+        "--session", "custom",
+        "--width", "80",
+        "--height", "24",
+        "--fps", "30",
+    ])
+
+    assert result == 17
+    serve.assert_called_once_with("custom", 80, 24, 30.0)
 
 
 def test_server_starts_default_railmux_with_current_python(monkeypatch):
@@ -1259,10 +1910,10 @@ def test_server_captures_nested_history_from_real_pane_without_resizing(
 @pytest.mark.parametrize(
     "argv",
     [
-        ["--protocol", "5", "--width", "39", "--height", "24"],
-        ["--protocol", "5", "--width", "80", "--height", "11"],
-        ["--protocol", "5", "--width", "80", "--height", "24", "--fps", "61"],
-        ["--protocol", "4", "--width", "80", "--height", "24"],
+        ["--protocol", "6", "--width", "39", "--height", "24"],
+        ["--protocol", "6", "--width", "80", "--height", "11"],
+        ["--protocol", "6", "--width", "80", "--height", "24", "--fps", "61"],
+        ["--protocol", "5", "--width", "80", "--height", "24"],
     ],
 )
 def test_server_rejects_unbounded_geometry_and_frame_rates(argv):

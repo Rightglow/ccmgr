@@ -33,6 +33,7 @@ from railmux.display_transport import (
     AgentDisplayTransport,
     recover_interrupted_swaps,
 )
+from railmux.fast_display_protocol import PROTOCOL_VERSION, REMOTE_HELLO_PREFIX
 from railmux.tmux_binding_manager import SharedTmuxBindingManager
 from railmux.selection_isolation import SelectionIsolationManager
 from railmux.modes import CODEX_MODE
@@ -286,6 +287,63 @@ def test_dedicated_label_routes_fast_server_to_private_tmux(monkeypatch):
             session_id
         )] == [agent]
     finally:
+        subprocess.run(
+            tmux_server.tmux_argv("kill-server"),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        shutil.rmtree(socket_root, ignore_errors=True)
+
+
+def test_remote_compatibility_hello_precedes_any_tmux_server(monkeypatch):
+    """A client prompt must never leave behind or resize a tmux session."""
+    socket_root = Path(tempfile.mkdtemp(prefix="rx-handshake-", dir="/tmp"))
+    socket_root.chmod(0o700)
+    label = f"rx-handshake-{os.getpid()}"
+    monkeypatch.setenv("TMUX_TMPDIR", str(socket_root))
+    monkeypatch.setenv(tmux_server.SOCKET_LABEL_ENV, label)
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    process = None
+    try:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "railmux",
+                "remote-server",
+                "--protocol",
+                str(PROTOCOL_VERSION),
+                "--width",
+                "80",
+                "--height",
+                "24",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=os.environ.copy(),
+        )
+        assert process.stdout is not None
+        assert process.stdout.readline().startswith(REMOTE_HELLO_PREFIX)
+
+        probe = subprocess.run(
+            tmux_server.tmux_argv("list-sessions"),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        assert probe.returncode != 0
+        assert process.poll() is None
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2.0)
         subprocess.run(
             tmux_server.tmux_argv("kill-server"),
             stdout=subprocess.DEVNULL,

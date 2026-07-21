@@ -1,4 +1,4 @@
-"""Remote half of the experimental coalesced full-window client.
+"""Remote half of the coalesced full-window SSH client.
 
 This module deliberately attaches one real tmux client inside a private PTY.
 tmux therefore remains the compositor and input authority for the Railmux
@@ -16,9 +16,11 @@ import argparse
 import errno
 import fcntl
 import hashlib
+import json
 import os
 import select
 import shlex
+import shutil
 import signal
 import stat
 import struct
@@ -32,13 +34,15 @@ from functools import lru_cache
 from types import SimpleNamespace
 from typing import Sequence
 
-from railmux import restart_state, tmux_health, tmux_server
+from railmux import __version__, restart_state, tmux_health, tmux_server
 from railmux.fast_display_protocol import (
     HistoryBatch,
     HistorySnapshot,
     InputKind,
     InputFrameDecoder,
     PROTOCOL_VERSION,
+    REMOTE_HELLO_PREFIX,
+    REMOTE_START,
     RemoteExit,
     ScreenUpdate,
     TerminalMode,
@@ -57,6 +61,45 @@ class DisplayServerError(RuntimeError):
 
 _WATCHDOG_INTERVAL = 5.0
 _WATCHDOG_FAILURES = 3
+_START_HANDSHAKE_TIMEOUT = 300.0
+
+
+def _fast_dependency_ready() -> bool:
+    """Return whether the installed SSH display dependency is usable."""
+    try:
+        import pyte
+        from pyte import modes as _modes  # noqa: F401
+
+        _extended_pyte(pyte)
+    except (ImportError, AttributeError, TypeError):
+        return False
+    return True
+
+
+def _emit_remote_hello(ready: bool) -> None:
+    """Describe compatibility before acquiring or attaching any tmux state."""
+    payload = json.dumps(
+        {
+            "protocol": PROTOCOL_VERSION,
+            "ready": ready,
+            "tmux": shutil.which("tmux") is not None,
+            "version": __version__,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    sys.stdout.buffer.write(REMOTE_HELLO_PREFIX + payload + b"\n")
+    sys.stdout.buffer.flush()
+
+
+def _await_client_start(timeout: float = _START_HANDSHAKE_TIMEOUT) -> bool:
+    """Wait for the compatible local client before attaching to tmux."""
+    readable, _writable, _exceptional = select.select(
+        [sys.stdin.buffer], [], [], timeout
+    )
+    if not readable:
+        return False
+    return sys.stdin.buffer.readline(len(REMOTE_START) + 1) == REMOTE_START
 
 
 class _ExtendedScreenMixin:
@@ -373,7 +416,7 @@ def _validate_unattached_railmux(session: str) -> str:
     if attached:
         raise DisplayServerError(
             "Railmux already has an attached client; detach it with Ctrl-B d "
-            "before starting this prototype"
+            "before starting railmux ssh"
         )
     return session_id
 
@@ -866,7 +909,7 @@ def serve(session: str, width: int, height: int, fps: float) -> int:
         from pyte import modes
     except ImportError as exc:
         raise DisplayServerError(
-            "pyte is required remotely; install railmux[fast-client]"
+            "pyte is required remotely; install railmux[ssh]"
         ) from exc
     pyte = _extended_pyte(pyte)
 
@@ -1161,7 +1204,7 @@ def _serve_attached(
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="railmux remote-server",
-        description="Experimental coalesced full-window Railmux display server"
+        description="Internal coalesced full-window Railmux display server"
     )
     parser.add_argument("--protocol", type=int, required=True)
     parser.add_argument("--session", default="railmux")
@@ -1183,7 +1226,22 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    ready = _fast_dependency_ready()
+    _emit_remote_hello(ready)
     args = parse_args(argv)
+    if not ready:
+        print(
+            "remote display: pyte is unavailable; install "
+            "'railmux[ssh]'",
+            file=sys.stderr,
+        )
+        return 2
+    if not _await_client_start():
+        print(
+            "remote display: compatible client did not confirm startup",
+            file=sys.stderr,
+        )
+        return 2
     try:
         tmux_server.socket_label()
         return serve(args.session, args.width, args.height, args.fps)

@@ -1,4 +1,4 @@
-"""Private v5 framing for the experimental full-window display prototype."""
+"""Private v6 framing for the coalesced full-window SSH display."""
 
 from __future__ import annotations
 
@@ -8,10 +8,12 @@ from dataclasses import dataclass
 from enum import IntEnum, IntFlag
 
 
-DISPLAY_MAGIC = b"RMUXD5\x00"
-INPUT_MAGIC = b"RMUXK5\x00"
-PROTOCOL_VERSION = 5
+DISPLAY_MAGIC = b"RMUXD6\x00"
+INPUT_MAGIC = b"RMUXK6\x00"
+PROTOCOL_VERSION = 6
 LENGTH_BYTES = 4
+REMOTE_HELLO_PREFIX = b"RAILMUX-REMOTE/1 "
+REMOTE_START = b"RAILMUX-START/1\n"
 MAX_WIRE_BYTES = 16 * 1024 * 1024
 MAX_SCREEN_BYTES = 32 * 1024 * 1024
 MAX_INPUT_BYTES = 64 * 1024
@@ -495,7 +497,7 @@ class ServerMessageDecoder:
 
 
 class ScreenUpdateDecoder:
-    """Compatibility view which ignores v5 history response messages."""
+    """Compatibility view which ignores v6 history response messages."""
 
     def __init__(self) -> None:
         self._decoder = ServerMessageDecoder()

@@ -8,19 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 Development wheels from this tree identify themselves as
-`0.2.1.dev2026072103` so they cannot be confused with the tagged 0.2.0 wheel
+`0.2.1.dev2026072104` so they cannot be confused with the tagged 0.2.0 wheel
 or the earlier SSH-history test wheel.
 
 ### Added
 
+- Productize `railmux ssh` startup with a protocol-v6 compatibility handshake
+  that completes before the remote helper attaches to tmux. A missing or older
+  remote Railmux can be installed into the remote user environment, with
+  explicit local consent, using the first usable Python/pip pair and the exact
+  local package version plus the `ssh` extra; Railmux never invokes `sudo` or
+  installs tmux. A newer remote version instead offers to upgrade the local
+  installation through its current Python and restarts the original command.
+  Compatible package versions may differ when their private protocol matches,
+  while failures print exact manual recovery commands.
 - Add low-frequency, identity-pinned tmux watchdogs outside both the ordinary
-  attach client and experimental SSH attach client. Three consecutive failures
+  attach client and SSH attach client. Three consecutive failures
   restore the terminal, stop only the owned client, and persist a privacy-safe
   incident for `railmux doctor`; tmux, apport, provider processes, and rollout
   files are never killed or modified automatically. Both observers use a
   short-lived, exact, one-shot clean-exit marker to distinguish intentional
   hard quit from an abrupt tmux disappearance.
-- Add an experimental `railmux ssh HOST` latest-state display transport with
+- Add a `railmux ssh HOST` latest-state display transport with
   compressed row patches, dynamic resize, native tmux keyboard and SGR mouse
   forwarding, a periodically refreshed 300-line pane-history hot cache with a
   2000-line background fill, safe SGR colour preservation, synchronized
@@ -31,14 +40,14 @@ or the earlier SSH-history test wheel.
 
 ### Fixed
 
-- Let each agent pane in the experimental SSH display retain its own immutable
+- Let each agent pane in the SSH display retain its own immutable
   local-history viewport. Live patches are now painted continuously and
   composed with every frozen pane in one terminal update, so the sidebar and
   unfrozen agents remain live; changing focus, typing, or reaching the bottom
   restores only the affected pane, while `Esc` and layout changes still restore
   all panes safely. Deep-history responses anchor only to a unique exact match
   of the visible lines instead of jumping when remote output advances.
-- Keep the experimental SSH display's headless terminal synchronized when
+- Keep the SSH display's headless terminal synchronized when
   tmux uses xterm's parameterized scroll-up, scroll-down, or
   repeat-character operations. The bounded pyte compatibility layer now
   implements `CSI S`, `CSI T`, and `CSI b` for both live frames and styled
@@ -64,7 +73,7 @@ or the earlier SSH-history test wheel.
   behind a rejected pane-history request, keep agent scrolling exclusively in
   the local history layer, and prevent reported clicks or drags from discarding
   a visible history viewport.
-- Make experimental SSH history routing zoom-aware and generation-gated, so
+- Make SSH history routing zoom-aware and generation-gated, so
   F8/F9, Help, modal transitions, resize, and late history responses cannot
   target hidden/stale pane rectangles. Cross-pane/sidebar clicks now repaint
   and forward normally, wheels cannot move a non-hovered history pane, and

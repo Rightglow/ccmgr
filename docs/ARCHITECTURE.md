@@ -76,6 +76,22 @@ match.
 Input or bottom restores only the routed pane; layout uncertainty, resize,
 sidebar input, and `Esc` fail closed by removing every incompatible overlay.
 
+The SSH compatibility handshake precedes every tmux lookup, session creation,
+lock, PTY allocation, or attach. The remote reports a bounded package version,
+private protocol version, SSH-extra readiness, and tmux availability, then
+waits for an exact client acknowledgement. Equal protocol versions are the
+compatibility authority; package versions need not be equal. A higher remote
+package version is offered to the user as an explicit local upgrade before any
+other version remedy. A missing, older-protocol, or dependency-incomplete
+remote may be installed only after explicit consent and only in the remote user
+environment. Installation normally selects the exact local version; repairing
+the SSH dependency after a declined local upgrade preserves an already newer
+remote version instead of downgrading it. Automatic setup may probe Python/pip
+commands but must never run `sudo`, edit shell startup files, or install tmux.
+The local upgrade uses its current Python environment and re-execs the original
+`railmux ssh` invocation only after pip succeeds. Failure leaves tmux untouched
+and prints a reproducible manual command.
+
 ## Modes are registered providers, not a boolean
 
 `railmux.modes.ModeRegistry` is the ordered source of shared mode metadata.

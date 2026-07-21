@@ -52,7 +52,7 @@ Other common Linux package managers receive a copyable installation command.
 
 Railmux always launches or attaches its workspace on a dedicated tmux socket,
 including when invoked from inside another tmux client. This isolates Railmux's
-sessions, bindings, hooks, and experimental SSH display traffic from the
+sessions, bindings, hooks, and SSH display traffic from the
 default tmux server. Sessions left on the historical default socket by an older
 Railmux release remain visible in the same Running sidebar with a `legacy ·
 restart recommended` label. Opening one does not resize it; automatic exit
@@ -332,17 +332,28 @@ If the connection is so slow that the sidebar can't refresh one frame per
 second, skip the mouse and use keyboard navigation — `↑↓ / Tab / Enter`
 cover every operation and don't depend on a fast redraw.
 
-#### Experimental latest-state SSH display
+#### Latest-state SSH display
 
 For terminals that struggle with large tmux redraw bursts, Railmux also has an
-experimental client that transmits coalesced screen state instead of every
-intermediate terminal update. Install the current Railmux checkout on both
-machines (the remote installation needs the `fast-client` extra), detach any
-ordinary client with `Ctrl-B d`, then run locally:
+SSH client that transmits coalesced screen state instead of every intermediate
+terminal update. Install Railmux locally, detach any ordinary remote client
+with `Ctrl-B d`, then run:
 
 ```bash
 railmux ssh your-server
 ```
+
+Before the remote helper attaches to tmux, both ends exchange package and
+private-protocol versions. If Railmux is absent remotely, the local client asks
+before installing the exact local version with its `ssh` extra into the remote
+user environment. It checks `python3 -m pip`, `python -m pip`, `pip3`, then
+`pip`; it never runs `sudo` or installs system packages, so tmux must already be
+available remotely. If the remote version is newer, the client asks before
+upgrading local Railmux with the current Python and then restarts the same
+command. Different package versions can connect when their protocol version is
+compatible. Declined or failed installation prints commands that can be copied
+manually; unpublished development versions may require copying the matching
+wheel or source checkout.
 
 The default remote session is started automatically when absent. `Ctrl-B d`
 detaches normally; `Ctrl-]` is an emergency local disconnect. Mouse forwarding
@@ -365,8 +376,6 @@ tmux client, Railmux reads scrollback from the identity-validated real agent
 pane rather than the zero-history wrapper; it does not resize or alter the old
 session.
 Bracketed paste and terminal focus events follow the active remote application.
-The protocol is experimental, so keep the local and remote Railmux versions
-matched.
 
 Both the ordinary launcher and SSH display keep a low-frequency watchdog
 outside the attached tmux client. Three consecutive dedicated-server health
