@@ -1016,7 +1016,10 @@ def test_real_soft_quit_disconnects_shared_clients_and_agents_survive(
     if shutil.which("tmux") is None:
         pytest.skip("tmux is not installed")
 
-    socket_root = tmp_path / "tmux"
+    # Keep the explicit tmux socket short. macOS pytest paths under
+    # /private/var/folders can exceed the Unix-domain socket path limit after
+    # tmux appends its uid directory and label.
+    socket_root = Path(tempfile.mkdtemp(prefix="rx-soft-", dir="/tmp"))
     home = tmp_path / "home"
     runtime = tmp_path / "runtime"
     claude_home = home / ".claude"
@@ -1163,6 +1166,7 @@ def test_real_soft_quit_disconnects_shared_clients_and_agents_survive(
                 os.close(master)
             except OSError:
                 pass
+        shutil.rmtree(socket_root, ignore_errors=True)
 
 
 def test_real_tmux_single_sidebar_focus_clears_stale_target_format(isolated_tmux):
