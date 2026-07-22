@@ -1,22 +1,29 @@
-"""App-mutable settings, persisted as a JSON sidecar.
+"""App-mutable preferences in Railmux's single ``config.toml``.
 
-Unlike :mod:`railmux.config` (a read-only ``config.toml`` the user owns),
-these are values railmux itself changes at runtime — currently the Codex
-auto-run ("yolo") choice and a versioned layout preference. Stored at
-``~/.config/railmux/settings.json``. Same atomic-write pattern as
-:mod:`railmux.favorites` / :mod:`railmux.renames`.
+Users and the Options UI share ``~/.config/railmux/config.toml``. TOMLKit
+preserves comments, ordering, formatting, and unknown keys while Railmux
+atomically updates only the settings it owns. Current-run choices stay in
+memory; a next-launch layout profile is removed after it is consumed.
 """
 from __future__ import annotations
 
-import json
+from collections.abc import MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+import tomlkit
+from tomlkit.exceptions import TOMLKitError
 
 from railmux.atomic_file import atomic_write_text
+from railmux.config import default_config_path
 
 
-def _settings_path() -> Path:
-    return Path.home() / ".config" / "railmux" / "settings.json"
+OPTION_POLICIES = frozenset({"always", "ask", "never"})
+
+
+def _config_path() -> Path:
+    return default_config_path()
 
 
 @dataclass(frozen=True)
@@ -28,8 +35,8 @@ class LayoutProfile:
     sidebar_permille: int
     primary_permille: int | None = None
 
-    def to_json(self) -> dict:
-        data = {
+    def to_toml(self) -> dict[str, object]:
+        data: dict[str, object] = {
             "version": 1,
             "scope": self.scope,
             "layout": self.layout,
@@ -40,17 +47,23 @@ class LayoutProfile:
         return data
 
 
+def _plain(value: object) -> object:
+    unwrap = getattr(value, "unwrap", None)
+    return unwrap() if callable(unwrap) else value
+
+
 def _decode_layout_profile(raw: object) -> LayoutProfile | None:
-    if not isinstance(raw, dict) or len(raw) > 5 or raw.get("version") != 1:
+    plain = _plain(raw)
+    if not isinstance(plain, dict) or len(plain) > 5 or plain.get("version") != 1:
         return None
-    if not set(raw).issubset({
+    if not set(plain).issubset({
         "version", "scope", "layout", "sidebar_permille", "primary_permille",
     }):
         return None
-    scope = raw.get("scope")
-    layout = raw.get("layout")
-    sidebar = raw.get("sidebar_permille")
-    primary = raw.get("primary_permille")
+    scope = plain.get("scope")
+    layout = plain.get("layout")
+    sidebar = plain.get("sidebar_permille")
+    primary = plain.get("primary_permille")
     if scope not in {"always", "once"}:
         return None
     if layout not in {"single", "side-by-side", "stacked"}:
@@ -69,96 +82,136 @@ def _decode_layout_profile(raw: object) -> LayoutProfile | None:
     return LayoutProfile(scope, layout, sidebar, primary)
 
 
+def _inline_table(values: dict[str, object]) -> tomlkit.items.InlineTable:
+    result = tomlkit.inline_table()
+    for key, value in values.items():
+        result[key] = value
+    return result
+
+
 class Settings:
-    """In-memory settings dict, backed by a JSON file."""
+    """Validated mutable subset of the shared TOML configuration."""
 
     def __init__(self) -> None:
-        self._path = _settings_path()
-        self._data: dict = {}
+        self._path = _config_path()
+        self._document = tomlkit.document()
         self._load()
 
-    def _load(self) -> None:
-        if not self._path.is_file():
-            return
+    def _read_document(self):
         try:
-            data = json.loads(self._path.read_text())
-        except (json.JSONDecodeError, OSError):
-            return
-        if isinstance(data, dict):
-            self._data = data
+            text = self._path.read_text()
+        except FileNotFoundError:
+            return tomlkit.document()
+        except (OSError, UnicodeError):
+            return None
+        try:
+            return tomlkit.parse(text)
+        except TOMLKitError:
+            return None
 
-    def _save(self) -> bool:
+    def _load(self) -> None:
+        document = self._read_document()
+        if document is not None:
+            self._document = document
+
+    def _get(self, section_name: str, key: str) -> object | None:
+        section = self._document.get(section_name)
+        if not isinstance(section, MutableMapping):
+            return None
+        return _plain(section.get(key))
+
+    @staticmethod
+    def _table(document, section_name: str) -> MutableMapping | None:
+        section = document.get(section_name)
+        if section is None:
+            section = tomlkit.table()
+            document[section_name] = section
+        return section if isinstance(section, MutableMapping) else None
+
+    def _replace(self, document) -> bool:
         try:
-            atomic_write_text(
-                self._path, json.dumps(self._data, indent=2, sort_keys=True))
+            atomic_write_text(self._path, tomlkit.dumps(document))
         except OSError:
             return False
+        self._document = document
         return True
 
-    def _replace(self, data: dict) -> bool:
-        """Persist a complete replacement, rolling memory back on failure."""
-        previous = self._data
-        self._data = data
-        if self._save():
-            return True
-        self._data = previous
-        return False
-
-    def _update(self, **values: object) -> bool:
-        """Persist *values* as one transaction, rolling memory back on failure."""
-        updated = self._data.copy()
-        updated.update(values)
+    def _update_section(
+        self,
+        section_name: str,
+        values: dict[str, Any],
+        *,
+        remove: tuple[str, ...] = (),
+    ) -> bool:
+        # Re-read immediately before every mutation. This preserves valid
+        # manual edits and changes made by another Railmux process after this
+        # instance started instead of rewriting a stale startup snapshot.
+        updated = self._read_document()
+        if updated is None:
+            return False
+        section = self._table(updated, section_name)
+        if section is None:
+            return False
+        for key in remove:
+            section.pop(key, None)
+        for key, value in values.items():
+            section[key] = value
         return self._replace(updated)
 
-    # -- Codex auto-run (yolo) -------------------------------------------
+    # -- Codex auto-run --------------------------------------------------
     @property
-    def codex_yolo(self) -> bool:
-        """Whether Codex bypasses approvals+sandbox; unknown types fail closed."""
-        return self._data.get("codex_yolo") is True
+    def codex_yolo_policy(self) -> str:
+        policy = self._get("codex", "auto_run")
+        return policy if policy in OPTION_POLICIES else "ask"
 
-    def set_codex_yolo(self, value: bool) -> bool:
-        return self._update(codex_yolo=value is True)
-
-    @property
-    def codex_yolo_prompted(self) -> bool:
-        """True once the user has been asked whether to enable Codex auto-run."""
-        return self._data.get("codex_yolo_prompted") is True
-
-    def mark_codex_yolo_prompted(self) -> bool:
-        return self._update(codex_yolo_prompted=True)
-
-    def record_codex_yolo_choice(self, enabled: bool) -> bool:
-        """Atomically persist both the YOLO choice and the prompted marker.
-
-        A single write prevents the unsafe split state where YOLO was enabled
-        but the prompted marker failed to persist. Non-bool inputs fail closed.
-        """
-        return self._update(
-            codex_yolo=enabled is True,
-            codex_yolo_prompted=True,
-        )
+    def set_codex_yolo_policy(self, policy: str) -> bool:
+        if policy not in OPTION_POLICIES:
+            return False
+        return self._update_section("codex", {"auto_run": policy})
 
     # -- Saved outer-workspace geometry ---------------------------------
     @property
+    def layout_save_policy(self) -> str:
+        policy = self._get("ui", "layout_retention")
+        return policy if policy in OPTION_POLICIES else "ask"
+
+    @property
     def layout_profile(self) -> LayoutProfile | None:
-        return _decode_layout_profile(self._data.get("layout_profile"))
+        return _decode_layout_profile(self._get("ui", "layout_profile"))
 
-    def save_layout_profile(self, profile: LayoutProfile) -> bool:
-        """Atomically store one already-validated geometry profile."""
-        decoded = _decode_layout_profile(profile.to_json())
-        if decoded != profile:
+    def set_layout_save_policy(
+        self,
+        policy: str,
+        profile: LayoutProfile | None = None,
+    ) -> bool:
+        if policy not in OPTION_POLICIES:
             return False
-        return self._update(layout_profile=profile.to_json())
-
-    def clear_layout_profile(self) -> bool:
-        if "layout_profile" not in self._data:
-            return True
-        updated = self._data.copy()
-        del updated["layout_profile"]
-        return self._replace(updated)
+        if profile is not None:
+            decoded = _decode_layout_profile(profile.to_toml())
+            if decoded != profile:
+                return False
+            if (policy == "always" and profile.scope != "always") or (
+                policy == "ask" and profile.scope != "once"
+            ) or policy == "never":
+                return False
+        values: dict[str, Any] = {"layout_retention": policy}
+        remove: tuple[str, ...] = ()
+        if profile is None:
+            remove = ("layout_profile",)
+        else:
+            values["layout_profile"] = _inline_table(profile.to_toml())
+        return self._update_section("ui", values, remove=remove)
 
     def consume_layout_profile(self, expected: LayoutProfile) -> bool:
-        """Remove only the same one-shot profile the caller applied."""
-        if expected.scope != "once" or self.layout_profile != expected:
+        if expected.scope != "once":
             return False
-        return self.clear_layout_profile()
+        document = self._read_document()
+        if document is None:
+            return False
+        section = document.get("ui")
+        if not isinstance(section, MutableMapping):
+            return False
+        if _decode_layout_profile(section.get("layout_profile")) != expected:
+            return False
+        section.pop("layout_profile")
+        return self._replace(document)

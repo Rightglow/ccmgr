@@ -32,6 +32,7 @@ classifiers = [
 ]
 dependencies = [
   "packaging>=23.0",
+  "tomlkit>=0.13.2,<1",
   "urwid>=2.6.16",
   "tomli>=2.0.1; python_version < '3.11'",
 ]

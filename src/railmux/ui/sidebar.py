@@ -75,6 +75,18 @@ class SidebarSection(urwid.WidgetWrap):
 class StableWeightedPile(urwid.Pile):
     """A weighted Pile whose row rounding never depends on focus position."""
 
+    def __init__(self, widget_list, focus_item=None) -> None:
+        super().__init__(widget_list, focus_item=focus_item)
+        self._bottom_row_debt = 0
+
+    def set_bottom_row_debt(self, rows: int) -> None:
+        """Charge temporary footer growth to the bottom section first."""
+        rows = max(0, int(rows))
+        if rows == self._bottom_row_debt:
+            return
+        self._bottom_row_debt = rows
+        self._invalidate()
+
     def get_rows_sizes(self, size, focus: bool = False):
         if len(size) != 2 or any(
             option[0] != urwid.WHSettings.WEIGHT
@@ -83,8 +95,9 @@ class StableWeightedPile(urwid.Pile):
             return super().get_rows_sizes(size, focus)
 
         maxcol, maxrow = size
+        allocation_rows = maxrow + self._bottom_row_debt
         weights = [float(option[1]) for _widget, option in self.contents]
-        remaining = max(0, maxrow)
+        remaining = max(0, allocation_rows)
         remaining_weight = sum(weights)
         heights: list[int] = []
         for weight in weights:
@@ -95,6 +108,17 @@ class StableWeightedPile(urwid.Pile):
             heights.append(rows)
             remaining -= rows
             remaining_weight -= weight
+        # Compute the normal allocation at the pre-expansion height, then pay
+        # the footer's extra rows from Running (the bottom section). Only
+        # pathological terminals where Running is already empty fall back to
+        # the preceding section so the returned heights still fit maxrow.
+        debt = self._bottom_row_debt
+        for index in range(len(heights) - 1, -1, -1):
+            take = min(debt, heights[index])
+            heights[index] -= take
+            debt -= take
+            if debt == 0:
+                break
         widths = (maxcol,) * len(heights)
         sizes = tuple((maxcol, rows) for rows in heights)
         return widths, tuple(heights), sizes

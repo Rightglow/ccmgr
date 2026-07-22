@@ -20,6 +20,7 @@ def _app(layout: WorkspaceLayout = WorkspaceLayout.SINGLE) -> App:
         app._workspace.secondary.pane_id = "%3"
     app._railmux_pane_id = "%1"
     app._settings = MagicMock()
+    app._settings.layout_save_policy = "ask"
     app._layout_profile = None
     app._layout_profile_applied = False
     app._layout_profile_fallback = False
@@ -136,7 +137,7 @@ def test_fallback_does_not_overwrite_good_always_profile_on_exit():
 
     app._request_exit(soft=True)
 
-    app._settings.save_layout_profile.assert_not_called()
+    app._settings.set_layout_save_policy.assert_not_called()
     app._commit_exit.assert_called_once_with(soft=True)
 
 
@@ -148,12 +149,14 @@ def test_explicit_geometry_after_fallback_refreshes_always_profile():
     app._layout_profile_fallback = True
     app._layout_geometry_user_owned = True
     app._capture_layout_profile = MagicMock(return_value=current)
-    app._settings.save_layout_profile.return_value = True
+    app._settings.layout_save_policy = "always"
+    app._settings.set_layout_save_policy.return_value = True
     app._commit_exit = MagicMock()
 
     app._request_exit(soft=False)
 
-    app._settings.save_layout_profile.assert_called_once_with(current)
+    app._settings.set_layout_save_policy.assert_called_once_with(
+        "always", current)
     app._commit_exit.assert_called_once_with(soft=False)
 
 
@@ -162,7 +165,7 @@ def test_this_time_exit_choice_saves_one_shot_profile():
     app._layout_geometry_user_owned = True
     current = LayoutProfile("always", "single", 300)
     app._capture_layout_profile = MagicMock(return_value=current)
-    app._settings.save_layout_profile.return_value = True
+    app._settings.set_layout_save_policy.return_value = True
     app._show_preferred_height_modal = MagicMock()
     app._commit_exit = MagicMock()
 
@@ -171,9 +174,24 @@ def test_this_time_exit_choice_saves_one_shot_profile():
     modal = app._show_preferred_height_modal.call_args.args[0]
     assert isinstance(modal, LayoutSaveModal)
     modal._on_this_time()
-    app._settings.save_layout_profile.assert_called_once_with(
-        LayoutProfile("once", "single", 300))
+    app._settings.set_layout_save_policy.assert_called_once_with(
+        "ask", LayoutProfile("once", "single", 300))
     app._commit_exit.assert_called_once_with(soft=True)
+
+
+def test_never_layout_policy_skips_exit_prompt():
+    app = _app()
+    app._layout_geometry_user_owned = True
+    app._settings.layout_save_policy = "never"
+    app._capture_layout_profile = MagicMock(
+        return_value=LayoutProfile("always", "single", 300))
+    app._show_preferred_height_modal = MagicMock()
+    app._commit_exit = MagicMock()
+
+    app._request_exit(soft=False)
+
+    app._show_preferred_height_modal.assert_not_called()
+    app._commit_exit.assert_called_once_with(soft=False)
 
 
 def test_unchanged_default_layout_exits_without_save_prompt():
@@ -202,3 +220,22 @@ def test_button_detach_refuses_ambiguous_multi_client_target(monkeypatch):
 
     run.assert_not_called()
     assert "Ctrl-B d" in app._set_status.call_args.args[0]
+    assert app._set_status.call_args.args[1] == "warn"
+
+
+def test_button_detach_fails_closed_when_client_count_is_unavailable(
+    monkeypatch,
+):
+    app = _app()
+    run = MagicMock()
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.current_session_name", lambda: "railmux")
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.session_attached_count", lambda _session: None)
+    monkeypatch.setattr(subprocess, "run", run)
+
+    app._on_detach()
+
+    run.assert_not_called()
+    assert "Ctrl-B d" in app._set_status.call_args.args[0]
+    assert app._set_status.call_args.args[1] == "warn"

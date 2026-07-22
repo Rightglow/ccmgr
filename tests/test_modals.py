@@ -21,6 +21,7 @@ from railmux.ui.modals import (
     DeleteConfirmModal,
     HelpModal,
     LayoutSaveModal,
+    OptionsModal,
     PathBrowser,
     PathBrowserModal,
     ProjectInfoModal,
@@ -157,6 +158,109 @@ def test_quit_confirm_wraps_all_choices_in_narrow_sidebar():
     assert "quit and kill all sessions" in text
     assert "soft quit (keep sessions alive)" in text
     assert "n / Esc = cancel" in text
+
+
+def test_quit_confirm_warns_when_ui_is_shared_by_multiple_clients():
+    modal = QuitConfirmModal(
+        on_confirm=lambda: None,
+        on_soft_quit=lambda: None,
+        on_cancel=lambda: None,
+        running_count=2,
+        attached_clients=3,
+    )
+    height = modal.preferred_height(28)
+
+    text = " ".join(
+        _rendered_text(modal, size=(28, height)).replace("│", " ").split())
+
+    assert "Shared by 3 attached terminals" in text
+    assert "quitting closes this UI in all of them" in text
+
+
+def test_layout_save_height_tracks_wrapped_description_and_actions():
+    modal = LayoutSaveModal(
+        lambda: None, lambda: None, lambda: None, lambda: None)
+
+    wide = modal.preferred_height(60)
+    narrow = modal.preferred_height(22)
+
+    assert narrow > wide
+    text = " ".join(
+        _rendered_text(modal, size=(22, narrow)).replace("│", " ").split())
+    assert "always keep the latest layout" in text
+    assert "this time (apply on the next launch)" in text
+    assert "back to quit choices" in text
+
+
+def test_layout_save_actions_remain_visible_when_body_height_is_clamped():
+    modal = LayoutSaveModal(
+        lambda: None, lambda: None, lambda: None, lambda: None)
+
+    text = " ".join(
+        _rendered_text(modal, size=(32, 10)).replace("│", " ").split())
+
+    assert "always keep the latest layout" in text
+    assert "this time (apply on the next launch)" in text
+    assert "do not save it" in text
+    assert "back to quit choices" in text
+
+
+def test_options_support_keyboard_mouse_and_failed_save():
+    changes = []
+    modal = OptionsModal(
+        layout_policy="ask",
+        yolo_policy="never",
+        on_layout_policy=lambda value: changes.append(("layout", value)) or True,
+        on_yolo_policy=lambda value: value != "always",
+        on_close=lambda: changes.append(("close", "")),
+    )
+
+    layout_always = modal._option_rows["layout"][0]
+    assert layout_always.keypress((60,), "enter") is None
+    assert modal._policies["layout"] == "always"
+    assert changes == [("layout", "always")]
+
+    yolo_always = modal._option_rows["yolo"][0]
+    assert yolo_always.mouse_event(
+        (60,), "mouse press", 1, 2, 0, True)
+    assert modal._policies["yolo"] == "never"
+
+    assert modal.keypress((60, 24), "o") is None
+    assert changes[-1] == ("close", "")
+
+
+def test_options_render_current_policies_and_action_legend():
+    modal = OptionsModal(
+        layout_policy="always",
+        yolo_policy="ask",
+        on_layout_policy=lambda _value: True,
+        on_yolo_policy=lambda _value: True,
+        on_close=lambda: None,
+    )
+
+    text = _rendered_text(modal, size=(70, 28))
+
+    assert "Layout retention" in text
+    assert "Codex auto-run (YOLO)" in text
+    assert "[x] Always" in text
+    assert "[x] Ask every time" in text
+    assert "Space" in text and "close" in text
+
+
+def test_options_keyboard_starts_on_current_layout_choice():
+    changes = []
+    modal = OptionsModal(
+        layout_policy="ask",
+        yolo_policy="never",
+        on_layout_policy=lambda value: changes.append(value) or True,
+        on_yolo_policy=lambda _value: True,
+        on_close=lambda: None,
+    )
+
+    modal.keypress((60, 24), "down")
+    modal.keypress((60, 24), "enter")
+
+    assert changes == ["never"]
 
 
 def test_help_explains_bottom_left_workspace_target_indicator():

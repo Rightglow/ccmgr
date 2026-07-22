@@ -73,6 +73,8 @@ BINDINGS: list[Binding] = [
     # All three — cycle through the ordered agent-mode registry.
     Binding(("m", "M"), "m", "Mode", "_toggle_codex_mode",
             contexts=_ALL_CTX, show_in_hint=False),
+    Binding(("o", "O"), "o", "Options", "_open_options_modal",
+            contexts=_ALL_CTX, show_in_hint=False),
     # All three — opens a shell in the active project's directory.
     Binding(("t", "T"), "t", "term", "_open_terminal_for_active_project",
             contexts=_ALL_CTX),

@@ -55,6 +55,7 @@ from railmux.fast_display_client import (
     UpdateKind as ClientUpdateKind,
     build_ssh_argv,
     build_ssh_install_argv,
+    build_ssh_private_venv_install_argv,
     await_remote_startup,
     coalesce_forwarded_wheel,
     encode_input as encode_client_input,
@@ -1001,8 +1002,17 @@ def test_generated_remote_bootstrap_and_install_commands_are_posix_shell_syntax(
         fps=20.0,
         ssh_args=(),
     )[-1]
+    private_installer = build_ssh_private_venv_install_argv(
+        "server",
+        version="1.2.3",
+        session="rail mux",
+        width=120,
+        height=40,
+        fps=20.0,
+        ssh_args=(),
+    )[-1]
 
-    for command in (bootstrap, installer):
+    for command in (bootstrap, installer, private_installer):
         result = subprocess.run(
             ["/bin/sh", "-n", "-c", command],
             stdout=subprocess.PIPE,
@@ -1012,12 +1022,33 @@ def test_generated_remote_bootstrap_and_install_commands_are_posix_shell_syntax(
         assert result.returncode == 0, result.stderr.decode()
 
 
+def test_private_remote_install_creates_managed_venv_without_sudo():
+    argv = build_ssh_private_venv_install_argv(
+        "server",
+        version="1.2.3",
+        session="rail mux",
+        width=120,
+        height=40,
+        fps=20.0,
+        ssh_args=("-J", "jump"),
+    )
+
+    assert argv[:5] == ["ssh", "-T", "-J", "jump", "server"]
+    command = argv[-1]
+    assert 'python3 -m venv "$HOME/.local/share/railmux/ssh-venv"' in command
+    assert '"$HOME/.local/share/railmux/ssh-venv"/bin/python' in command
+    assert "'railmux[ssh]==1.2.3'" in command
+    assert "--user" not in command
+    assert "sudo" not in command
+
+
 def test_remote_install_help_is_exact_and_has_source_fallback():
     help_text = remote_install_help("server", "1.2.3")
 
     assert "python3 -m pip install --user --upgrade" in help_text
     assert "'railmux[ssh]==1.2.3'" in help_text
     assert "~/.local/share/railmux/ssh-venv/bin/python" in help_text
+    assert "do not modify the system Python" in help_text
     assert "matching wheel or source checkout" in help_text
 
 
@@ -1684,7 +1715,13 @@ def test_failed_remote_auto_install_returns_manual_recovery(monkeypatch):
         "await_remote_startup",
         lambda _process: RemoteStartup(RemoteStartKind.MISSING, returncode=127),
     )
-    monkeypatch.setattr(fast_display_client, "_confirm", lambda _question: True)
+    answers = iter((True, False))
+    questions = []
+    monkeypatch.setattr(
+        fast_display_client,
+        "_confirm",
+        lambda question: questions.append(question) or next(answers),
+    )
     monkeypatch.setattr(
         fast_display_client,
         "_install_remote_and_start",
@@ -1697,8 +1734,64 @@ def test_failed_remote_auto_install_returns_manual_recovery(monkeypatch):
     with pytest.raises(fast_display_client.ProbeError) as exc:
         prepare_remote_process(args, os.terminal_size((120, 40)))
 
-    assert "automatic remote installation" in str(exc.value)
+    assert "user-site installation failed" in str(exc.value)
     assert "matching wheel or source checkout" in str(exc.value)
+    assert "Remote user-site installation failed" in questions[1]
+
+
+@pytest.mark.parametrize(
+    "install_kind", [RemoteStartKind.FAILED, RemoteStartKind.TIMEOUT]
+)
+def test_failed_user_site_install_can_fall_back_to_private_venv(
+    monkeypatch, install_kind,
+):
+    _accept_attach(monkeypatch)
+    missing = _PreflightProcess(127)
+    failed = _PreflightProcess(1)
+    installed = _PreflightProcess()
+    args = parse_client_args(["server"])
+    monkeypatch.setattr(
+        fast_display_client, "_spawn_remote", lambda _argv: missing
+    )
+    monkeypatch.setattr(
+        fast_display_client,
+        "await_remote_startup",
+        lambda _process: RemoteStartup(RemoteStartKind.MISSING, returncode=127),
+    )
+    questions = []
+    monkeypatch.setattr(
+        fast_display_client,
+        "_confirm",
+        lambda question: questions.append(question) or True,
+    )
+    monkeypatch.setattr(
+        fast_display_client,
+        "_install_remote_and_start",
+        lambda _args, _size, _version: (
+            failed,
+            RemoteStartup(install_kind, returncode=1),
+        ),
+    )
+    monkeypatch.setattr(
+        fast_display_client,
+        "_install_remote_private_venv_and_start",
+        lambda _args, _size, _version: (
+            installed,
+            RemoteStartup(
+                RemoteStartKind.HELLO,
+                RemoteHello(
+                    fast_display_client.__version__, PROTOCOL_VERSION, True
+                ),
+            ),
+        ),
+    )
+
+    selected = prepare_remote_process(args, os.terminal_size((120, 40)))
+
+    assert selected is installed
+    assert failed.poll() == 1
+    assert "Remote user-site installation failed or timed out" in questions[1]
+    assert installed.stdin.getvalue() == REMOTE_START
 
 
 def test_remote_server_has_no_bare_tmux_server_argv():

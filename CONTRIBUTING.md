@@ -17,7 +17,7 @@ pip install -e ".[dev]"
 ## Running tests
 
 ```bash
-ruff check src tests
+ruff check src tests tools
 pytest -q
 python -m build
 twine check dist/*

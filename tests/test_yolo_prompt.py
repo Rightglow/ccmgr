@@ -10,7 +10,7 @@ from railmux.ui.modals import YoloConfirmModal
 
 def _app(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "railmux.settings._settings_path", lambda: tmp_path / "settings.json")
+        "railmux.settings._config_path", lambda: tmp_path / "config.toml")
     app = App.__new__(App)
     app._loop = object()          # non-None → UI is up
     app._settings = Settings()
@@ -33,23 +33,24 @@ def test_always_enables_yolo_and_marks_prompted(tmp_path, monkeypatch):
     app = _app(tmp_path, monkeypatch)
     app._maybe_prompt_codex_yolo()
     app._show_overlay.call_args[0][0]._on_always()
-    assert app._settings.codex_yolo is True
-    assert app._settings.codex_yolo_prompted is True
+    assert app._settings.codex_yolo_policy == "always"
     # Persisted: a fresh store sees it too.
-    assert Settings().codex_yolo is True
+    assert Settings().codex_yolo_policy == "always"
 
 
-def test_no_marks_prompted_but_keeps_yolo_off(tmp_path, monkeypatch):
+def test_no_keeps_yolo_off_for_run_and_preserves_ask_policy(
+    tmp_path, monkeypatch,
+):
     app = _app(tmp_path, monkeypatch)
     app._maybe_prompt_codex_yolo()
     app._show_overlay.call_args[0][0]._on_no()
-    assert app._settings.codex_yolo is False
-    assert app._settings.codex_yolo_prompted is True
+    assert app._settings.codex_yolo_policy == "ask"
+    assert app._codex_yolo_prompt_handled is True
 
 
 def test_not_shown_again_once_prompted(tmp_path, monkeypatch):
     app = _app(tmp_path, monkeypatch)
-    app._settings.mark_codex_yolo_prompted()
+    app._settings.set_codex_yolo_policy("never")
     app._maybe_prompt_codex_yolo()
     app._show_overlay.assert_not_called()
 
@@ -67,8 +68,7 @@ def test_this_time_enables_only_current_app(tmp_path, monkeypatch):
     app._show_overlay.call_args[0][0]._on_this_time()
 
     assert app._codex_yolo_enabled() is True
-    assert app._settings.codex_yolo is False
-    assert app._settings.codex_yolo_prompted is False
+    assert app._settings.codex_yolo_policy == "ask"
     app._show_overlay.reset_mock()
     app._maybe_prompt_codex_yolo()
     app._show_overlay.assert_not_called()
@@ -95,8 +95,7 @@ def test_failed_persistence_does_not_enable_yolo(tmp_path, monkeypatch):
     app._maybe_prompt_codex_yolo()
     modal = app._show_overlay.call_args[0][0]
     modal._on_always()
-    assert app._settings.codex_yolo is False
-    assert app._settings.codex_yolo_prompted is False
+    assert app._settings.codex_yolo_policy == "ask"
     app._close_modal.assert_called_once_with()
     app._set_status.assert_called_once_with(
         "Could not save Codex auto-run choice; settings unchanged.",

@@ -110,7 +110,8 @@ class QuitConfirmModal(urwid.WidgetWrap):
     def __init__(self, on_confirm: Callable[[], None],
                  on_soft_quit: Callable[[], None] | None = None,
                  on_cancel: Callable[[], None] | None = None,
-                 running_count: int = 0) -> None:
+                 running_count: int = 0,
+                 attached_clients: int = 1) -> None:
         self._on_confirm = on_confirm
         self._on_soft_quit = on_soft_quit
         self._on_cancel = on_cancel
@@ -127,18 +128,28 @@ class QuitConfirmModal(urwid.WidgetWrap):
         actions.append(("n / Esc", "cancel"))
         self._title = urwid.Text("Quit railmux?", align="center")
         self._summary = urwid.Text(("live", summary), align="center")
+        self._shared_notice = (
+            urwid.Text(
+                ("warn", f"Shared by {attached_clients} attached terminals; "
+                 "quitting closes this UI in all of them."),
+                align="center",
+            )
+            if attached_clients > 1 else None
+        )
         self._actions = _action_legend(
             actions,
             align="center",
             wrap="space",
         )
-        body = urwid.Pile([
+        body_widgets: list[urwid.Widget] = [
             self._title,
             urwid.Divider(),
             self._summary,
-            urwid.Divider(),
-            self._actions,
-        ])
+        ]
+        if self._shared_notice is not None:
+            body_widgets.extend([urwid.Divider(), self._shared_notice])
+        body_widgets.extend([urwid.Divider(), self._actions])
+        body = urwid.Pile(body_widgets)
         super().__init__(urwid.LineBox(urwid.Filler(body, valign="middle"), title="Confirm quit"))
 
     def preferred_height(self, maxcol: int) -> int:
@@ -151,6 +162,8 @@ class QuitConfirmModal(urwid.WidgetWrap):
             + 1
             + self._actions.rows((inner,))
         )
+        if self._shared_notice is not None:
+            body_rows += 1 + self._shared_notice.rows((inner,))
         return max(8, body_rows + 2)  # LineBox top/bottom borders
 
     def selectable(self) -> bool:
@@ -224,6 +237,7 @@ class HelpModal(urwid.WidgetWrap):
             ("k", "Kill the running agent process (keeps session file)"),
             ("d", "Delete the focused session (prompts for confirmation)"),
             ("m", "Cycle through available agent modes"),
+            ("o", "Open persistent Railmux options"),
             ("t", "Open a terminal in the active project"),
             ("␣", "Preview stopped / switch running session"),
             ("F8", "Cycle layout: single / side-by-side / stacked"),
@@ -246,6 +260,10 @@ class HelpModal(urwid.WidgetWrap):
             ("Ctrl-B arrows", "Move spatially between sidebar / agent panes"),
             ("F8", "Cycle layout even while an agent pane has focus"),
             ("Ctrl-B d", "Detach from railmux (keep sessions alive)"),
+            ("Ctrl-B :detach-client -a",
+             "Keep this terminal and detach every other attached client"),
+            ("q then s",
+             "Soft quit closes the shared UI in every attached view; agents survive"),
         ]),
         ("Workspace indicator (bottom-left)", [
             ("▣", "Single agent pane"),
@@ -464,6 +482,8 @@ class DeleteConfirmModal(urwid.WidgetWrap):
 class LayoutSaveModal(urwid.WidgetWrap):
     """Choose how long the current outer-workspace geometry is remembered."""
 
+    _NAV_KEYS = {"up", "down", "page up", "page down", "home", "end"}
+
     def __init__(
         self,
         on_always: Callable[[], None],
@@ -475,30 +495,45 @@ class LayoutSaveModal(urwid.WidgetWrap):
         self._on_this_time = on_this_time
         self._on_no = on_no
         self._on_back = on_back
-        body = urwid.Pile([
-            urwid.Text("Keep this layout?", align="center"),
-            urwid.Divider(),
-            urwid.Text(
-                "Railmux stores pane proportions, so the layout can be "
-                "restored on a differently sized terminal.",
-                align="center",
-            ),
-            urwid.Divider(),
-            _action_legend([
-                ("a", "always keep the latest layout"),
-                ("t", "this time (apply on the next launch)"),
-                ("n / ↵", "do not save it"),
-                ("Esc", "back to quit choices"),
-            ], align="center", wrap="space"),
-        ])
-        super().__init__(urwid.LineBox(
-            urwid.Filler(body, valign="middle"), title="Save layout"))
+        self._title = urwid.Text("Keep this layout?", align="center")
+        self._description = urwid.Text(
+            "Railmux stores pane proportions, so the layout can be "
+            "restored on a differently sized terminal.",
+            align="center",
+        )
+        self._actions = _action_legend([
+            ("a", "always keep the latest layout"),
+            ("t", "this time (apply on the next launch)"),
+            ("n / ↵", "do not save it"),
+            ("Esc", "back to quit choices"),
+        ], align="center", wrap="space")
+        body_rows = [
+            _Selectable(self._title),
+            _Selectable(urwid.Divider()),
+            _Selectable(self._description),
+        ]
+        self._listbox = urwid.ListBox(urwid.SimpleFocusListWalker(body_rows))
+        self._footer = urwid.Pile([urwid.Divider(), self._actions])
+        self._frame = urwid.Frame(
+            body=self._listbox,
+            footer=self._footer,
+            focus_part="body",
+        )
+        super().__init__(urwid.LineBox(self._frame, title="Save layout"))
 
     def selectable(self) -> bool:
         return True
 
-    def preferred_height(self, _maxcol: int) -> int:
-        return 13
+    def preferred_height(self, maxcol: int) -> int:
+        """Fit wrapped explanations and every action at the actual width."""
+        inner = max(1, maxcol - 2)
+        content_rows = (
+            self._title.rows((inner,))
+            + 1
+            + self._description.rows((inner,))
+        )
+        footer_rows = self._footer.rows((inner,))
+        return max(10, content_rows + footer_rows + 2)
 
     def keypress(self, size, key):
         if key in ("a", "A"):
@@ -512,6 +547,186 @@ class LayoutSaveModal(urwid.WidgetWrap):
             return None
         if key == "esc":
             self._on_back()
+            return None
+        if key in self._NAV_KEYS:
+            super().keypress(size, key)
+            return None
+        return key
+
+
+class _OptionRow(urwid.WidgetWrap):
+    """One keyboard- and mouse-selectable policy value."""
+
+    def __init__(
+        self,
+        value: str,
+        label: str,
+        detail: str,
+        on_select: Callable[[str], None],
+    ) -> None:
+        self.value = value
+        self._label = label
+        self._detail = detail
+        self._on_select = on_select
+        self._selected = False
+        self._text = urwid.Text("")
+        super().__init__(urwid.AttrMap(self._text, "body", "focus"))
+        self.set_selected(False)
+
+    def set_selected(self, selected: bool) -> None:
+        self._selected = selected
+        marker = "[x]" if selected else "[ ]"
+        self._text.set_text([
+            ("modal_key" if selected else "body", marker),
+            f" {self._label} — {self._detail}",
+        ])
+
+    def selectable(self) -> bool:
+        return True
+
+    def keypress(self, size, key):
+        if key in ("enter", " "):
+            self._on_select(self.value)
+            return None
+        return key
+
+    def mouse_event(self, size, event, button, col, row, focus):
+        if event == "mouse press" and button == 1:
+            self._on_select(self.value)
+            return True
+        return super().mouse_event(size, event, button, col, row, focus)
+
+
+class OptionsModal(urwid.WidgetWrap):
+    """Full-sidebar product settings with immediate, persistent choices."""
+
+    _NAV_KEYS = {"up", "down", "page up", "page down", "home", "end"}
+    _POLICY_LABELS = (
+        ("always", "Always"),
+        ("ask", "Ask every time"),
+        ("never", "No"),
+    )
+
+    def __init__(
+        self,
+        *,
+        layout_policy: str,
+        yolo_policy: str,
+        on_layout_policy: Callable[[str], bool],
+        on_yolo_policy: Callable[[str], bool],
+        on_close: Callable[[], None],
+    ) -> None:
+        self._on_close = on_close
+        self._policies = {
+            "layout": layout_policy,
+            "yolo": yolo_policy,
+        }
+        self._callbacks = {
+            "layout": on_layout_policy,
+            "yolo": on_yolo_policy,
+        }
+        self._option_rows: dict[str, list[_OptionRow]] = {}
+        rows: list[urwid.Widget] = [
+            urwid.Text(("title", "Layout retention")),
+            urwid.Text(
+                "Choose whether custom pane proportions are saved when "
+                "Railmux exits. This does not resize the current workspace."
+            ),
+        ]
+        rows.extend(self._build_group(
+            "layout",
+            {
+                "always": "keep the latest custom layout automatically",
+                "ask": "show the layout choice when a custom layout exits",
+                "never": "do not save custom pane proportions",
+            },
+        ))
+        rows.extend([
+            urwid.Divider(),
+            urwid.Text(("title", "Codex auto-run (YOLO)")),
+            urwid.Text(
+                "Controls new Codex launches. Running agents are unchanged. "
+                "Always bypasses approval prompts and sandboxing."
+            ),
+        ])
+        rows.extend(self._build_group(
+            "yolo",
+            {
+                "always": "enable for every new Codex launch",
+                "ask": "ask once in each Railmux run before first use",
+                "never": "keep approval prompts and sandboxing enabled",
+            },
+        ))
+        rows.extend([
+            urwid.Divider(),
+            urwid.Text(
+                ("dim", "Settings are saved in "
+                 "~/.config/railmux/config.toml")
+            ),
+        ])
+        self._walker = urwid.SimpleFocusListWalker(rows)
+        initial_focus = next(
+            index for index, row in enumerate(rows)
+            if isinstance(row, _OptionRow)
+            and row.value == layout_policy
+            and row in self._option_rows["layout"]
+        )
+        self._walker.set_focus(initial_focus)
+        self._listbox = urwid.ListBox(self._walker)
+        self._footer = urwid.Pile([
+            urwid.Divider(),
+            _action_legend([
+                ("↑↓", "navigate"),
+                ("↵ / Space", "apply"),
+                ("o / Esc", "close"),
+            ], align="center", wrap="space"),
+        ])
+        frame = urwid.Frame(
+            body=self._listbox, footer=self._footer, focus_part="body")
+        super().__init__(urwid.LineBox(frame, title="Options"))
+        self._sync_rows()
+
+    def _build_group(
+        self, group: str, details: dict[str, str],
+    ) -> list[_OptionRow]:
+        option_rows = [
+            _OptionRow(
+                value,
+                label,
+                details[value],
+                lambda selected, group=group: self._select(group, selected),
+            )
+            for value, label in self._POLICY_LABELS
+        ]
+        self._option_rows[group] = option_rows
+        return option_rows
+
+    def _select(self, group: str, policy: str) -> None:
+        if policy == self._policies[group]:
+            return
+        if not self._callbacks[group](policy):
+            return
+        self._policies[group] = policy
+        self._sync_rows()
+
+    def _sync_rows(self) -> None:
+        for group, rows in self._option_rows.items():
+            selected = self._policies[group]
+            for row in rows:
+                row.set_selected(row.value == selected)
+
+    def selectable(self) -> bool:
+        return True
+
+    def keypress(self, size, key):
+        if key in ("esc", "o", "O"):
+            self._on_close()
+            return None
+        if key in self._NAV_KEYS or key in ("enter", " "):
+            inner_cols = max(1, size[0] - 2)
+            footer_rows = self._footer.rows((inner_cols,))
+            inner_rows = max(1, size[1] - 2 - footer_rows)
+            self._listbox.keypress((inner_cols, inner_rows), key)
             return None
         return key
 
@@ -537,7 +752,7 @@ class YoloConfirmModal(urwid.WidgetWrap):
                 "this if you trust what you run here.", align="center"),
             urwid.Divider(),
             urwid.Text(
-                ("dim", "Change later in ~/.config/railmux/settings.json"),
+                ("dim", "Change later with o Options"),
                 align="center"),
         ]
         footer = urwid.Pile([
@@ -545,7 +760,7 @@ class YoloConfirmModal(urwid.WidgetWrap):
             _action_legend([
                 ("a", "always enable"),
                 ("t", "this Railmux run only"),
-                ("n / ↵ / Esc", "keep off"),
+                ("n / ↵ / Esc", "keep off for this Railmux run"),
             ], align="center", wrap="space"),
         ])
         self._listbox = urwid.ListBox(urwid.SimpleFocusListWalker(rows))

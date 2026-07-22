@@ -1,1 +1,2 @@
 include tools/denested_transport_benchmark.py
+include tools/release_notes.py

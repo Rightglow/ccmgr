@@ -88,9 +88,10 @@ environment. Installation normally selects the exact local version; repairing
 the SSH dependency after a declined local upgrade preserves an already newer
 remote version instead of downgrading it. Automatic setup may probe Python/pip
 commands but must never run `sudo`, edit shell startup files, or install tmux.
-When a remote Python rejects user-site installation, manual recovery may use
-the fixed `~/.local/share/railmux/ssh-venv`; the bootstrap probes that path
-without making it part of automatic environment lifecycle or PATH management.
+When a remote Python rejects user-site installation, a second explicit consent
+may create the fixed `~/.local/share/railmux/ssh-venv` and install there. The
+bootstrap probes that path without PATH changes; failed setup never deletes or
+replaces an existing environment.
 The local upgrade uses its current Python environment and re-execs the original
 `railmux ssh` invocation only after pip succeeds. Failure leaves tmux untouched
 and prints a reproducible manual command.
@@ -153,10 +154,25 @@ Portable soft-restart state writes the stable active `mode` key inside a
 per-mode view map. The ownerless `codex_mode` boolean remains a read-only
 migration fallback for Railmux 0.1.x files; it is never copied into new state.
 
+User edits and app-mutable choices share the single atomic `config.toml`
+authority. TOMLKit updates preserve comments, ordering, formatting, and unknown
+keys; a parse or write failure leaves both disk and in-memory authority
+unchanged. Layout retention and Codex auto-run expose `always`, `ask`, and
+`never`; invalid values fail closed. Policy and profile updates are one write,
+so UI state cannot disagree with launch or exit behavior. `ask` means once per
+Railmux run for Codex auto-run and once per exit after an explicit layout
+change for layout retention. Changing either policy never mutates a running
+agent or the current pane geometry. A current-run YOLO choice remains in memory;
+a next-launch-only layout profile is removed from the same TOML file only after
+successful application.
+
 The three lists use horizontal labelled rules instead of independent boxes, so
 adjacent section borders do not consume duplicate terminal rows. There are no
 duplicate per-section vertical borders: one shared rail on each side spans the
-whole sidebar. The focused section owns green upper and lower horizontal rules
+whole sidebar. Transient growth of the bottom Button Bar is charged to the Running
+section rather than recomputing every weighted section, so More/​Less cannot
+move Projects or Sessions. A one-line filter temporarily removes that charge.
+The focused section owns green upper and lower horizontal rules
 plus the matching height segments on both rails. Green corner glyphs join the
 rails to each horizontal boundary so the focus outline closes without ordinary
 vertical glyphs appearing to overrun the pane. When the next section's title row
@@ -575,6 +591,10 @@ prevents activity-driven geometry jumps and clipped small clients, but it does
 not provide per-client focus, layout, proportions, or dimensions: one tmux
 window has one compositor geometry. Sidebar-originated Detach must refuse an
 ambiguous multi-client target and direct the user to native `Ctrl-B d`.
+Every attached terminal views the same Railmux UI process, so Soft Quit ends
+that UI for all views while preserving detached agent sessions. Native
+`detach-client -a`, issued by the client to retain, is the non-destructive
+exclusive-view operation; it is not part of Soft Quit teardown.
 Modern tmux receives a small bounded retry budget before failure to set this
 policy aborts the new attach; an unverified shared-size policy must not silently
 degrade to activity-sensitive geometry.

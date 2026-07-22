@@ -1010,6 +1010,161 @@ def test_real_shared_window_uses_smallest_of_two_client_sizes(isolated_tmux):
                     pass
 
 
+def test_real_soft_quit_disconnects_shared_clients_and_agents_survive(
+        monkeypatch, tmp_path):
+    """Two real clients leave together; a detached agent survives restart."""
+    if shutil.which("tmux") is None:
+        pytest.skip("tmux is not installed")
+
+    socket_root = tmp_path / "tmux"
+    home = tmp_path / "home"
+    runtime = tmp_path / "runtime"
+    claude_home = home / ".claude"
+    for directory in (socket_root, home, runtime, claude_home):
+        directory.mkdir(parents=True, exist_ok=True)
+        directory.chmod(0o700)
+
+    label = f"rx-soft-quit-{os.getpid()}"
+    monkeypatch.setenv("TMUX_TMPDIR", str(socket_root))
+    monkeypatch.setenv(tmux_server.SOCKET_LABEL_ENV, label)
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    env = os.environ.copy()
+    env.update({
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDG_RUNTIME_DIR": str(runtime),
+        "TERM": "xterm-256color",
+    })
+    clients: list[tuple[subprocess.Popen, int, threading.Thread]] = []
+    stop_draining = threading.Event()
+    railmux_executable = Path(sys.executable).with_name("railmux")
+    assert railmux_executable.is_file()
+
+    def tmux(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["tmux", "-L", label, *args],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=check,
+        )
+
+    def attached_count() -> int | None:
+        try:
+            raw = subprocess.check_output(
+                [
+                    "tmux", "-L", label, "display-message", "-p",
+                    "-t", "railmux", "#{session_attached}",
+                ],
+                env=env,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            return int(raw.strip())
+        except (OSError, subprocess.CalledProcessError, ValueError):
+            return None
+
+    def session_exists(name: str) -> bool:
+        return tmux("has-session", "-t", name, check=False).returncode == 0
+
+    def captured_railmux() -> str:
+        try:
+            return subprocess.check_output(
+                ["tmux", "-L", label, "capture-pane", "-p", "-t", "railmux"],
+                env=env,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            return ""
+
+    def launch_client() -> tuple[subprocess.Popen, int]:
+        master, slave = pty.openpty()
+        fcntl.ioctl(
+            slave,
+            termios.TIOCSWINSZ,
+            struct.pack("HHHH", 40, 140, 0, 0),
+        )
+        process = subprocess.Popen(
+            [
+                str(railmux_executable),
+                "--claude-home", str(claude_home),
+            ],
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            env=env,
+            start_new_session=True,
+        )
+        os.close(slave)
+
+        def drain_output() -> None:
+            while not stop_draining.is_set():
+                readable, _, _ = select.select([master], [], [], 0.1)
+                if not readable:
+                    continue
+                try:
+                    if not os.read(master, 65536):
+                        return
+                except OSError:
+                    return
+
+        drain_thread = threading.Thread(target=drain_output, daemon=True)
+        drain_thread.start()
+        clients.append((process, master, drain_thread))
+        return process, master
+
+    try:
+        first, first_master = launch_client()
+        assert _wait_until(lambda: attached_count() == 1, timeout=8.0)
+        assert _wait_until(
+            lambda: "q Quit" in captured_railmux(), timeout=8.0)
+
+        agent_session = "integration-agent"
+        tmux("new-session", "-d", "-s", agent_session, "sleep", "60")
+        assert session_exists(agent_session)
+
+        second, _second_master = launch_client()
+        assert _wait_until(lambda: attached_count() == 2, timeout=8.0)
+
+        os.write(first_master, b"q")
+        assert _wait_until(
+            lambda: "Quit railmux?" in captured_railmux(),
+            timeout=3.0,
+        )
+        os.write(first_master, b"s")
+
+        assert _wait_until(lambda: first.poll() is not None, timeout=8.0)
+        assert _wait_until(lambda: second.poll() is not None, timeout=8.0)
+        assert not session_exists("railmux")
+        assert session_exists(agent_session)
+
+        replacement, _replacement_master = launch_client()
+        assert _wait_until(lambda: attached_count() == 1, timeout=8.0)
+        assert replacement.poll() is None
+        assert session_exists(agent_session)
+    finally:
+        tmux("kill-server", check=False)
+        stop_draining.set()
+        for process, master, drain_thread in clients:
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=2.0)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=2.0)
+            drain_thread.join(timeout=1.0)
+            try:
+                os.close(master)
+            except OSError:
+                pass
+
+
 def test_real_tmux_single_sidebar_focus_clears_stale_target_format(isolated_tmux):
     """A restored single pane cannot leave half the divider dim green."""
     display_session, _sidebar_pane, _socket_path = isolated_tmux

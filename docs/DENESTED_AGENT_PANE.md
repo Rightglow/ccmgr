@@ -270,10 +270,11 @@ missing dependency. It is limited to the remote user environment and checks
 `python3 -m pip`, `python -m pip`, `pip3`, and `pip` in that order; it never
 uses `sudo`, edits PATH, or installs tmux. The successful installer execs
 `python -m railmux` directly, so `~/.local/bin` need not already be on a
-non-interactive SSH PATH. If PEP 668 rejects user-site installation, the manual
-recovery instructions create `~/.local/share/railmux/ssh-venv`; the bootstrap
-discovers that fixed private environment on the next connection without
-editing PATH.
+non-interactive SSH PATH. If PEP 668 or site policy rejects user-site
+installation, a second explicit prompt offers to create
+`~/.local/share/railmux/ssh-venv`, install there, and continue the same
+connection. The bootstrap discovers that fixed private environment on later
+connections without editing PATH.
 A newer remote version prompts for a local upgrade through the current Python
 and re-execs the original command. Equal protocol versions remain compatible
 across differing package versions.

@@ -62,6 +62,7 @@ from railmux.ui.modals import (
     ExitProgressModal,
     HelpModal,
     LayoutSaveModal,
+    OptionsModal,
     PathBrowserModal,
     ProjectInfoModal,
     QuitConfirmModal,
@@ -767,6 +768,8 @@ class App:
             on_detach=self._on_detach,
             on_mode_toggle=self._cycle_mode,
             on_layout=self._rotate_split,
+            on_options=self._open_options_modal,
+            on_expanded_change=self._on_button_bar_expanded,
         )
         # Footer contains only stable controls. Status, warnings, and errors all
         # use the full-width outer tmux bar, Railmux's single status surface.
@@ -3116,25 +3119,32 @@ class App:
                            click_outside_to_close=True)
 
     def _open_help_modal(self) -> None:
-        # Zoom the left (railmux) pane fullscreen so the help modal has the
-        # entire terminal.  Tmux resize-pane -Z toggles — the second call in
-        # _close_help_modal restores the original split layout.  This is
-        # much cleaner than shrinking the right pane: it doesn't force a
-        # reflow in the agent pane, so no history corruption.
+        modal = HelpModal(on_close=self._close_help_modal)
+        self._open_full_sidebar_modal(modal, self._close_help_modal)
+
+    def _open_full_sidebar_modal(
+        self,
+        modal: urwid.Widget,
+        on_close: Callable[[], None],
+    ) -> None:
+        """Zoom the sidebar and present one terminal-sized settings surface."""
+        # Tmux resize-pane -Z toggles. Zooming the sidebar instead of shrinking
+        # the agent prevents transcript reflow and history corruption.
         if self._railmux_pane_id:
             import subprocess as _sp
             _sp.run(
                 ["tmux", "resize-pane", "-Z", "-t", self._railmux_pane_id],
                 stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
             )
-
-        modal = HelpModal(on_close=self._close_help_modal)
         self._show_overlay(modal, width=60, height=80,
                            click_outside_to_close=True,
-                           on_click_outside=self._close_help_modal,
+                           on_click_outside=on_close,
                            fixed_width=True, fixed_height=True)
 
     def _close_help_modal(self) -> None:
+        self._close_full_sidebar_modal()
+
+    def _close_full_sidebar_modal(self) -> None:
         self._close_modal()
         # Un-zoom — restore the previous tmux layout, but only if the railmux
         # pane is still zoomed.  F9 shares the same resize-pane -Z toggle
@@ -3154,13 +3164,71 @@ class App:
                     stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
                 )
 
+    def _open_options_modal(self) -> None:
+        def set_layout(policy: str) -> bool:
+            profile = (
+                self._capture_layout_profile("always")
+                if policy == "always" else None
+            )
+            if not self._settings.set_layout_save_policy(policy, profile):
+                self._set_status(
+                    "Could not save layout option; setting unchanged.",
+                    "error",
+                )
+                return False
+            self._layout_profile = profile
+            self._set_status(
+                f"Layout retention: {self._policy_label(policy)}.")
+            return True
+
+        def set_yolo(policy: str) -> bool:
+            if not self._settings.set_codex_yolo_policy(policy):
+                self._set_status(
+                    "Could not save Codex auto-run option; setting unchanged.",
+                    "error",
+                )
+                return False
+            self._codex_yolo_runtime = False
+            self._codex_yolo_prompt_handled = policy != "ask"
+            self._set_status(
+                f"Codex auto-run: {self._policy_label(policy)}.")
+            return True
+
+        modal = OptionsModal(
+            layout_policy=self._settings.layout_save_policy,
+            yolo_policy=self._settings.codex_yolo_policy,
+            on_layout_policy=set_layout,
+            on_yolo_policy=set_yolo,
+            on_close=self._close_options_modal,
+        )
+        self._open_full_sidebar_modal(modal, self._close_options_modal)
+
+    def _on_button_bar_expanded(self, expanded: bool) -> None:
+        """Take More's second row from Running, not every weighted section."""
+        self._sidebar.set_bottom_row_debt(1 if expanded else 0)
+
+    def _close_options_modal(self) -> None:
+        self._close_full_sidebar_modal()
+
+    @staticmethod
+    def _policy_label(policy: str) -> str:
+        return {
+            "always": "Always",
+            "ask": "Ask every time",
+            "never": "No",
+        }[policy]
+
     def _open_quit_confirm(self) -> None:
         self._save_state()
+        session = tmux_ctl.current_session_name()
+        attached = (
+            tmux_ctl.session_attached_count(session) if session else None)
         modal = QuitConfirmModal(
             on_confirm=self._confirm_quit,
             on_soft_quit=self._soft_quit,
             on_cancel=self._close_modal,
             running_count=len(self._running),
+            attached_clients=attached or 1,
         )
         self._show_quit_confirm(modal)
 
@@ -3211,11 +3279,17 @@ class App:
         session = tmux_ctl.current_session_name()
         attached = (
             tmux_ctl.session_attached_count(session) if session else None)
-        if attached is not None and attached > 1:
-            self._set_status(
+        if attached != 1:
+            message = (
                 "Multiple terminals are attached; use Ctrl-B d to detach "
-                "only this terminal.",
-                "tip",
+                "only this terminal."
+                if attached is not None and attached > 1
+                else "Could not verify a single attached terminal; use "
+                "Ctrl-B d to detach this terminal safely."
+            )
+            self._set_status(
+                message,
+                "warn",
             )
             return
         _sp.run(["tmux", "detach-client"], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
@@ -3231,7 +3305,6 @@ class App:
     def _request_exit(self, *, soft: bool) -> None:
         """Resolve layout persistence before committing exit semantics."""
         current = self._capture_layout_profile("always")
-        saved = getattr(self, "_layout_profile", None)
         if current is None:
             self._commit_exit(soft=soft)
             return
@@ -3241,13 +3314,19 @@ class App:
             # fallback) also remains available for a future launch.
             self._commit_exit(soft=soft)
             return
-        if saved is not None and saved.scope == "always":
+        policy = self._settings.layout_save_policy
+        if policy == "never":
+            self._commit_exit(soft=soft)
+            return
+        if policy == "always":
             can_refresh = (
                 not getattr(self, "_layout_profile_fallback", False)
                 or getattr(self, "_layout_geometry_user_owned", False)
             )
             if can_refresh:
-                if not self._settings.save_layout_profile(current):
+                if not self._settings.set_layout_save_policy(
+                    "always", current,
+                ):
                     self._set_status(
                         "Could not update the saved layout; exiting with the "
                         "previous preference.",
@@ -3265,7 +3344,8 @@ class App:
                 sidebar_permille=current.sidebar_permille,
                 primary_permille=current.primary_permille,
             )
-            if not self._settings.save_layout_profile(profile):
+            policy = "always" if scope == "always" else "ask"
+            if not self._settings.set_layout_save_policy(policy, profile):
                 self._set_status(
                     "Could not save the layout preference; exiting without it.",
                     "error",
@@ -3275,9 +3355,6 @@ class App:
             self._commit_exit(soft=soft)
 
         def no() -> None:
-            if saved is not None and saved.scope == "once":
-                self._settings.clear_layout_profile()
-                self._layout_profile = None
             self._commit_exit(soft=soft)
 
         def back() -> None:
@@ -5135,12 +5212,12 @@ class App:
         if getattr(self, "_loop", None) is None:
             return
         settings = getattr(self, "_settings", None)
-        if (settings is None or settings.codex_yolo_prompted
+        if (settings is None or settings.codex_yolo_policy != "ask"
                 or getattr(self, "_codex_yolo_prompt_handled", False)):
             return
 
         def _always() -> None:
-            saved = self._settings.record_codex_yolo_choice(True)
+            saved = self._settings.set_codex_yolo_policy("always")
             self._close_modal()
             if not saved:
                 self._set_status(
@@ -5158,15 +5235,11 @@ class App:
             self._set_status("Codex auto-run enabled for this Railmux run.")
 
         def _no() -> None:
-            saved = self._settings.record_codex_yolo_choice(False)
-            self._close_modal()
-            if not saved:
-                self._set_status(
-                    "Could not save Codex auto-run choice; it will ask again.",
-                    "warn",
-                )
-                return
+            self._codex_yolo_runtime = False
             self._codex_yolo_prompt_handled = True
+            self._close_modal()
+            self._set_status(
+                "Codex auto-run remains off for this Railmux run.")
 
         from railmux.ui.modals import YoloConfirmModal
         modal = YoloConfirmModal(
@@ -5178,9 +5251,12 @@ class App:
 
     def _codex_yolo_enabled(self) -> bool:
         settings = getattr(self, "_settings", None)
+        persisted = bool(
+            settings is not None
+            and settings.codex_yolo_policy == "always"
+        )
         return bool(
-            (settings is not None and settings.codex_yolo)
-            or getattr(self, "_codex_yolo_runtime", False)
+            persisted or getattr(self, "_codex_yolo_runtime", False)
         )
 
     def _schedule_mode_data_refresh(self) -> None:
@@ -5629,6 +5705,9 @@ class App:
         )
         edit = urwid.Edit(caption="filter: ", edit_text=initial_text)
         footer_pile = self._frame.contents["footer"][0]
+        # The one-line filter temporarily replaces the possibly expanded
+        # Button Bar, so there is no second footer row to charge to Running.
+        self._sidebar.set_bottom_row_debt(0)
         footer_pile.contents[1] = (edit, footer_pile.options("pack"))
         footer_pile.focus_position = 1
         self._frame.focus_position = "footer"
@@ -5648,6 +5727,8 @@ class App:
         def restore(key):
             if key in ("enter", "esc"):
                 footer_pile.contents[1] = (self._button_bar, footer_pile.options("pack"))
+                self._sidebar.set_bottom_row_debt(
+                    self._button_bar.extra_rows)
                 self._frame.focus_position = "body"
                 return None
             return key

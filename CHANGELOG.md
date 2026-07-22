@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-07-22
+
+### Added
+
+- Add a full-sidebar Options screen, available with `o` or More → Options, for
+  keyboard and mouse control of persistent layout-retention and Codex auto-run
+  policies (`Always`, `Ask every time`, or `No`). The UI and manual edits share
+  the single `config.toml`; app updates preserve comments and unknown keys.
+
+### Fixed
+
+- Let `railmux ssh` recover when remote policy rejects a per-user pip install:
+  after a second explicit confirmation it creates a private managed venv,
+  installs the matching SSH package there, and continues without sudo or
+  system-Python changes.
+- Size the layout-retention exit prompt from its actual wrapped content so
+  narrow terminals keep every action visible.
+- Charge More's optional second Button Bar row only to the bottom Running
+  section, keeping Projects and Sessions stable when More/​Less is toggled.
+- Clarify that Soft Quit closes the shared Railmux UI for all attached views;
+  the quit prompt now warns when multiple terminals are attached, while native
+  `Ctrl-B :detach-client -a` keeps the current terminal and detaches every other
+  client without stopping agents. Clicking Detach with an ambiguous
+  multi-client target now raises a prominent warning directing that terminal
+  to native `Ctrl-B d`.
+
 ## [0.2.2] - 2026-07-22
 
 ### Added
@@ -516,7 +542,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial PyPI release under the Railmux name.
 
-[Unreleased]: https://github.com/Rightglow/Railmux/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/Rightglow/Railmux/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/Rightglow/Railmux/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/Rightglow/Railmux/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Rightglow/Railmux/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Rightglow/Railmux/compare/v0.1.3...v0.2.0

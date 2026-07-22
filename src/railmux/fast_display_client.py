@@ -1063,14 +1063,56 @@ def build_ssh_install_argv(
     return ["ssh", "-T", *ssh_args, destination, "; ".join(branches)]
 
 
+def build_ssh_private_venv_install_argv(
+    destination: str,
+    *,
+    version: str,
+    session: str,
+    width: int,
+    height: int,
+    fps: float,
+    ssh_args: Sequence[str],
+) -> list[str]:
+    """Create Railmux's private remote venv, install, and start it."""
+    server_args = _remote_server_args(
+        session=session, width=width, height=height, fps=fps
+    )
+    requirement = f"railmux[ssh]=={version}"
+    managed_dir = f'"$HOME/{_REMOTE_VENV}"'
+    managed_python = f"{managed_dir}/bin/python"
+    install = shlex.join([
+        "-m", "pip", "install", "--upgrade", requirement,
+    ])
+    launch = shlex.join(["-m", "railmux", *server_args])
+    branches = [
+        f"if [ -x {managed_python} ] "
+        f"&& {managed_python} -m pip --version >/dev/null 2>&1; "
+        f"then {managed_python} {install} 1>&2 "
+        f"&& exec {managed_python} {launch}; exit $?"
+    ]
+    for python in ("python3", "python"):
+        branches.append(
+            f"elif command -v {python} >/dev/null 2>&1 "
+            f"&& {python} -m venv {managed_dir} 1>&2; then "
+            f"{managed_python} {install} 1>&2 "
+            f"&& exec {managed_python} {launch}; exit $?"
+        )
+    branches.append(
+        "else echo 'error: no usable python3 or python was found to create "
+        "the private Railmux environment' >&2; exit 127; fi"
+    )
+    return ["ssh", "-T", *ssh_args, destination, "; ".join(branches)]
+
+
 def remote_install_help(destination: str, version: str) -> str:
     requirement = shlex.quote(f"railmux[ssh]=={version}")
     return (
         f"Install it manually on {destination}, then retry:\n"
         f"  python3 -m pip install --user --upgrade {requirement}\n"
         f"or:\n  pip3 install --user --upgrade {requirement}\n"
-        "If pip reports an externally-managed environment, use a private "
-        "environment that Railmux discovers automatically:\n"
+        "These commands use per-user site packages and do not modify the "
+        "system Python. If site policy still rejects them, use a private "
+        "Railmux environment:\n"
         f"  python3 -m venv ~/{_REMOTE_VENV}\n"
         f"  ~/{_REMOTE_VENV}/bin/python -m pip install --upgrade {requirement}\n"
         "If that version is not published, copy the matching wheel or source "
@@ -1177,6 +1219,25 @@ def _install_remote_and_start(
     return process, startup
 
 
+def _install_remote_private_venv_and_start(
+    args: argparse.Namespace,
+    current_size: os.terminal_size,
+    version: str,
+) -> tuple[subprocess.Popen, RemoteStartup]:
+    install_argv = build_ssh_private_venv_install_argv(
+        args.destination,
+        version=version,
+        session=args.session,
+        width=current_size.columns,
+        height=current_size.lines,
+        fps=args.fps,
+        ssh_args=args.ssh_arg,
+    )
+    process = _spawn_remote(install_argv)
+    startup = await_remote_startup(process)
+    return process, startup
+
+
 def _version_pair(remote_version: str) -> tuple[Version, Version] | None:
     try:
         return Version(__version__), Version(remote_version)
@@ -1192,6 +1253,17 @@ def _confirm_remote_install(
     return _confirm(
         f"{reason} Install Railmux {version} with SSH support into "
         f"the remote user environment on {args.destination}?"
+    )
+
+
+def _confirm_remote_private_venv_install(
+    args: argparse.Namespace,
+    version: str,
+) -> bool:
+    return _confirm(
+        "Remote user-site installation failed or timed out. Create the isolated "
+        f"~/{_REMOTE_VENV} environment and install Railmux {version} there? "
+        "This does not use sudo or modify the system Python."
     )
 
 
@@ -1411,6 +1483,27 @@ def prepare_remote_process(
     ):
         _stop_unstarted_remote(process)
         raise ProbeError(remote_tmux_help(args.destination))
+    if startup.kind in (
+        RemoteStartKind.MISSING,
+        RemoteStartKind.FAILED,
+        RemoteStartKind.TIMEOUT,
+    ):
+        _stop_unstarted_remote(process)
+        if not _confirm_remote_private_venv_install(args, install_version):
+            raise ProbeError(
+                "remote user-site installation failed or timed out.\n"
+                f"{remote_install_help(args.destination, install_version)}"
+            )
+        process, startup = _install_remote_private_venv_and_start(
+            args, current_size, install_version
+        )
+        if (
+            startup.kind is RemoteStartKind.HELLO
+            and startup.hello is not None
+            and not startup.hello.tmux
+        ):
+            _stop_unstarted_remote(process)
+            raise ProbeError(remote_tmux_help(args.destination))
     if (
         startup.kind is not RemoteStartKind.HELLO
         or startup.hello is None

@@ -54,6 +54,17 @@ def _sidebar():
     return frame, pile, (projects, sessions, running)
 
 
+def test_footer_expansion_charges_only_the_running_section():
+    _frame, pile, _panes = _sidebar()
+    collapsed = pile.get_item_rows((60, 24), focus=False)
+
+    pile.set_bottom_row_debt(1)
+    expanded = pile.get_item_rows((60, 23), focus=False)
+
+    assert expanded[:2] == collapsed[:2]
+    assert expanded[2] == collapsed[2] - 1
+
+
 def _row_attrs(canvas, row_index: int) -> set[str | None]:
     return {
         attr

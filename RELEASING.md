@@ -31,10 +31,18 @@ credential and publishes only after its build and test job succeeds.
 
 1. Update `src/railmux/__init__.py` and move the user-visible entries in
    `CHANGELOG.md` from **Unreleased** to the new version and date.
+   Preview the GitHub Release body generated from that exact section:
+
+   ```bash
+   python tools/release_notes.py X.Y.Z
+   ```
+
+   A missing or empty release section is an error, so the tagged release
+   cannot silently publish an empty set of notes.
 2. Run the full test suite and smoke-test the TUI on supported platforms:
 
    ```bash
-   python -m ruff check src tests
+   python -m ruff check src tests tools
    python -m pytest -q
    RAILMUX_RUN_TMUX_INTEGRATION=1 python -m pytest -q tests/test_tmux_integration.py
    ```
@@ -58,7 +66,8 @@ credential and publishes only after its build and test job succeeds.
    ```
 
 6. Watch the release workflow. It builds and tests on Python 3.9, publishes the
-   checked artifacts to PyPI, and creates a GitHub Release with those artifacts.
+   checked artifacts to PyPI, and creates a GitHub Release with those artifacts
+   and the matching curated `CHANGELOG.md` section.
 7. Verify the published package from clean Python 3.9 and current-Python virtual
    environments:
 

@@ -100,6 +100,7 @@ managed workspace; see the important shared-focus and shared-layout limits in
 | `d` | Delete the focused session (prompts for confirmation) |
 | `t` | Open a terminal in the active project directory |
 | `m` | Cycle through available agent modes |
+| `o` | Open persistent Railmux options |
 | `␣` | Preview stopped or switch running target (like single-click) |
 | `F8` | Cycle agent layout: single → side-by-side → stacked |
 | `F9` | Fullscreen the agent pane (toggle) for clean text selection |
@@ -117,8 +118,10 @@ The rename popup starts with the current title pre-filled. Press
 to cancel.
 
 The first Button Bar row keeps Help, Quit, and Detach visible. Select **More**
-to reveal a second row with **Mode** and **Layout**; **Less** collapses it.
-The `m` and `F8` keyboard shortcuts remain available while the row is hidden.
+to reveal a second row with **Mode**, **Layout**, and **Options**; **Less**
+collapses it. The `m`, `F8`, and `o` keyboard shortcuts remain available while
+the row is hidden. Expanding this second row takes its one display line from
+the bottom Running section; Projects and Sessions keep the same heights.
 
 After an explicit layout change (`F8` or `[` / `]`), quitting offers to keep
 the current pane proportions: **Always** keeps the latest custom layout,
@@ -128,6 +131,13 @@ stored, so a later terminal may have a different size. If a saved split cannot
 fit, Railmux uses safe responsive defaults for that run without overwriting the
 saved profile. The first Codex auto-run prompt uses the same lifetime language:
 **Always**, **This Railmux run**, or **No**.
+
+Press `o`, or select **More → Options**, to change persistent behavior without
+editing TOML. Both **Layout retention** and **Codex auto-run** support
+**Always**, **Ask every time**, and **No**. Use arrow keys plus `Enter`/`Space`,
+or click a choice with the mouse. `Esc` or `o` closes Options. Layout changes do
+not resize the current workspace; Codex auto-run changes affect new launches,
+not agents that are already running.
 
 ### Dual-agent layouts
 
@@ -224,6 +234,13 @@ soft quit in the confirmation popup; restarting the same Railmux instance then
 restores the usable workspace when those sessions are still available. A normal
 quit confirmation ends all running sessions instead.
 
+All terminals attached to one managed Railmux window view the same UI process.
+Soft Quit therefore closes that shared UI for every attached view, although it
+does not stop the detached agent sessions. It is not an exclusive-client
+command; the quit prompt calls this out when multiple terminals are attached.
+To keep the current terminal and detach every other attached client, run
+`Ctrl-B :detach-client -a Enter` from the terminal you want to retain.
+
 If Railmux stops while a provider is still creating a new session, the Running
 pane may show it as unresolved. You can reopen or stop that agent, but Railmux
 will not offer to delete provider history until it can identify the session
@@ -242,6 +259,12 @@ binary = "claude"
 # Path to the codex binary (default: "codex")
 binary = "codex"
 home = "~/.codex"
+# New Codex launches: "always", "ask", or "never" (default: "ask")
+auto_run = "ask"
+
+[ui]
+# Save custom pane proportions: "always", "ask", or "never"
+layout_retention = "ask"
 
 [projects]
 # Show projects with no resumable sessions (default: false)
@@ -259,6 +282,12 @@ agent_transport = "swap" # or "nested"
 Most users should leave `agent_transport` unchanged. Railmux automatically uses
 the compatible `nested` display when the default `swap` mode is not safe for the
 current tmux environment.
+
+This is Railmux's only user settings file. Manual edits and the in-app Options
+screen update the same values; Options preserves comments, formatting, order,
+and unknown keys. A one-run Codex choice is kept only in memory. A `This time`
+layout profile is stored here until it is successfully applied on the next
+launch, then removed.
 
 ## Diagnostics
 
@@ -385,11 +414,13 @@ user environment. It checks `python3 -m pip`, `python -m pip`, `pip3`, then
 available remotely. If the remote version is newer, the client asks before
 upgrading local Railmux with the current Python and then restarts the same
 command. Different package versions can connect when their protocol version is
-compatible. Declined or failed installation prints commands that can be copied
-manually. On a remote Python that enforces PEP 668, those instructions create
-`~/.local/share/railmux/ssh-venv`; later connections discover that private
-environment without PATH changes. Unpublished development versions may require
-copying the matching wheel or source checkout.
+compatible. Installation first uses per-user site packages. If PEP 668 or the
+server's Python policy rejects that location, a second prompt offers to create
+the isolated `~/.local/share/railmux/ssh-venv` and continue without `sudo` or
+system-Python changes. Declined or failed setup prints equivalent commands for
+manual recovery. Later connections discover the private environment without
+PATH changes. Unpublished development versions may require copying the matching
+wheel or source checkout.
 
 The default remote session is started automatically when absent. `Ctrl-B d`
 detaches normally; `Ctrl-]` is an emergency local disconnect. Mouse forwarding
@@ -467,10 +498,19 @@ jump between client sizes.
 
 These are not independent workspaces: every client still shares focus, Target
 pane, layout, pane proportions, and the one tmux window geometry chosen for the
-smallest attached viewport. Simultaneous input can interfere. Use `Ctrl-B d`
+smallest attached viewport. A new client may therefore open with its cursor in
+the sidebar or a preview selected by another client; use `Ctrl-B` plus an arrow,
+`Ctrl-B Tab`, or a mouse click to focus the intended agent pane. Simultaneous
+input can interfere. Use `Ctrl-B d`
 to detach exactly the terminal issuing the key; the clickable Detach action
 asks for that shortcut when several clients are attached because a sidebar
 process cannot identify which tmux client clicked it.
+
+To make the current terminal the only attached view, use
+`Ctrl-B :detach-client -a Enter`. This detaches the other clients without
+stopping Railmux or its agents. Soft Quit is different: it closes the one shared
+Railmux UI, so every attached view loses that UI while the detached agents stay
+alive for the next launch.
 
 For independent full-screen geometry and pane proportions, use one interactive
 Railmux window at a time for now. That behavior requires separate display

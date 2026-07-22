@@ -24,7 +24,7 @@ def _submission_app(codex_mode: bool):
     app = App.__new__(App)
     app._codex_mode = codex_mode
     app._config = Config(codex_binary="codex-bin", claude_binary="claude-bin")
-    app._settings = SimpleNamespace(codex_yolo=False)
+    app._settings = SimpleNamespace(codex_yolo_policy="never")
     app._close_modal = lambda: None
     app._new_placeholder_key = lambda: "__new__-test-1"
     app._codex_env = lambda: {"CODEX_HOME": "/codex-home"}

@@ -418,12 +418,15 @@ def test_buttonbar_uses_responsive_labels_without_losing_actions():
 
 def test_buttonbar_more_expands_mode_and_layout_then_less_collapses():
     calls = []
+    expansion = []
     bar = ButtonBar(
         on_help=lambda: None,
         on_quit=lambda: None,
         on_detach=lambda: None,
         on_mode_toggle=lambda: calls.append("mode"),
         on_layout=lambda: calls.append("layout"),
+        on_options=lambda: calls.append("options"),
+        on_expanded_change=expansion.append,
     )
     bar.render((60,), False)
     row, start, end, _index, _callback = bar._hit_areas[-1]
@@ -435,19 +438,24 @@ def test_buttonbar_more_expands_mode_and_layout_then_less_collapses():
     assert "Less" in text
     assert "m Mode" in text
     assert "F8 Layout" in text
+    assert "o Options" in text
     assert bar.rows((60,)) == 2
+    assert bar.extra_rows == 1
+    assert expansion == [True]
 
     secondary = [area for area in bar._hit_areas if area[0] == 1]
     for hit_row, hit_start, hit_end, _index, _callback in secondary:
         bar.mouse_event(
             (60,), "mouse press", 1,
             (hit_start + hit_end) // 2, hit_row, False)
-    assert calls == ["mode", "layout"]
+    assert calls == ["mode", "layout", "options"]
 
     row, start, end, _index, _callback = next(
         area for area in bar._hit_areas if area[0] == 0 and area[3] == 3)
     bar.mouse_event((60,), "mouse press", 1, (start + end) // 2, row, False)
     assert bar.rows((60,)) == 1
+    assert bar.extra_rows == 0
+    assert expansion == [True, False]
 
 
 def test_buttonbar_compact_hit_areas_match_visible_actions():

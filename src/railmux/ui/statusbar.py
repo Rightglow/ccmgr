@@ -155,9 +155,14 @@ class ButtonBar(urwid.WidgetWrap):
                  on_quit: Callable[[], None],
                  on_detach: Callable[[], None],
                  on_mode_toggle: Callable[[], None] | None = None,
-                 on_layout: Callable[[], None] | None = None) -> None:
+                 on_layout: Callable[[], None] | None = None,
+                 on_options: Callable[[], None] | None = None,
+                 on_expanded_change: Callable[[bool], None] | None = None,
+                 ) -> None:
         self._on_mode_toggle = on_mode_toggle
         self._on_layout = on_layout
+        self._on_options = on_options
+        self._on_expanded_change = on_expanded_change
         self._on_help = on_help
         self._on_quit = on_quit
         self._on_detach = on_detach
@@ -192,6 +197,9 @@ class ButtonBar(urwid.WidgetWrap):
         if self._on_layout is not None:
             self._secondary_specs.append(
                 ("F8 Layout", "Layout", "L", self._on_layout))
+        if self._on_options is not None:
+            self._secondary_specs.append(
+                ("o Options", "Options", "O", self._on_options))
         self._hit_areas: list[
             tuple[int, int, int, int, Callable[[], None]]
         ] = []
@@ -286,6 +294,12 @@ class ButtonBar(urwid.WidgetWrap):
         self._expanded = not self._expanded
         self._rebuild()
         self._invalidate()
+        if self._on_expanded_change is not None:
+            self._on_expanded_change(self._expanded)
+
+    @property
+    def extra_rows(self) -> int:
+        return 1 if self._expanded and self._secondary_specs else 0
 
     def render(self, size, focus: bool = False):
         self._ensure_width(size[0])
