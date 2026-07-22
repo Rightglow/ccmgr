@@ -33,6 +33,8 @@ from railmux.fast_display_protocol import (
     HistoryBatch,
     HistorySnapshot,
     PROTOCOL_VERSION,
+    REMOTE_ATTACH_ACCEPTED,
+    REMOTE_ATTACH_BUSY,
     REMOTE_HELLO_PREFIX,
     REMOTE_START,
     RemoteExit,
@@ -42,6 +44,7 @@ from railmux.fast_display_protocol import (
     UpdateKind,
     encode_history_prefetch,
     encode_history_request,
+    encode_heartbeat,
     encode_input,
     encode_keyframe_request,
     encode_resize,
@@ -57,6 +60,9 @@ _HISTORY_PREFETCH_TIMEOUT = 6.0
 _HISTORY_CONTENT_PANES = 8
 _REMOTE_HELLO_TIMEOUT = 60.0
 _REMOTE_HELLO_LIMIT = 16 * 1024
+_REMOTE_ATTACH_TIMEOUT = 30.0
+_REMOTE_ATTACH_RETRY_DELAY = 0.2
+_HEARTBEAT_INTERVAL = 5.0
 _DISPLAY_MAGIC_PREFIX = b"RMUXD"
 _REMOTE_VENV = ".local/share/railmux/ssh-venv"
 
@@ -161,11 +167,51 @@ class RemoteStartKind(Enum):
     TIMEOUT = "timeout"
 
 
+class RemoteAttachKind(Enum):
+    ACCEPTED = "accepted"
+    BUSY = "busy"
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+
+
 @dataclass(frozen=True)
 class RemoteStartup:
     kind: RemoteStartKind
     hello: RemoteHello | None = None
     returncode: int | None = None
+
+
+def await_remote_attach_status(
+    process: subprocess.Popen,
+    timeout: float = _REMOTE_ATTACH_TIMEOUT,
+) -> RemoteAttachKind:
+    """Read one post-start status without consuming the first display frame."""
+    assert process.stdout is not None
+    deadline = time.monotonic() + timeout
+    received = bytearray()
+    limit = max(len(REMOTE_ATTACH_ACCEPTED), len(REMOTE_ATTACH_BUSY)) + 2
+    while len(received) < limit:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return RemoteAttachKind.TIMEOUT
+        readable, _writable, _exceptional = select.select(
+            [process.stdout.fileno()], [], [], remaining)
+        if not readable:
+            return RemoteAttachKind.TIMEOUT
+        chunk = os.read(process.stdout.fileno(), 1)
+        if not chunk:
+            process.wait()
+            return RemoteAttachKind.FAILED
+        received.extend(chunk)
+        if chunk != b"\n":
+            continue
+        line = bytes(received)
+        if line == REMOTE_ATTACH_ACCEPTED:
+            return RemoteAttachKind.ACCEPTED
+        if line == REMOTE_ATTACH_BUSY:
+            return RemoteAttachKind.BUSY
+        return RemoteAttachKind.FAILED
+    return RemoteAttachKind.FAILED
 
 
 def parse_remote_hello(line: bytes) -> RemoteHello:
@@ -774,7 +820,7 @@ class TerminalSurface:
         self.active = True
 
     def _reconcile_terminal_modes(self, requested: TerminalMode) -> None:
-        """Mirror only input-affecting modes explicitly carried by protocol v6."""
+        """Mirror only input-affecting modes explicitly carried by protocol v7."""
         disabled = self.terminal_modes & ~requested
         enabled = requested & ~self.terminal_modes
         controls: list[bytes] = []
@@ -891,9 +937,14 @@ class TerminalSurface:
 
 
 def _remote_server_args(
-    *, session: str, width: int, height: int, fps: float,
+    *,
+    session: str,
+    width: int,
+    height: int,
+    fps: float,
+    replace_existing_client: bool = False,
 ) -> list[str]:
-    return [
+    args = [
         "remote-server",
         "--protocol", str(PROTOCOL_VERSION),
         "--session", session,
@@ -901,6 +952,9 @@ def _remote_server_args(
         "--height", str(height),
         "--fps", str(fps),
     ]
+    if replace_existing_client:
+        args.append("--replace-existing-client")
+    return args
 
 
 def _remote_launch_command(server_args: Sequence[str]) -> str:
@@ -933,9 +987,14 @@ def build_ssh_argv(
     height: int,
     fps: float,
     ssh_args: Sequence[str],
+    replace_existing_client: bool = False,
 ) -> list[str]:
     server_args = _remote_server_args(
-        session=session, width=width, height=height, fps=fps
+        session=session,
+        width=width,
+        height=height,
+        fps=fps,
+        replace_existing_client=replace_existing_client,
     )
     command = _remote_launch_command(server_args)
     return ["ssh", "-T", *ssh_args, destination, command]
@@ -1136,6 +1195,111 @@ def _confirm_remote_install(
     )
 
 
+def _send_start(process: subprocess.Popen) -> None:
+    try:
+        process.stdin.write(REMOTE_START)
+        process.stdin.flush()
+    except BrokenPipeError as exc:
+        raise ProbeError(
+            "remote Railmux exited before accepting the display"
+        ) from exc
+
+
+def _reconnect_remote_attach(
+    args: argparse.Namespace,
+    current_size: os.terminal_size,
+    *,
+    replace_existing_client: bool,
+) -> tuple[subprocess.Popen, RemoteAttachKind]:
+    """Start one already-negotiated helper and return its attach status."""
+    argv = build_ssh_argv(
+        args.destination,
+        session=args.session,
+        width=current_size.columns,
+        height=current_size.lines,
+        fps=args.fps,
+        ssh_args=args.ssh_arg,
+        replace_existing_client=replace_existing_client,
+    )
+    process = _spawn_remote(argv)
+    try:
+        startup = await_remote_startup(process)
+        hello = startup.hello
+        if (startup.kind is not RemoteStartKind.HELLO
+                or hello is None
+                or hello.protocol != PROTOCOL_VERSION
+                or not hello.ready
+                or not hello.tmux):
+            raise ProbeError(
+                "reconnect could not start a compatible remote display; "
+                "the Railmux session and agents were left intact"
+            )
+        _send_start(process)
+        status = await_remote_attach_status(process)
+    except Exception:
+        _stop_unstarted_remote(process)
+        raise
+    return process, status
+
+
+def _finish_remote_attach(
+    args: argparse.Namespace,
+    current_size: os.terminal_size,
+    process: subprocess.Popen,
+) -> subprocess.Popen:
+    """Complete the cooked-mode attach handshake and one consented takeover."""
+    try:
+        _send_start(process)
+    except ProbeError:
+        _stop_unstarted_remote(process)
+        raise
+    status = await_remote_attach_status(process)
+    if status is RemoteAttachKind.ACCEPTED:
+        return process
+    if status is RemoteAttachKind.TIMEOUT:
+        _stop_unstarted_remote(process)
+        raise ProbeError("timed out waiting for the remote display to attach")
+    if status is not RemoteAttachKind.BUSY:
+        _stop_unstarted_remote(process)
+        raise ProbeError("remote display helper failed before attaching")
+
+    _stop_unstarted_remote(process)
+    # A current v7 helper holds the mutex only while registering its exact tmux
+    # child. Give that ordinary race one fresh SSH process before presenting
+    # the explicit legacy-lock takeover choice.
+    time.sleep(_REMOTE_ATTACH_RETRY_DELAY)
+    retry, retry_status = _reconnect_remote_attach(
+        args, current_size, replace_existing_client=False)
+    if retry_status is RemoteAttachKind.ACCEPTED:
+        return retry
+    _stop_unstarted_remote(retry)
+    if retry_status is RemoteAttachKind.TIMEOUT:
+        raise ProbeError("timed out while retrying the remote display attach")
+    if retry_status is not RemoteAttachKind.BUSY:
+        raise ProbeError("remote display helper failed while retrying attach")
+
+    if not _confirm(
+        "Another display helper is persistently holding the attach lock. "
+        "Replace "
+        "it? This detaches every terminal currently attached to the same "
+        "managed Railmux session, but keeps the session and agents alive."
+    ):
+        raise ProbeError(
+            "remote Railmux is still owned by an older display client; "
+            "retry after it exits, or reconnect and approve replacement"
+        )
+
+    replacement, replacement_status = _reconnect_remote_attach(
+        args, current_size, replace_existing_client=True)
+    if replacement_status is not RemoteAttachKind.ACCEPTED:
+        _stop_unstarted_remote(replacement)
+        raise ProbeError(
+            "the old display client did not release in time; the Railmux "
+            "session and agents remain intact, so retry shortly"
+        )
+    return replacement
+
+
 def prepare_remote_process(
     args: argparse.Namespace,
     current_size: os.terminal_size,
@@ -1230,14 +1394,7 @@ def prepare_remote_process(
                     f"v{PROTOCOL_VERSION} is compatible",
                     file=sys.stderr,
                 )
-            try:
-                process.stdin.write(REMOTE_START)
-                process.stdin.flush()
-            except BrokenPipeError as exc:
-                raise ProbeError(
-                    "remote Railmux exited before accepting the display"
-                ) from exc
-            return process
+            return _finish_remote_attach(args, current_size, process)
 
     assert install_reason is not None
     if not _confirm_remote_install(args, install_reason, install_version):
@@ -1267,14 +1424,7 @@ def prepare_remote_process(
             "automatic remote installation did not produce a compatible "
             f"Railmux.\n{remote_install_help(args.destination, install_version)}"
         )
-    try:
-        process.stdin.write(REMOTE_START)
-        process.stdin.flush()
-    except BrokenPipeError as exc:
-        raise ProbeError(
-            "remote Railmux exited after automatic installation"
-        ) from exc
-    return process
+    return _finish_remote_attach(args, current_size, process)
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -1331,6 +1481,7 @@ def run(args: argparse.Namespace) -> int:
     selector.register(sys.stdin.fileno(), selectors.EVENT_READ, "local")
     started = time.monotonic()
     next_history_prefetch = started
+    next_heartbeat = started + _HEARTBEAT_INTERVAL
     frames = 0
     painted_rows = 0
     wire_bytes = 0
@@ -1499,6 +1650,9 @@ def run(args: argparse.Namespace) -> int:
                 if process.poll() is not None and not events:
                     break
                 now = time.monotonic()
+                if now >= next_heartbeat:
+                    send_protocol_frame(encode_heartbeat())
+                    next_heartbeat = now + _HEARTBEAT_INTERVAL
                 if (
                     not args.no_mouse
                     and latest_screen is not None

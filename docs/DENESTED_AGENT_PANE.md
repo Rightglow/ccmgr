@@ -260,7 +260,7 @@ path:
 railmux ssh your-server
 ```
 
-Protocol v6 begins with a bounded remote hello containing package version,
+Protocol v7 begins with a bounded remote hello containing package version,
 protocol version, SSH dependency readiness, and tmux availability. The server
 does not inspect or mutate tmux until the compatible client returns the exact
 start acknowledgement. Missing Railmux or its optional dependency can be
@@ -280,13 +280,27 @@ across differing package versions.
 
 If the default `railmux` tmux session is absent, the server starts Railmux in a
 detached tmux session using the same installed Python environment. A custom
-`--session` is never auto-created. The helper refuses to start if the target
-session already has an attached client, preventing two terminals from
-competing for tmux window geometry. Its PTY starts at the local terminal
-dimensions, so the resulting layout and reflow are the same kind of size
-ownership as an ordinary single tmux client. Later local size changes are sent
-as bounded resize messages and applied to that private PTY with `TIOCSWINSZ`;
-tmux remains the only layout authority.
+`--session` is never auto-created. Multiple protocol-v7 helpers may attach to
+the same managed session. A short flock covers only validation and attachment;
+the helper confirms its own child by matching tmux's `#{client_pid}` before it
+releases that boundary. The shared window is set to `window-size=smallest`, so
+all clients can display its complete geometry without activity-driven resize
+jumps. This still means one shared layout and pane ratio, not per-client
+geometry. Each PTY starts at its local terminal dimensions; later size changes
+are sent as bounded resize messages and applied with `TIOCSWINSZ`, while tmux
+remains the only layout authority.
+
+After attachment the server emits an ASCII ACCEPTED status before its first
+binary frame. The local client sends a heartbeat every five seconds. If an SSH
+connection remains half-open, 45 seconds without a complete input frame ends
+only that helper and its exact private client. Protocol-v6 helpers held the
+flock for their full lifetime; a BUSY response therefore offers one explicit
+local replacement. Consent warns that every client currently attached to the
+managed session may be detached. The server validates the immutable session,
+enumerates and detaches exact client names, acquires the bounded lock, repeats
+enumeration to close the race, and never kills the session, panes, or agents.
+The client first starts one fresh ordinary helper after BUSY, so transient v7
+attach contention completes without presenting the legacy takeover prompt.
 
 Every input byte other than `Ctrl-]` goes to the real tmux client. Consequently
 `Ctrl-B d`, prefix navigation, F8/F9, sidebar input, and agent input follow the
@@ -319,7 +333,7 @@ A terminal-native selection override can still bypass mouse reporting before
 the client sees it, but that behavior is terminal-dependent; `--no-mouse` is
 the reliable ordinary-selection option.
 
-Display protocol v6 uses monotonically sequenced, zlib-compressed keyframes and
+Display protocol v7 uses monotonically sequenced, zlib-compressed keyframes and
 row patches. Each update also carries a bounded terminal-mode bitmask. Only
 bracketed paste (`DECSET 2004`) and focus events (`DECSET 1004`) are projected;
 the client mirrors transitions and disables both modes before restoring the

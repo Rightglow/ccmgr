@@ -892,6 +892,46 @@ def test_fit_session_to_pane_is_best_effort(monkeypatch):
     assert fit_session_to_pane("cc-agent", "%4") is False
 
 
+def test_use_smallest_window_size_is_window_scoped_on_modern_tmux(monkeypatch):
+    monkeypatch.setattr(tmux_ctl, "tmux_version", lambda: (3, 5))
+    call = MagicMock()
+    monkeypatch.setattr(subprocess, "check_call", call)
+
+    assert tmux_ctl.use_smallest_window_size("%4") is True
+
+    call.assert_called_once_with(
+        [
+            "tmux", "set-window-option", "-t", "%4",
+            "window-size", "smallest",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def test_use_smallest_window_size_is_native_before_tmux_29(monkeypatch):
+    monkeypatch.setattr(tmux_ctl, "tmux_version", lambda: (2, 8))
+    call = MagicMock()
+    monkeypatch.setattr(subprocess, "check_call", call)
+
+    assert tmux_ctl.use_smallest_window_size("%4") is True
+    call.assert_not_called()
+
+
+def test_resize_pane_height_rejects_invalid_and_is_exact(monkeypatch):
+    call = MagicMock()
+    monkeypatch.setattr(subprocess, "check_call", call)
+
+    assert tmux_ctl.resize_pane_height("%4", 0) is False
+    assert tmux_ctl.resize_pane_height("%4", 19) is True
+
+    call.assert_called_once_with(
+        ["tmux", "resize-pane", "-t", "%4", "-y", "19"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def test_session_attached_count_and_fit_guard(monkeypatch):
     with _mock_check_output("2"):
         assert session_attached_count("cc-agent") == 2

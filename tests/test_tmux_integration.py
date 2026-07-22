@@ -287,7 +287,7 @@ def test_dedicated_label_routes_fast_server_to_private_tmux(monkeypatch):
         assert Path(target.socket_path).resolve().is_relative_to(
             socket_root.resolve()
         )
-        session_id = fast_display_server._validate_unattached_railmux("probe")
+        session_id = fast_display_server._validate_railmux("probe")
         assert session_id == "$0"
         assert tmux_server.target_session_id(target, "probe") == session_id
         assert [pane.pane_id for pane in fast_display_server._list_agent_panes(
@@ -935,6 +935,79 @@ def test_real_tmux_session_split_attach_persistence_and_styles(isolated_tmux):
         not original_border and restored_border == "default"
     )
     assert tmux_ctl.kill_session(agent_session)
+
+
+def test_real_shared_window_uses_smallest_of_two_client_sizes(isolated_tmux):
+    display_session, _pane, socket_path = isolated_tmux
+    subprocess.run(
+        ["tmux", "-S", socket_path, "set-option", "-t", display_session,
+         "status", "off"],
+        check=True,
+    )
+    assert tmux_ctl.use_smallest_window_size(_pane)
+    env = os.environ.copy()
+    env.pop("TMUX", None)
+    env.pop("TMUX_PANE", None)
+    env["TERM"] = "xterm-256color"
+    clients: list[tuple[subprocess.Popen, int, int]] = []
+
+    def attach(width: int, height: int) -> subprocess.Popen:
+        master, slave = pty.openpty()
+        fcntl.ioctl(
+            slave,
+            termios.TIOCSWINSZ,
+            struct.pack("HHHH", height, width, 0, 0),
+        )
+        process = subprocess.Popen(
+            ["tmux", "-S", socket_path, "attach-session", "-t",
+             display_session],
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            env=env,
+            start_new_session=True,
+        )
+        clients.append((process, master, slave))
+        return process
+
+    def window_size() -> tuple[int, int]:
+        text = subprocess.check_output(
+            ["tmux", "-S", socket_path, "display-message", "-p", "-t",
+             display_session, "#{window_width} #{window_height}"],
+            text=True,
+        ).split()
+        return int(text[0]), int(text[1])
+
+    try:
+        attach(120, 40)
+        assert _wait_until(
+            lambda: tmux_ctl.session_attached_count(display_session) == 1)
+        assert _wait_until(lambda: window_size() == (120, 40))
+
+        small = attach(80, 24)
+        assert _wait_until(
+            lambda: tmux_ctl.session_attached_count(display_session) == 2)
+        assert _wait_until(lambda: window_size() == (80, 24))
+
+        small.terminate()
+        small.wait(timeout=2.0)
+        assert _wait_until(
+            lambda: tmux_ctl.session_attached_count(display_session) == 1)
+        assert _wait_until(lambda: window_size() == (120, 40))
+    finally:
+        for process, master, slave in clients:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=2.0)
+            for fd in (master, slave):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
 
 
 def test_real_tmux_single_sidebar_focus_clears_stale_target_format(isolated_tmux):

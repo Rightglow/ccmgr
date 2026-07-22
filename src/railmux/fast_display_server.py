@@ -5,9 +5,10 @@ tmux therefore remains the compositor and input authority for the Railmux
 sidebar, borders, status line, and agent panes.  PTY output is consumed into a
 headless terminal screen and only bounded latest-state frames cross SSH.
 
-The server refuses to attach when the target session already has a client.  On
-EOF it terminates only the exact tmux *client process* it created; it never
-kills, resizes with tmux commands, or otherwise tears down the session.
+Several helpers may attach to the same managed window. On EOF or lease expiry,
+each helper terminates only the exact tmux *client process* it created; it never
+kills the session, panes, or agents. An explicit, locally confirmed replacement
+path exists solely to recover older helpers which held the attach lock for life.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import select
 import shlex
 import shutil
@@ -41,6 +43,8 @@ from railmux.fast_display_protocol import (
     InputKind,
     InputFrameDecoder,
     PROTOCOL_VERSION,
+    REMOTE_ATTACH_ACCEPTED,
+    REMOTE_ATTACH_BUSY,
     REMOTE_HELLO_PREFIX,
     REMOTE_START,
     RemoteExit,
@@ -59,9 +63,17 @@ class DisplayServerError(RuntimeError):
     """A bounded error safe to show through SSH stderr."""
 
 
+class DisplayServerBusy(DisplayServerError):
+    """The short attach mutex is held by a legacy or starting helper."""
+
+
 _WATCHDOG_INTERVAL = 5.0
 _WATCHDOG_FAILURES = 3
 _START_HANDSHAKE_TIMEOUT = 300.0
+_ATTACH_LOCK_TIMEOUT = 2.0
+_REPLACE_LOCK_TIMEOUT = 5.0
+_CLIENT_LEASE_TIMEOUT = 45.0
+_WINDOW_SIZE_ATTEMPTS = 3
 
 
 def _fast_dependency_ready() -> bool:
@@ -372,8 +384,8 @@ def _ensure_railmux_session(session: str, timeout: float = 15.0) -> str:
     raise DisplayServerError("Railmux did not become ready after it was started")
 
 
-def _validate_unattached_railmux(session: str) -> str:
-    """Return the immutable session ID after conservative validation."""
+def _validate_railmux(session: str) -> str:
+    """Return the immutable managed session ID after conservative validation."""
     try:
         session_id = _tmux_output(
             "display-message", "-p", "-t", session, "#{session_id}"
@@ -400,30 +412,6 @@ def _validate_unattached_railmux(session: str) -> str:
     if controller_identity != f"{session_id}\t{controller}":
         raise DisplayServerError("the Railmux controller identity changed")
 
-    try:
-        raw_clients = subprocess.check_output(
-            tmux_server.tmux_argv(
-                "list-clients", "-F", "#{session_id}\t#{client_name}"
-            ),
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=2.0,
-        )
-    except (
-        OSError,
-        subprocess.CalledProcessError,
-        subprocess.TimeoutExpired,
-    ):
-        raw_clients = ""
-    attached = [
-        row for row in raw_clients.splitlines()
-        if row.split("\t", 1)[0] == session_id
-    ]
-    if attached:
-        raise DisplayServerError(
-            "Railmux already has an attached client; detach it with Ctrl-B d "
-            "before starting railmux ssh"
-        )
     return session_id
 
 
@@ -651,8 +639,10 @@ def capture_history_batch(
     return HistoryBatch(request_id, snapshots)
 
 
-def _acquire_display_lock(session_id: str) -> int:
-    """Serialize the validation-and-attach boundary for one tmux session."""
+def _acquire_display_lock(
+    session_id: str, *, timeout: float = _ATTACH_LOCK_TIMEOUT,
+) -> int:
+    """Boundedly serialize the validation-and-attach boundary."""
     key = session_id[1:] if session_id.startswith("$") else "invalid"
     if not key.isdigit():
         raise DisplayServerError("invalid session identity for display lock")
@@ -678,15 +668,29 @@ def _acquire_display_lock(session_id: str) -> int:
             or info.st_mode & 0o077
         ):
             raise OSError("unsafe display lock")
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (BlockingIOError, OSError) as exc:
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+    except BlockingIOError as exc:
         try:
             os.close(fd)
         except (NameError, OSError):
             pass
-        raise DisplayServerError(
+        raise DisplayServerBusy(
             "another full-window client is already starting or attached"
         ) from exc
+    except OSError as exc:
+        try:
+            os.close(fd)
+        except (NameError, OSError):
+            pass
+        raise DisplayServerError("could not create a safe display lock") from exc
     return fd
 
 
@@ -740,7 +744,7 @@ def _wait_until_attached(session_id: str, pid: int, timeout: float = 2.0) -> boo
         try:
             clients = subprocess.check_output(
                 tmux_server.tmux_argv(
-                    "list-clients", "-F", "#{session_id}"
+                    "list-clients", "-F", "#{session_id}\t#{client_pid}"
                 ),
                 stderr=subprocess.DEVNULL,
                 text=True,
@@ -752,10 +756,104 @@ def _wait_until_attached(session_id: str, pid: int, timeout: float = 2.0) -> boo
             subprocess.TimeoutExpired,
         ):
             clients = []
-        if session_id in clients:
+        if f"{session_id}\t{pid}" in clients:
             return True
         time.sleep(0.01)
     return False
+
+
+def _detach_session_clients(session_id: str) -> None:
+    """Detach only clients re-enumerated on one immutable managed session."""
+    try:
+        rows = subprocess.check_output(
+            tmux_server.tmux_argv(
+                "list-clients", "-F", "#{session_id}\t#{client_name}"
+            ),
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2.0,
+        ).splitlines()
+    except (
+        OSError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+    ) as exc:
+        raise DisplayServerError(
+            "could not enumerate existing Railmux clients"
+        ) from exc
+    names: list[str] = []
+    for row in rows:
+        fields = row.split("\t", 1)
+        if len(fields) != 2 or fields[0] != session_id:
+            continue
+        name = fields[1]
+        if not name or len(name) > 512 or "\n" in name or "\0" in name:
+            raise DisplayServerError("tmux returned an invalid client identity")
+        names.append(name)
+    for name in names:
+        try:
+            subprocess.run(
+                tmux_server.tmux_argv("detach-client", "-t", name),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2.0,
+                check=True,
+            )
+        except (
+            OSError,
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+        ) as exc:
+            raise DisplayServerError(
+                "could not detach an existing Railmux client"
+            ) from exc
+
+
+def _use_smallest_window_size(session_id: str) -> None:
+    """Give every shared-window client a viewport it can display completely."""
+    last_error: BaseException | None = None
+    for attempt in range(_WINDOW_SIZE_ATTEMPTS):
+        try:
+            result = subprocess.run(
+                tmux_server.tmux_argv(
+                    "set-window-option", "-t", session_id,
+                    "window-size", "smallest",
+                ),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2.0,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            last_error = exc
+        else:
+            if result.returncode == 0:
+                return
+        if attempt + 1 < _WINDOW_SIZE_ATTEMPTS:
+            time.sleep(0.05)
+    # tmux < 2.9 has no window-size option and already uses the smallest
+    # attached client. Only modern tmux failures mean the safety policy could
+    # not be established.
+    try:
+        version_text = subprocess.check_output(
+            tmux_server.tmux_argv("-V"),
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2.0,
+        )
+        match = re.search(r"(\d+)\.(\d+)", version_text)
+    except (
+        OSError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+    ) as exc:
+        raise DisplayServerError(
+            "could not establish safe multi-terminal window sizing"
+        ) from (last_error or exc)
+    if match is None or (int(match.group(1)), int(match.group(2))) >= (2, 9):
+        raise DisplayServerError(
+            "could not establish safe multi-terminal window sizing"
+        )
 
 
 def _colour_codes(value: str, *, foreground: bool) -> list[str]:
@@ -835,7 +933,7 @@ def render_rows(screen: object) -> tuple[bytes, ...]:
 
 
 def terminal_modes_for_screen(screen: object) -> TerminalMode:
-    """Project pyte's private-mode set onto the bounded v6 wire allowlist."""
+    """Project pyte's private-mode set onto the bounded v7 wire allowlist."""
     terminal_modes = TerminalMode.NONE
     if 2004 << 5 in screen.mode:
         terminal_modes |= TerminalMode.BRACKETED_PASTE
@@ -909,7 +1007,19 @@ def _remote_watchdog_tripped(
     return True
 
 
-def serve(session: str, width: int, height: int, fps: float) -> int:
+def _emit_attach_status(status: bytes) -> None:
+    sys.stdout.buffer.write(status)
+    sys.stdout.buffer.flush()
+
+
+def serve(
+    session: str,
+    width: int,
+    height: int,
+    fps: float,
+    *,
+    replace_existing_client: bool = False,
+) -> int:
     try:
         import pyte
         from pyte import modes
@@ -919,15 +1029,41 @@ def serve(session: str, width: int, height: int, fps: float) -> int:
         ) from exc
     pyte = _extended_pyte(pyte)
 
-    initial_session_id = _ensure_railmux_session(session)
-    lock_fd = _acquire_display_lock(initial_session_id)
+    if replace_existing_client:
+        initial_session_id = _validate_railmux(session)
+        _detach_session_clients(initial_session_id)
+        lock_timeout = _REPLACE_LOCK_TIMEOUT
+    else:
+        initial_session_id = _ensure_railmux_session(session)
+        lock_timeout = _ATTACH_LOCK_TIMEOUT
+    lock_fd = _acquire_display_lock(initial_session_id, timeout=lock_timeout)
+    pid: int | None = None
+    master_fd: int | None = None
     try:
-        session_id = _validate_unattached_railmux(session)
+        session_id = _validate_railmux(session)
         if session_id != initial_session_id:
             raise DisplayServerError("Railmux session changed while attaching")
-        return _serve_attached(pyte, modes, session_id, width, height, fps)
+        if replace_existing_client:
+            # Close the race between the first detach and lock acquisition:
+            # no newer helper can cross this boundary until this attach ends.
+            _detach_session_clients(session_id)
+        _use_smallest_window_size(session_id)
+        pid, master_fd = _spawn_tmux_client(session_id, width, height)
+        if not _wait_until_attached(session_id, pid):
+            _stop_client(pid, master_fd)
+            pid = None
+            master_fd = None
+            raise DisplayServerError("the private tmux client failed to attach")
+        _emit_attach_status(REMOTE_ATTACH_ACCEPTED)
+    except BaseException:
+        if pid is not None and master_fd is not None:
+            _stop_client(pid, master_fd)
+        raise
     finally:
         _release_display_lock(lock_fd)
+    assert pid is not None and master_fd is not None
+    return _serve_attached(
+        pyte, modes, session_id, width, height, fps, pid, master_fd)
 
 
 def _serve_attached(
@@ -937,11 +1073,9 @@ def _serve_attached(
     width: int,
     height: int,
     fps: float,
+    pid: int,
+    master_fd: int,
 ) -> int:
-    pid, master_fd = _spawn_tmux_client(session_id, width, height)
-    if not _wait_until_attached(session_id, pid):
-        _stop_client(pid, master_fd)
-        raise DisplayServerError("the private tmux client failed to attach")
     screen = pyte.DiffScreen(width, height)
     stream = pyte.ByteStream(screen)
     input_decoder = InputFrameDecoder()
@@ -960,6 +1094,7 @@ def _serve_attached(
     pending_state: _ScreenState | None = None
     control_packets: deque[bytes] = deque()
     input_closed = False
+    last_input = time.monotonic()
     watchdog = tmux_health.FailureWatchdog.starting(
         time.monotonic(),
         interval=_WATCHDOG_INTERVAL,
@@ -1083,6 +1218,10 @@ def _serve_attached(
                 0.25 if pending_packet is not None
                 else max(0.0, min(0.25, next_frame - now))
             )
+            timeout = min(
+                timeout,
+                max(0.0, last_input + _CLIENT_LEASE_TIMEOUT - now),
+            )
             writable_fds = [stdout_fd] if pending_packet is not None else []
             readable, writable, _ = select.select(
                 [master_fd, stdin_fd], writable_fds, [], timeout
@@ -1096,6 +1235,9 @@ def _serve_attached(
                     input_closed = True
                     break
                 for message in input_decoder.feed(packet or b""):
+                    last_input = time.monotonic()
+                    if message.kind is InputKind.HEARTBEAT:
+                        continue
                     if message.kind is InputKind.RESIZE:
                         apply_resize(*struct.unpack(">HH", message.data))
                         continue
@@ -1177,6 +1319,8 @@ def _serve_attached(
                     pending_state = None
 
             now = time.monotonic()
+            if now - last_input >= _CLIENT_LEASE_TIMEOUT:
+                return 0
             if _remote_watchdog_tripped(
                 watchdog, session_id, target.server_pid, now
             ):
@@ -1217,6 +1361,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--width", type=int, required=True)
     parser.add_argument("--height", type=int, required=True)
     parser.add_argument("--fps", type=float, default=20.0)
+    parser.add_argument(
+        "--replace-existing-client",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args(argv)
     if args.protocol != PROTOCOL_VERSION:
         parser.error(
@@ -1250,7 +1399,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     try:
         tmux_server.socket_label()
-        return serve(args.session, args.width, args.height, args.fps)
+        return serve(
+            args.session,
+            args.width,
+            args.height,
+            args.fps,
+            replace_existing_client=args.replace_existing_client,
+        )
+    except DisplayServerBusy as exc:
+        _emit_attach_status(REMOTE_ATTACH_BUSY)
+        print(f"fast display server: {exc}", file=sys.stderr)
+        return 2
     except (DisplayServerError, tmux_server.TmuxServerError) as exc:
         print(f"fast display server: {exc}", file=sys.stderr)
         return 2

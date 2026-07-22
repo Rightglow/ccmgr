@@ -40,6 +40,17 @@ pip install railmux
 railmux
 ```
 
+To open Railmux on a remote machine through its latest-state SSH display:
+
+```bash
+pip install railmux            # on the local machine
+railmux ssh your-server
+```
+
+The remote machine needs Python 3.9+ and `tmux`. If Railmux or its SSH display
+dependency is missing remotely, the local client asks before installing the
+matching version into the remote user environment; it never uses `sudo`.
+
 Requires Python 3.9+, `tmux`, `less`, and at least one supported agent CLI on
 `PATH`. Claude Code and Codex are independent: a missing provider does not stop
 you from using the other one.
@@ -60,9 +71,9 @@ cleanup preserves it, while an explicit Kill still works after exact identity
 validation. It does not move, delete, or rewrite provider session files under
 `~/.codex` or `~/.claude`; sessions can still be resumed normally. Run
 `railmux doctor` for a privacy-safe dependency and environment report when
-setup does not behave as expected. Use one interactive Railmux terminal window
-at a time; simultaneous multi-window use is currently only
-[partially supported](#6-can-i-open-railmux-in-multiple-terminal-windows).
+setup does not behave as expected. Multiple terminal windows may share one
+managed workspace; see the important shared-focus and shared-layout limits in
+[FAQ 6](#6-can-i-open-railmux-in-multiple-terminal-windows).
 
 ## Keys
 
@@ -104,6 +115,19 @@ railmux creates the directory before starting the agent.
 The rename popup starts with the current title pre-filled. Press
 `Ctrl-U` to clear the entire input, `Enter` to save a non-empty title, or `Esc`
 to cancel.
+
+The first Button Bar row keeps Help, Quit, and Detach visible. Select **More**
+to reveal a second row with **Mode** and **Layout**; **Less** collapses it.
+The `m` and `F8` keyboard shortcuts remain available while the row is hidden.
+
+After an explicit layout change (`F8` or `[` / `]`), quitting offers to keep
+the current pane proportions: **Always** keeps the latest custom layout,
+**This time** restores it on the next launch only, and **No** leaves it
+unsaved. Proportions, rather than cell counts or tmux pane identities, are
+stored, so a later terminal may have a different size. If a saved split cannot
+fit, Railmux uses safe responsive defaults for that run without overwriting the
+saved profile. The first Codex auto-run prompt uses the same lifetime language:
+**Always**, **This Railmux run**, or **No**.
 
 ### Dual-agent layouts
 
@@ -311,8 +335,19 @@ terminal session.
 
 ### 3. Using railmux over SSH
 
-railmux works over SSH out of the box, including mouse scrolling in the agent
-pane. These tweaks improve responsiveness and scrollback:
+There are two supported ways to use Railmux over SSH:
+
+- Run ordinary `ssh your-server`, then `railmux`. This uses the terminal's
+  normal tmux rendering path. If large Codex or Claude redraws feel slow, the
+  Cursor integrated terminal is a practical option to try; in our testing it
+  handles queued terminal updates especially well.
+- Run `railmux ssh your-server` locally. This latest-state display discards
+  superseded intermediate frames, sends compressed row-level changes, and
+  keeps bounded agent history locally for responsive scrolling. It is usually
+  the better choice when ordinary SSH suffers during full-screen redraws.
+
+The ordinary SSH path works out of the box, including mouse scrolling in the
+agent pane. These tweaks can improve its responsiveness and scrollback:
 
 **Server** (`~/.tmux.conf` on the remote machine):
 
@@ -328,16 +363,15 @@ Host your-server
     Compression yes           # smoother tmux pane scrolling over SSH
 ```
 
-If the connection is so slow that the sidebar can't refresh one frame per
-second, skip the mouse and use keyboard navigation — `↑↓ / Tab / Enter`
-cover every operation and don't depend on a fast redraw.
+If the ordinary connection is so slow that the sidebar cannot refresh one
+frame per second, try `railmux ssh` or switch to keyboard navigation —
+`↑↓ / Tab / Enter` cover every operation and do not depend on mouse redraws.
 
 #### Latest-state SSH display
 
 For terminals that struggle with large tmux redraw bursts, Railmux also has an
 SSH client that transmits coalesced screen state instead of every intermediate
-terminal update. Install Railmux locally, detach any ordinary remote client
-with `Ctrl-B d`, then run:
+terminal update. Install Railmux locally, then run:
 
 ```bash
 railmux ssh your-server
@@ -384,6 +418,14 @@ outside the attached tmux client. Three consecutive dedicated-server health
 failures restore the local terminal, end only that display client, and record a
 privacy-safe incident shown by `railmux doctor`. The watchdog never kills or
 restarts tmux or a system crash collector; provider rollout files are untouched.
+The SSH client also sends a private heartbeat. If a network outage leaves SSH
+half-open, the remote helper expires its own 45-second lease and detaches only
+the exact private tmux client it created; the Railmux session, panes, and agents
+stay alive. Protocol-v7 helpers use only a short attach mutex, so another
+current client can connect during that cleanup. If an older helper still owns
+the historical lifetime lock, reconnecting presents an explicit replacement
+prompt. Approving it may detach every terminal attached to that managed
+Railmux session, but never kills the session or its agents.
 
 ### 4. Will automated review sessions pollute my session list?
 
@@ -417,14 +459,22 @@ it is not required on macOS or any other platform.
 
 ### 6. Can I open Railmux in multiple terminal windows?
 
-Only with limited support. Normal launches attach to the same managed `railmux`
-tmux session, so two terminal windows are two clients controlling one shared
-workspace—not independent Railmux instances. They share focus, Target pane,
-layout, and tmux window dimensions; simultaneous input can interfere, and
-different terminal sizes may resize the workspace as activity moves between
-clients.
+Yes, as multiple views of one shared workspace. Normal launches and current
+`railmux ssh` helpers may attach to the same managed `railmux` tmux session.
+Railmux pins that shared window to tmux's `smallest` sizing policy, so a smaller
+terminal does not see clipped content and focus changes no longer make geometry
+jump between client sizes.
 
-For a predictable experience, use one interactive Railmux window at a time.
+These are not independent workspaces: every client still shares focus, Target
+pane, layout, pane proportions, and the one tmux window geometry chosen for the
+smallest attached viewport. Simultaneous input can interfere. Use `Ctrl-B d`
+to detach exactly the terminal issuing the key; the clickable Detach action
+asks for that shortcut when several clients are attached because a sidebar
+process cannot identify which tmux client clicked it.
+
+For independent full-screen geometry and pane proportions, use one interactive
+Railmux window at a time for now. That behavior requires separate display
+workspaces rather than another option on one tmux window.
 Detached agent sessions keep running in the background, so closing or detaching
 the visible client does not stop them. Advanced users can launch separate
 instances inside separate tmux sessions or servers, but that is not yet a

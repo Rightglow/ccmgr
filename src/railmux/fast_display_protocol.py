@@ -1,4 +1,4 @@
-"""Private v6 framing for the coalesced full-window SSH display."""
+"""Private v7 framing for the coalesced full-window SSH display."""
 
 from __future__ import annotations
 
@@ -8,12 +8,14 @@ from dataclasses import dataclass
 from enum import IntEnum, IntFlag
 
 
-DISPLAY_MAGIC = b"RMUXD6\x00"
-INPUT_MAGIC = b"RMUXK6\x00"
-PROTOCOL_VERSION = 6
+DISPLAY_MAGIC = b"RMUXD7\x00"
+INPUT_MAGIC = b"RMUXK7\x00"
+PROTOCOL_VERSION = 7
 LENGTH_BYTES = 4
 REMOTE_HELLO_PREFIX = b"RAILMUX-REMOTE/1 "
 REMOTE_START = b"RAILMUX-START/1\n"
+REMOTE_ATTACH_ACCEPTED = b"RAILMUX-ATTACH/1 ACCEPTED\n"
+REMOTE_ATTACH_BUSY = b"RAILMUX-ATTACH/1 BUSY\n"
 MAX_WIRE_BYTES = 16 * 1024 * 1024
 MAX_SCREEN_BYTES = 32 * 1024 * 1024
 MAX_INPUT_BYTES = 64 * 1024
@@ -46,6 +48,7 @@ class InputKind(IntEnum):
     REQUEST_KEYFRAME = 3
     REQUEST_HISTORY = 4
     PREFETCH_HISTORY = 5
+    HEARTBEAT = 6
 
 
 class TerminalMode(IntFlag):
@@ -482,7 +485,7 @@ class ServerMessageDecoder:
 
 
 class ScreenUpdateDecoder:
-    """Compatibility view which ignores v6 history response messages."""
+    """Compatibility view which ignores v7 history response messages."""
 
     def __init__(self) -> None:
         self._decoder = ServerMessageDecoder()
@@ -516,6 +519,10 @@ def encode_resize(width: int, height: int) -> bytes:
 
 def encode_keyframe_request() -> bytes:
     return _encode_input_message(InputKind.REQUEST_KEYFRAME, b"")
+
+
+def encode_heartbeat() -> bytes:
+    return _encode_input_message(InputKind.HEARTBEAT, b"")
 
 
 def encode_history_request(
@@ -605,6 +612,7 @@ class InputFrameDecoder:
                 (kind is InputKind.BYTES and not message_data)
                 or (kind is InputKind.RESIZE and len(message_data) != 4)
                 or (kind is InputKind.REQUEST_KEYFRAME and message_data)
+                or (kind is InputKind.HEARTBEAT and message_data)
                 or (
                     kind is InputKind.REQUEST_HISTORY
                     and len(message_data) != _HISTORY_REQUEST.size

@@ -646,6 +646,29 @@ def window_size(pane_id: str) -> tuple[int, int] | None:
         return None
 
 
+def use_smallest_window_size(pane_id: str) -> bool:
+    """Keep a shared Railmux window within every attached client's viewport.
+
+    tmux before 2.9 already uses the smallest attached client and does not
+    expose ``window-size``. Newer releases default to activity-sensitive sizing,
+    so set the option only on this managed window.
+    """
+    if tmux_version() < (2, 9):
+        return True
+    try:
+        subprocess.check_call(
+            [
+                "tmux", "set-window-option", "-t", pane_id,
+                "window-size", "smallest",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except (OSError, subprocess.CalledProcessError):
+        return False
+
+
 def resize_session_window(session_name: str, width: int, height: int) -> bool:
     """Pre-size a detached agent window before a nested client attaches.
 
@@ -1002,6 +1025,21 @@ def resize_pane_width(pane_id: str, width: int) -> bool:
     try:
         subprocess.check_call(
             ["tmux", "resize-pane", "-t", pane_id, "-x", str(width)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
+def resize_pane_height(pane_id: str, height: int) -> bool:
+    """Set one pane to an exact positive height in cells."""
+    if height <= 0:
+        return False
+    try:
+        subprocess.check_call(
+            ["tmux", "resize-pane", "-t", pane_id, "-y", str(height)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )

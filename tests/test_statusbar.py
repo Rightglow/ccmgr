@@ -370,7 +370,7 @@ def test_buttonbar_mouse_click_hits_button():
         on_detach=lambda: calls.append("detach"),
     )
     # The first hit area (lowest start column) is ? help.
-    help_start, help_end = sorted(bar._hit_areas)[0][:2]
+    _row, help_start, help_end, _index, _callback = bar._hit_areas[0]
     mid = (help_start + help_end) // 2
     bar.mouse_event((60,), "mouse press", 1, mid, 0, False)
     assert calls == ["help"]
@@ -404,16 +404,50 @@ def test_buttonbar_uses_responsive_labels_without_losing_actions():
     )
 
     expected = {
-        20: ("?", "Q", "D", "M"),
-        24: ("Help", "Quit", "Detach", "Mode"),
-        32: ("Help", "Quit", "Detach", "Mode"),
-        36: ("? Help", "q Quit", "C-b d Detach", "m Mode"),
+        20: ("?", "Q", "D", "+"),
+        24: ("Help", "Quit", "Detach", "More"),
+        32: ("Help", "Quit", "Detach", "More"),
+        36: ("? Help", "q Quit", "C-b d Detach", "More"),
     }
     for width, labels in expected.items():
         text = "".join(
             line.decode() for line in bar.render((width,), False).text)
         assert all(label in text for label in labels)
         assert len(bar._hit_areas) == 4
+
+
+def test_buttonbar_more_expands_mode_and_layout_then_less_collapses():
+    calls = []
+    bar = ButtonBar(
+        on_help=lambda: None,
+        on_quit=lambda: None,
+        on_detach=lambda: None,
+        on_mode_toggle=lambda: calls.append("mode"),
+        on_layout=lambda: calls.append("layout"),
+    )
+    bar.render((60,), False)
+    row, start, end, _index, _callback = bar._hit_areas[-1]
+    assert bar.mouse_event(
+        (60,), "mouse press", 1, (start + end) // 2, row, False)
+
+    text = "\n".join(
+        line.decode() for line in bar.render((60,), False).text)
+    assert "Less" in text
+    assert "m Mode" in text
+    assert "F8 Layout" in text
+    assert bar.rows((60,)) == 2
+
+    secondary = [area for area in bar._hit_areas if area[0] == 1]
+    for hit_row, hit_start, hit_end, _index, _callback in secondary:
+        bar.mouse_event(
+            (60,), "mouse press", 1,
+            (hit_start + hit_end) // 2, hit_row, False)
+    assert calls == ["mode", "layout"]
+
+    row, start, end, _index, _callback = next(
+        area for area in bar._hit_areas if area[0] == 0 and area[3] == 3)
+    bar.mouse_event((60,), "mouse press", 1, (start + end) // 2, row, False)
+    assert bar.rows((60,)) == 1
 
 
 def test_buttonbar_compact_hit_areas_match_visible_actions():
@@ -426,11 +460,11 @@ def test_buttonbar_compact_hit_areas_match_visible_actions():
     )
     bar.render((24,), False)
 
-    for start, end, _index, _cb in list(bar._hit_areas):
+    for row, start, end, _index, _cb in list(bar._hit_areas):
         bar.mouse_event(
-            (24,), "mouse press", 1, (start + end) // 2, 0, False)
+            (24,), "mouse press", 1, (start + end) // 2, row, False)
 
-    assert calls == ["help", "quit", "detach", "mode"]
+    assert calls == ["help", "quit", "detach"]
 
 
 def test_buttonbar_pressed_frame_precedes_callback_and_clears():
@@ -446,10 +480,10 @@ def test_buttonbar_pressed_frame_precedes_callback_and_clears():
     loop.set_alarm_in.return_value = alarm
     bar.set_loop(loop)
     bar.render((60,), False)
-    start, end, _index, _cb = bar._hit_areas[0]
+    row, start, end, _index, _cb = bar._hit_areas[0]
 
     assert bar.mouse_event(
-        (60,), "mouse press", 1, (start + end) // 2, 0, False)
+        (60,), "mouse press", 1, (start + end) // 2, row, False)
 
     assert events == [("draw", 0), ("callback", 0)]
     delay, clear = loop.set_alarm_in.call_args.args

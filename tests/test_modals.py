@@ -20,6 +20,7 @@ from railmux.ui.modals import (
     ContextMenu,
     DeleteConfirmModal,
     HelpModal,
+    LayoutSaveModal,
     PathBrowser,
     PathBrowserModal,
     ProjectInfoModal,
@@ -128,7 +129,9 @@ def test_modal_action_legends_use_high_contrast_attribute(tmp_path):
             running_count=1,
         ),
         RenameModal("old title", lambda _title: None, lambda: None),
-        YoloConfirmModal(lambda: None, lambda: None),
+        YoloConfirmModal(lambda: None, lambda: None, lambda: None),
+        LayoutSaveModal(
+            lambda: None, lambda: None, lambda: None, lambda: None),
         SessionInfoModal(None, None, lambda: None),
         RunningInfoModal(
             "agent", "cx-agent", None, None, False, lambda: None),

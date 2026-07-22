@@ -33,7 +33,7 @@ from railmux.display_transport import (
 )
 from railmux.discovery import invalidate_session, list_projects
 from railmux.favorites import Favorites
-from railmux.settings import Settings
+from railmux.settings import LayoutProfile, Settings
 from railmux.launcher import (
     build_codex_new_command,
     build_codex_resume_command,
@@ -61,6 +61,7 @@ from railmux.ui.modals import (
     DeleteConfirmModal,
     ExitProgressModal,
     HelpModal,
+    LayoutSaveModal,
     PathBrowserModal,
     ProjectInfoModal,
     QuitConfirmModal,
@@ -588,6 +589,20 @@ class App:
         self._session_cache = SessionCache(self._renames)
         self._favorites = Favorites()
         self._settings = Settings()
+        self._layout_profile = self._settings.layout_profile
+        self._active_sidebar_permille = (
+            self._layout_profile.sidebar_permille
+            if self._layout_profile is not None else None
+        )
+        self._active_primary_permille = (
+            self._layout_profile.primary_permille
+            if self._layout_profile is not None else None
+        )
+        self._layout_profile_applied = False
+        self._layout_profile_fallback = False
+        self._layout_geometry_user_owned = False
+        self._codex_yolo_runtime = False
+        self._codex_yolo_prompt_handled = False
         # Every agent session this Railmux instance has opened, keyed by
         # session_id (or a "__new__-N" placeholder until the JSONL appears).
         self._running: dict[str, _Running] = {}
@@ -751,6 +766,7 @@ class App:
             on_quit=self._open_quit_confirm,
             on_detach=self._on_detach,
             on_mode_toggle=self._cycle_mode,
+            on_layout=self._rotate_split,
         )
         # Footer contains only stable controls. Status, warnings, and errors all
         # use the full-width outer tmux bar, Railmux's single status surface.
@@ -1874,6 +1890,9 @@ class App:
                 and not (running is not None
                          and getattr(running, "is_legacy", False))):
             self._schedule_scroll_acceleration(agent_tmux_name)
+        if (slot is self._primary_slot
+                and not getattr(self, "_restoring_workspace", False)):
+            self._apply_layout_profile(allow_create=True)
         self._install_tmux_bindings()
         return True
 
@@ -1997,15 +2016,21 @@ class App:
 
     @classmethod
     def _sidebar_width_for_layout(
-        cls, layout: WorkspaceLayout, window_width: int,
+        cls,
+        layout: WorkspaceLayout,
+        window_width: int,
+        sidebar_permille: int | None = None,
     ) -> int:
         """Responsive sidebar width for one workspace layout."""
-        percent = (
-            cls._SINGLE_SIDEBAR_PERCENT
-            if layout is WorkspaceLayout.SINGLE
-            else cls._DUAL_SIDEBAR_PERCENT
-        )
-        width = round(window_width * percent / 100)
+        if sidebar_permille is None:
+            percent = (
+                cls._SINGLE_SIDEBAR_PERCENT
+                if layout is WorkspaceLayout.SINGLE
+                else cls._DUAL_SIDEBAR_PERCENT
+            )
+            width = round(window_width * percent / 100)
+        else:
+            width = round(window_width * sidebar_permille / 1000)
         if layout is not WorkspaceLayout.SINGLE:
             width = max(cls._DUAL_SIDEBAR_MIN_WIDTH, width)
         # The layout-fit gate rejects dual panes before a tiny window can reach
@@ -2021,10 +2046,153 @@ class App:
         current = tmux_ctl.pane_size(sidebar_id)
         if window is None or current is None:
             return False
-        desired = self._sidebar_width_for_layout(layout, window[0])
+        desired = self._sidebar_width_for_layout(
+            layout,
+            window[0],
+            getattr(self, "_active_sidebar_permille", None),
+        )
         if current[0] == desired:
             return True
         return tmux_ctl.resize_pane_width(sidebar_id, desired)
+
+    def _capture_layout_profile(self, scope: str) -> LayoutProfile | None:
+        """Capture current pane proportions without persisting tmux identity."""
+        if scope not in {"always", "once"}:
+            return None
+        workspace = self._agent_workspace()
+        sidebar_id = getattr(self, "_railmux_pane_id", None)
+        primary_id = workspace.primary.pane_id
+        if sidebar_id is None or primary_id is None:
+            return None
+        window = tmux_ctl.window_size(sidebar_id)
+        sidebar = tmux_ctl.pane_size(sidebar_id)
+        primary = tmux_ctl.pane_size(primary_id)
+        if window is None or sidebar is None or primary is None:
+            return None
+        sidebar_permille = min(
+            800, max(50, round(sidebar[0] * 1000 / window[0])))
+        primary_permille: int | None = None
+        if workspace.layout is not WorkspaceLayout.SINGLE:
+            region = self._agent_region_size()
+            if region is None:
+                return None
+            if workspace.layout is WorkspaceLayout.SIDE_BY_SIDE:
+                usable, primary_extent = region[0] - 1, primary[0]
+            else:
+                usable, primary_extent = region[1] - 1, primary[1]
+            if usable <= 0:
+                return None
+            primary_permille = min(
+                900, max(100, round(primary_extent * 1000 / usable)))
+        return LayoutProfile(
+            scope=scope,
+            layout=workspace.layout.value,
+            sidebar_permille=sidebar_permille,
+            primary_permille=primary_permille,
+        )
+
+    def _layout_profile_failed_to_fit(self) -> bool:
+        """Retain the preference while returning this run to safe defaults."""
+        self._layout_profile_fallback = True
+        self._layout_profile_applied = False
+        self._active_sidebar_permille = None
+        self._active_primary_permille = None
+        self._resize_sidebar_for_layout(self._agent_workspace().layout)
+        self._set_status(
+            "Saved layout does not fit this terminal; using safe defaults.",
+            "warn",
+        )
+        return False
+
+    def _apply_layout_profile(self, *, allow_create: bool) -> bool:
+        """Apply a saved profile once, after its pane topology is available."""
+        if getattr(self, "_layout_profile_applied", False):
+            return True
+        if (getattr(self, "_layout_profile_fallback", False)
+                or getattr(self, "_layout_geometry_user_owned", False)):
+            # A failed attempt or newer explicit F8/divider choice owns the
+            # rest of this run. Keep the profile for a future launch without
+            # repeatedly recreating a split or warning on every Pane 1 open.
+            return False
+        profile = getattr(self, "_layout_profile", None)
+        if profile is None:
+            return False
+        workspace = self._agent_workspace()
+        if workspace.primary.pane_id is None:
+            return False
+        try:
+            requested = WorkspaceLayout(profile.layout)
+        except ValueError:
+            return False
+
+        created_secondary = False
+        if workspace.layout is not requested:
+            if (workspace.layout is WorkspaceLayout.SINGLE
+                    and requested is not WorkspaceLayout.SINGLE
+                    and allow_create):
+                self._active_sidebar_permille = profile.sidebar_permille
+                self._resize_sidebar_for_layout(requested)
+                region = self._agent_region_size()
+                if region is None or not self._layout_fits(region, requested):
+                    return self._layout_profile_failed_to_fit()
+                if not self._display_transport().create_secondary(requested):
+                    return self._layout_profile_failed_to_fit()
+                created_secondary = True
+            else:
+                return self._layout_profile_failed_to_fit()
+
+        self._active_sidebar_permille = profile.sidebar_permille
+        self._active_primary_permille = profile.primary_permille
+        if not self._resize_sidebar_for_layout(workspace.layout):
+            if created_secondary:
+                self._display_transport().close_slot(workspace.secondary)
+                workspace.layout = WorkspaceLayout.SINGLE
+            return self._layout_profile_failed_to_fit()
+
+        region = self._agent_region_size()
+        if (workspace.layout is not WorkspaceLayout.SINGLE
+                and (region is None
+                     or not self._layout_fits(region, workspace.layout))):
+            if created_secondary:
+                self._display_transport().close_slot(workspace.secondary)
+                workspace.layout = WorkspaceLayout.SINGLE
+            return self._layout_profile_failed_to_fit()
+
+        primary = workspace.primary.pane_id
+        ratio = profile.primary_permille
+        if (workspace.layout is not WorkspaceLayout.SINGLE
+                and primary is not None and region is not None
+                and ratio is not None):
+            if workspace.layout is WorkspaceLayout.SIDE_BY_SIDE:
+                usable = region[0] - 1
+                minimum = self._MINIMUM_AGENT_PANE_SIZE[0]
+                desired = min(usable - minimum, max(
+                    minimum, round(usable * ratio / 1000)))
+                resized = tmux_ctl.resize_pane_width(primary, desired)
+            else:
+                usable = region[1] - 1
+                minimum = self._MINIMUM_AGENT_PANE_SIZE[1]
+                desired = min(usable - minimum, max(
+                    minimum, round(usable * ratio / 1000)))
+                resized = tmux_ctl.resize_pane_height(primary, desired)
+            if not resized:
+                if created_secondary:
+                    self._display_transport().close_slot(workspace.secondary)
+                    workspace.layout = WorkspaceLayout.SINGLE
+                return self._layout_profile_failed_to_fit()
+
+        self._layout_profile_applied = True
+        self._layout_profile_fallback = False
+        if profile.scope == "once":
+            if not self._settings.consume_layout_profile(profile):
+                self._set_status(
+                    "Layout restored, but its one-time setting could not be "
+                    "cleared.",
+                    "warn",
+                )
+            else:
+                self._layout_profile = None
+        return True
 
     def _layout_fits(
         self, region: tuple[int, int], layout: WorkspaceLayout,
@@ -2127,6 +2295,24 @@ class App:
             workspace.secondary, agent_tmux_name, steal_focus=False)
 
     def _rotate_split(self) -> None:
+        """Cycle layout, committing new geometry authority only on success."""
+        old_sidebar = getattr(self, "_active_sidebar_permille", None)
+        old_primary = getattr(self, "_active_primary_permille", None)
+        # A new orientation starts from responsive defaults. If it cannot be
+        # built, restore the previous profile so a failed F8 cannot overwrite a
+        # good Always preference during exit.
+        self._active_sidebar_permille = None
+        self._active_primary_permille = None
+        if self._rotate_split_attempt():
+            self._layout_geometry_user_owned = True
+            self._layout_profile_fallback = False
+            return
+        self._active_sidebar_permille = old_sidebar
+        self._active_primary_permille = old_primary
+        self._resize_sidebar_for_layout(self._agent_workspace().layout)
+
+    def _rotate_split_attempt(self) -> bool:
+        """Perform one F8 transition and report whether it committed."""
         workspace = self._agent_workspace()
         secondary = workspace.secondary
         old_layout = workspace.layout
@@ -2137,8 +2323,7 @@ class App:
             selection.release_all()
 
         if new_layout is WorkspaceLayout.SINGLE:
-            self._close_secondary_split()
-            return
+            return self._close_secondary_split()
 
         if old_layout is WorkspaceLayout.SINGLE:
             agent_tmux_name = workspace.collapsed_secondary_agent
@@ -2155,7 +2340,7 @@ class App:
                 self._resize_sidebar_for_layout(WorkspaceLayout.SINGLE)
                 self._set_status(
                     "Cannot open Pane 2: available size is unknown.", "warn")
-                return
+                return False
             available_layout = self._next_available_layout(old_layout, region)
             if available_layout is None:
                 self._resize_sidebar_for_layout(WorkspaceLayout.SINGLE)
@@ -2164,7 +2349,7 @@ class App:
                     "minimum pane size of 50×12.",
                     "warn",
                 )
-                return
+                return False
             new_layout = available_layout
             sidebar_focused = self._railmux_has_focus
             if not self._rebuild_secondary(new_layout, agent_tmux_name):
@@ -2178,14 +2363,14 @@ class App:
                     "in Running.",
                     "error",
                 )
-                return
+                return False
             self._set_workspace_target(AgentWorkspace.PRIMARY)
             if not sidebar_focused and workspace.primary.pane_id:
                 tmux_ctl.select_pane(workspace.primary.pane_id)
             self._install_tmux_bindings()
             self._set_railmux_focus(sidebar_focused, force_border=True)
             self._set_status(f"Layout → {new_layout.value}")
-            return
+            return True
 
         if not secondary.is_open:
             workspace.layout = WorkspaceLayout.SINGLE
@@ -2194,23 +2379,22 @@ class App:
                 self._railmux_has_focus, force_border=True)
             self._set_status(
                 "Pane 2 disappeared; returned to single-pane layout.", "warn")
-            return
+            return False
 
         region = self._agent_region_size()
         if region is None:
             self._set_status(
                 "Cannot rotate: available pane size is unknown.", "warn")
-            return
+            return False
         available_layout = self._next_available_layout(old_layout, region)
         if available_layout is WorkspaceLayout.SINGLE:
-            self._close_secondary_split()
-            return
+            return self._close_secondary_split()
         new_layout = available_layout
 
         primary_id = workspace.primary.pane_id
         old_secondary_id = secondary.pane_id
         if primary_id is None or old_secondary_id is None:
-            return
+            return False
         active_before = tmux_ctl.active_pane_id(primary_id)
         sidebar_focused = self._railmux_has_focus
         target_slot_before = workspace.target_slot_key
@@ -2218,7 +2402,7 @@ class App:
 
         if not self._display_transport().close_slot(secondary):
             self._set_status("Rotate stopped: Pane 2 could not return home.", "error")
-            return
+            return False
         workspace.layout = WorkspaceLayout.SINGLE
         if not self._rebuild_secondary(new_layout, agent_tmux_name):
             self._display_transport().close_slot(secondary)
@@ -2233,7 +2417,7 @@ class App:
             else:
                 self._set_status("Rotate failed; restored the previous layout.", "error")
             self._set_railmux_focus(sidebar_focused, force_border=True)
-            return
+            return False
 
         if active_before == old_secondary_id and secondary.pane_id:
             self._set_workspace_target(AgentWorkspace.SECONDARY)
@@ -2247,6 +2431,7 @@ class App:
         self._resize_sidebar_for_layout(new_layout)
         self._set_railmux_focus(sidebar_focused, force_border=True)
         self._set_status(f"Layout → {new_layout.value}")
+        return True
 
     def _slot_reopen_target(
         self, slot: AgentSlot, session_is_alive: Callable[[str], bool],
@@ -2743,7 +2928,7 @@ class App:
                 codex_binary=self._config.codex_binary,
                 session_id=session_meta.session_id,
                 cwd=cwd,
-                yolo=self._settings.codex_yolo,
+                yolo=self._codex_yolo_enabled(),
             )
             env = self._codex_env()
         else:
@@ -2785,7 +2970,7 @@ class App:
             cmd = build_codex_new_command(
                 codex_binary=self._config.codex_binary,
                 cwd=proj.real_path,
-                yolo=self._settings.codex_yolo,
+                yolo=self._codex_yolo_enabled(),
             )
             env = self._codex_env()
         else:
@@ -2825,7 +3010,7 @@ class App:
             cmd = build_codex_new_command(
                 codex_binary=self._config.codex_binary,
                 cwd=path,
-                yolo=self._settings.codex_yolo,
+                yolo=self._codex_yolo_enabled(),
             )
             env = self._codex_env()
         else:
@@ -3023,14 +3208,95 @@ class App:
     def _on_detach(self) -> None:
         """Detach from Railmux while keeping every agent session alive."""
         import subprocess as _sp
+        session = tmux_ctl.current_session_name()
+        attached = (
+            tmux_ctl.session_attached_count(session) if session else None)
+        if attached is not None and attached > 1:
+            self._set_status(
+                "Multiple terminals are attached; use Ctrl-B d to detach "
+                "only this terminal.",
+                "tip",
+            )
+            return
         _sp.run(["tmux", "detach-client"], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
 
     def _confirm_quit(self) -> None:
-        """Hard quit after painting a stable progress surface."""
-        self._begin_exit(soft=False)
+        """Request a hard quit, optionally recording pane proportions."""
+        self._request_exit(soft=False)
 
     def _soft_quit(self) -> None:
-        """Soft quit: set flag so ``_teardown_tmux`` skips session kill."""
+        """Request a soft quit, optionally recording pane proportions."""
+        self._request_exit(soft=True)
+
+    def _request_exit(self, *, soft: bool) -> None:
+        """Resolve layout persistence before committing exit semantics."""
+        current = self._capture_layout_profile("always")
+        saved = getattr(self, "_layout_profile", None)
+        if current is None:
+            self._commit_exit(soft=soft)
+            return
+        if not getattr(self, "_layout_geometry_user_owned", False):
+            # Do not prompt merely because a default/restored layout exists.
+            # An unconsumed one-shot profile (for example after a small-screen
+            # fallback) also remains available for a future launch.
+            self._commit_exit(soft=soft)
+            return
+        if saved is not None and saved.scope == "always":
+            can_refresh = (
+                not getattr(self, "_layout_profile_fallback", False)
+                or getattr(self, "_layout_geometry_user_owned", False)
+            )
+            if can_refresh:
+                if not self._settings.save_layout_profile(current):
+                    self._set_status(
+                        "Could not update the saved layout; exiting with the "
+                        "previous preference.",
+                        "error",
+                    )
+                else:
+                    self._layout_profile = current
+            self._commit_exit(soft=soft)
+            return
+
+        def save(scope: str) -> None:
+            profile = LayoutProfile(
+                scope=scope,
+                layout=current.layout,
+                sidebar_permille=current.sidebar_permille,
+                primary_permille=current.primary_permille,
+            )
+            if not self._settings.save_layout_profile(profile):
+                self._set_status(
+                    "Could not save the layout preference; exiting without it.",
+                    "error",
+                )
+            else:
+                self._layout_profile = profile
+            self._commit_exit(soft=soft)
+
+        def no() -> None:
+            if saved is not None and saved.scope == "once":
+                self._settings.clear_layout_profile()
+                self._layout_profile = None
+            self._commit_exit(soft=soft)
+
+        def back() -> None:
+            self._close_modal()
+            self._open_quit_confirm()
+
+        modal = LayoutSaveModal(
+            on_always=lambda: save("always"),
+            on_this_time=lambda: save("once"),
+            on_no=no,
+            on_back=back,
+        )
+        self._show_preferred_height_modal(modal, width=56)
+
+    def _commit_exit(self, *, soft: bool) -> None:
+        """Commit the already-confirmed exit at the final modal boundary."""
+        if not soft:
+            self._begin_exit(soft=False)
+            return
         # Save again at the point of commitment.  The confirmation modal may
         # have been open for a while and placeholder bindings can resolve in
         # the meantime.
@@ -3663,6 +3929,7 @@ class App:
             if railmux_pane is not None:
                 tmux_ctl.select_pane(railmux_pane)
             self._set_railmux_focus(True, force_border=True)
+        self._apply_layout_profile(allow_create=True)
         self._install_tmux_bindings()
         return content_ok and secondary_ok
 
@@ -3670,7 +3937,11 @@ class App:
         """Re-open the right pane to its state at soft-quit time."""
         workspace = state.get("workspace")
         if isinstance(workspace, dict):
-            return self._restore_workspace(state, workspace)
+            self._restoring_workspace = True
+            try:
+                return self._restore_workspace(state, workspace)
+            finally:
+                self._restoring_workspace = False
         kind = state.get("right_kind")
         if kind in ("agent", "claude"):  # "claude" written by <=0.1.1
             session_id = state.get("right_session")
@@ -4859,18 +5130,16 @@ class App:
             return
 
     def _maybe_prompt_codex_yolo(self) -> None:
-        """First time the user enters Codex mode, ask whether to enable auto-run
-        (yolo). Enabling flips the persisted ``codex_yolo`` setting True so
-        subsequent Codex launches bypass approvals + sandbox. Either answer marks
-        ``codex_yolo_prompted`` True, so the popup is shown only once."""
+        """Ask once per chosen lifetime whether Codex may bypass safeguards."""
         # getattr: keep bare ``App.__new__`` unit tests (no loop/settings) safe.
         if getattr(self, "_loop", None) is None:
             return
         settings = getattr(self, "_settings", None)
-        if settings is None or settings.codex_yolo_prompted:
+        if (settings is None or settings.codex_yolo_prompted
+                or getattr(self, "_codex_yolo_prompt_handled", False)):
             return
 
-        def _enable() -> None:
+        def _always() -> None:
             saved = self._settings.record_codex_yolo_choice(True)
             self._close_modal()
             if not saved:
@@ -4879,9 +5148,16 @@ class App:
                     "error",
                 )
                 return
-            self._set_status("Codex auto-run enabled (m to exit mode).")
+            self._codex_yolo_prompt_handled = True
+            self._set_status("Codex auto-run always enabled (m to exit mode).")
 
-        def _decline() -> None:
+        def _this_time() -> None:
+            self._codex_yolo_runtime = True
+            self._codex_yolo_prompt_handled = True
+            self._close_modal()
+            self._set_status("Codex auto-run enabled for this Railmux run.")
+
+        def _no() -> None:
             saved = self._settings.record_codex_yolo_choice(False)
             self._close_modal()
             if not saved:
@@ -4889,10 +5165,23 @@ class App:
                     "Could not save Codex auto-run choice; it will ask again.",
                     "warn",
                 )
+                return
+            self._codex_yolo_prompt_handled = True
 
         from railmux.ui.modals import YoloConfirmModal
-        modal = YoloConfirmModal(on_confirm=_enable, on_cancel=_decline)
+        modal = YoloConfirmModal(
+            on_always=_always,
+            on_this_time=_this_time,
+            on_no=_no,
+        )
         self._show_overlay(modal, width=60, height=45)
+
+    def _codex_yolo_enabled(self) -> bool:
+        settings = getattr(self, "_settings", None)
+        return bool(
+            (settings is not None and settings.codex_yolo)
+            or getattr(self, "_codex_yolo_runtime", False)
+        )
 
     def _schedule_mode_data_refresh(self) -> None:
         """Refresh Claude project discovery without blocking the UI thread."""
@@ -6684,7 +6973,19 @@ class App:
             self._set_status("No agent pane to resize against.")
             return
         direction = "-R" if expand_railmux else "-L"
-        tmux_ctl.resize_pane(pane_id, direction, 5)
+        if tmux_ctl.resize_pane(pane_id, direction, 5):
+            sidebar_id = getattr(self, "_railmux_pane_id", None)
+            window = (
+                tmux_ctl.window_size(sidebar_id) if sidebar_id else None)
+            sidebar = (
+                tmux_ctl.pane_size(sidebar_id) if sidebar_id else None)
+            if window is not None and sidebar is not None and window[0] > 0:
+                self._active_sidebar_permille = min(
+                    800,
+                    max(50, round(sidebar[0] * 1000 / window[0])),
+                )
+                self._layout_geometry_user_owned = True
+                self._layout_profile_fallback = False
         self._check_agent_slot_size(self._primary_slot)
 
     # --- responsive-size guard ------------------------------------------
@@ -7090,6 +7391,12 @@ class App:
                 self._apply_tmux_bar(error=False)  # initial green bar
 
             self._railmux_pane_id = tmux_ctl.current_pane_id()
+            if (self._railmux_pane_id is not None
+                    and tmux_ctl.current_session_name() == "railmux"
+                    and not tmux_ctl.use_smallest_window_size(
+                        self._railmux_pane_id)):
+                self._set_status(
+                    "Could not enable stable multi-terminal sizing.", "warn")
             self._set_railmux_focus(True, force_border=True)
             self._install_tmux_bindings()
             # bracketed_paste_mode: the terminal frames pastes in begin/end markers

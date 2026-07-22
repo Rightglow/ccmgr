@@ -95,6 +95,21 @@ The local upgrade uses its current Python environment and re-execs the original
 `railmux ssh` invocation only after pip succeeds. Failure leaves tmux untouched
 and prints a reproducible manual command.
 
+Protocol v7 reports a second bounded status after the attach boundary and
+before the first binary display frame. Current helpers may coexist: a flock
+serializes only immutable-session validation plus exact child-PID attach, and
+is released before display service begins. Every helper sends heartbeats; 45
+seconds without a complete input frame expires only that helper's lease and
+stops only its exact private tmux child. A live protocol-v6 helper may still
+hold the old flock for its lifetime. Replacement therefore requires local user
+consent, validates the existing managed session before mutation, detaches only
+clients re-enumerated under that immutable session ID, acquires the bounded
+lock, repeats enumeration to close the attach race, and never kills a session,
+pane, or provider process.
+One BUSY status is treated as ordinary v7 attach contention: the local client
+starts one fresh non-replacement helper before offering takeover. Only a second
+BUSY is persistent enough to justify the destructive-sounding consent prompt.
+
 ## Modes are registered providers, not a boolean
 
 `railmux.modes.ModeRegistry` is the ordered source of shared mode metadata.
@@ -303,6 +318,15 @@ the old agent; an unusable split degrades to single while retaining a validated
 secondary agent in Running. Portable restoration deliberately remains a single
 stable Target display wish and never carries tmux identity or process authority.
 
+User layout preference is a separate versioned settings profile containing
+only layout name and sidebar/primary proportions in thousandths. It never
+stores pane, process, socket, session, or window identity. `Always` retains the
+latest successful explicit geometry; `This time` is consumed only after one
+successful application. A terminal that cannot satisfy the saved split uses
+responsive defaults for that run and must not overwrite the good profile
+unless the user subsequently establishes new geometry. Failed F8 transitions
+similarly restore the prior active ratios and acquire no persistence authority.
+
 ## Agent display transports preserve one ownership model
 
 The default `swap` transport moves the real agent pane into the display window.
@@ -416,6 +440,10 @@ routing with focus, selection, or history.
   Single-agent layout assigns about 30% of the outer width to the sidebar;
   either dual layout assigns about 20%, clamped to at least 30 columns. Ratio
   changes are best-effort and must not make layout creation or recovery fail.
+- A saved proportional profile may override those responsive ratios after pane
+  topology exists. It is applied after exact workspace restoration, and only a
+  successful explicit F8/divider operation may become newer preference
+  authority.
 - Narrow screens should prefer stacked panes because three side-by-side columns
   make agent TUIs unusably narrow.
 - Railmux globally routes `F8` to the sidebar controller and cycles
@@ -540,6 +568,16 @@ remote user or disable resize/quit controls. "Outer size" means the containing
 tmux window, not Urwid's TTY size: after a split the latter is only the narrow
 sidebar. Read the window size at startup and on terminal resize events rather
 than polling tmux every second.
+
+A managed window shared by multiple attached terminals uses tmux
+`window-size=smallest` (tmux before 2.9 already has equivalent behavior). This
+prevents activity-driven geometry jumps and clipped small clients, but it does
+not provide per-client focus, layout, proportions, or dimensions: one tmux
+window has one compositor geometry. Sidebar-originated Detach must refuse an
+ambiguous multi-client target and direct the user to native `Ctrl-B d`.
+Modern tmux receives a small bounded retry budget before failure to set this
+policy aborts the new attach; an unverified shared-size policy must not silently
+degrade to activity-sensitive geometry.
 
 Each agent display pane independently recommends 80x20 and treats anything
 below 50x12 as critically cramped. Check it after attach, explicit divider

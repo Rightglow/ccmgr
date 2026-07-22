@@ -461,17 +461,73 @@ class DeleteConfirmModal(urwid.WidgetWrap):
         return key
 
 
+class LayoutSaveModal(urwid.WidgetWrap):
+    """Choose how long the current outer-workspace geometry is remembered."""
+
+    def __init__(
+        self,
+        on_always: Callable[[], None],
+        on_this_time: Callable[[], None],
+        on_no: Callable[[], None],
+        on_back: Callable[[], None],
+    ) -> None:
+        self._on_always = on_always
+        self._on_this_time = on_this_time
+        self._on_no = on_no
+        self._on_back = on_back
+        body = urwid.Pile([
+            urwid.Text("Keep this layout?", align="center"),
+            urwid.Divider(),
+            urwid.Text(
+                "Railmux stores pane proportions, so the layout can be "
+                "restored on a differently sized terminal.",
+                align="center",
+            ),
+            urwid.Divider(),
+            _action_legend([
+                ("a", "always keep the latest layout"),
+                ("t", "this time (apply on the next launch)"),
+                ("n / ↵", "do not save it"),
+                ("Esc", "back to quit choices"),
+            ], align="center", wrap="space"),
+        ])
+        super().__init__(urwid.LineBox(
+            urwid.Filler(body, valign="middle"), title="Save layout"))
+
+    def selectable(self) -> bool:
+        return True
+
+    def preferred_height(self, _maxcol: int) -> int:
+        return 13
+
+    def keypress(self, size, key):
+        if key in ("a", "A"):
+            self._on_always()
+            return None
+        if key in ("t", "T"):
+            self._on_this_time()
+            return None
+        if key in ("n", "N", "enter"):
+            self._on_no()
+            return None
+        if key == "esc":
+            self._on_back()
+            return None
+        return key
+
+
 class YoloConfirmModal(urwid.WidgetWrap):
-    """First-time Codex prompt: offer to enable auto-run ("yolo") mode.
+    """First-time Codex prompt with persistent, process, and safe-off choices."""
 
-    Only y/Y enables; Enter/n/N/Esc keeps it off. The dangerous choice never
-    has a default-key shortcut.
-    """
-
-    def __init__(self, on_confirm: Callable[[], None],
-                 on_cancel: Callable[[], None]) -> None:
-        self._on_confirm = on_confirm
-        self._on_cancel = on_cancel
+    def __init__(
+        self,
+        on_always: Callable[[], None],
+        on_this_time: Callable[[], None],
+        on_no: Callable[[], None],
+    ) -> None:
+        self._on_always = on_always
+        self._on_this_time = on_this_time
+        self._on_no = on_no
         rows = [
             urwid.Text("Enable Codex auto-run (YOLO)?", align="center"),
             urwid.Divider(),
@@ -487,8 +543,9 @@ class YoloConfirmModal(urwid.WidgetWrap):
         footer = urwid.Pile([
             urwid.Divider(),
             _action_legend([
-                ("y", "enable"),
-                ("↵ / n / Esc", "keep off"),
+                ("a", "always enable"),
+                ("t", "this Railmux run only"),
+                ("n / ↵ / Esc", "keep off"),
             ], align="center", wrap="space"),
         ])
         self._listbox = urwid.ListBox(urwid.SimpleFocusListWalker(rows))
@@ -500,11 +557,14 @@ class YoloConfirmModal(urwid.WidgetWrap):
         return True
 
     def keypress(self, size, key):
-        if key in ("y", "Y"):
-            self._on_confirm()
+        if key in ("a", "A"):
+            self._on_always()
+            return None
+        if key in ("t", "T"):
+            self._on_this_time()
             return None
         if key in ("n", "N", "esc", "enter"):
-            self._on_cancel()
+            self._on_no()
             return None
         if key in ("up", "down", "page up", "page down", "home", "end"):
             inner_cols = max(1, size[0] - 2)

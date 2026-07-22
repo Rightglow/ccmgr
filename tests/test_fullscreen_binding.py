@@ -238,7 +238,12 @@ def test_f8_keeps_dual_layout_when_pane_size_is_temporarily_unknown():
 
 
 def test_f8_keeps_single_when_no_split_layout_fits():
-    app = _bare_app()
+    app = _bare_app(
+        _active_sidebar_permille=275,
+        _active_primary_permille=None,
+        _layout_geometry_user_owned=False,
+        _layout_profile_fallback=False,
+    )
     workspace = app._agent_workspace()
     workspace.primary.pane_id = "%1"
     app._agent_session_alive = MagicMock(return_value=False)
@@ -259,6 +264,8 @@ def test_f8_keeps_single_when_no_split_layout_fits():
     app._set_status.assert_called_once()
     assert app._set_status.call_args.args[1] == "warn"
     assert "neither split layout" in app._set_status.call_args.args[0]
+    assert app._active_sidebar_permille == 275
+    assert app._layout_geometry_user_owned is False
 
 
 def test_f8_keeps_dual_layout_when_secondary_cannot_close():
