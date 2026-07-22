@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-22
+
+### Added
+
+- Save custom outer-workspace layout proportions after an explicit F8 or
+  divider change. Exit choices are `Always`, `This time` (the next launch
+  only), and `No`; profiles are versioned, contain no tmux identities, scale to
+  the next terminal size, and fall back without overwriting a good preference
+  when a split cannot fit. Codex auto-run now offers parallel persistent,
+  current-run, and safe-off choices.
+- Replace the always-visible Mode control with a responsive More/Less Button
+  Bar. Its optional second row currently exposes Mode and F8 Layout while the
+  keyboard shortcuts remain global.
+- Allow multiple current `railmux ssh` display helpers to view the same managed
+  workspace. The shared tmux window uses `window-size=smallest`; helpers
+  serialize only their validation/attach boundary and register their exact
+  child client PID.
+
+### Fixed
+
+- Recover from half-open SSH connections without touching the Railmux session
+  or agents. Protocol v7 adds a post-attach status and heartbeat lease; expiry
+  stops only that helper's private tmux client. A bounded, explicitly confirmed
+  replacement path is offered only after an ordinary v7 retry remains busy; it
+  detaches clients holding the protocol-v6 lifetime lock, then revalidates the
+  immutable managed session before attaching once.
+- Avoid ambiguous clickable Detach behavior with multiple tmux clients by
+  directing the user to `Ctrl-B d`, which tmux can scope to the issuing client.
+
 ## [0.2.1] - 2026-07-21
 
 ### Added
@@ -487,7 +516,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial PyPI release under the Railmux name.
 
-[Unreleased]: https://github.com/Rightglow/Railmux/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/Rightglow/Railmux/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/Rightglow/Railmux/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Rightglow/Railmux/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Rightglow/Railmux/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/Rightglow/Railmux/compare/v0.1.2...v0.1.3
