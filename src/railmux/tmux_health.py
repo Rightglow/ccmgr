@@ -14,6 +14,8 @@ from railmux.atomic_file import atomic_write_text
 INCIDENT_SCHEMA_VERSION = 1
 _CLEAN_EXIT_SCHEMA_VERSION = 1
 _CLEAN_EXIT_MAX_AGE = 30
+_SOFT_EXIT_SCHEMA_VERSION = 1
+_SOFT_EXIT_MAX_AGE = 30
 _INCIDENT_REASONS = {
     "launcher-watchdog-timeout",
     "launcher-server-exit",
@@ -78,6 +80,14 @@ def _clean_exit_path(label: str) -> Path:
     return restart_state.runtime_base() / "railmux" / _clean_exit_filename(label)
 
 
+def _soft_exit_filename(label: str) -> str:
+    return f"soft-tmux-exit-{label}.json"
+
+
+def _soft_exit_path(label: str) -> Path:
+    return restart_state.runtime_base() / "railmux" / _soft_exit_filename(label)
+
+
 def record_clean_exit(*, server_pid: int, session_id: str) -> bool:
     """Publish one short-lived exact hard-quit intent for an SSH observer."""
     if (server_pid <= 0 or not session_id.startswith("$")
@@ -130,6 +140,55 @@ def consume_clean_exit(*, server_pid: int, session_id: str) -> bool:
         payload.get("schema_version") == _CLEAN_EXIT_SCHEMA_VERSION
         and isinstance(recorded_at, int)
         and now - _CLEAN_EXIT_MAX_AGE <= recorded_at <= now + 5
+        and payload.get("server_pid") == server_pid
+        and payload.get("session_id") == session_id
+    )
+
+
+def record_soft_exit(*, server_pid: int, session_id: str) -> bool:
+    """Publish one exact soft-quit intent for every attached SSH observer."""
+    if (server_pid <= 0 or not session_id.startswith("$")
+            or not session_id[1:].isdigit()):
+        return False
+    try:
+        label = tmux_server.socket_label()
+        atomic_write_text(
+            restart_state.runtime_state_dir() / _soft_exit_filename(label),
+            json.dumps(
+                {
+                    "schema_version": _SOFT_EXIT_SCHEMA_VERSION,
+                    "recorded_at": int(time.time()),
+                    "server_pid": server_pid,
+                    "session_id": session_id,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        )
+        return True
+    except (OSError, tmux_server.TmuxServerError):
+        return False
+
+
+def soft_exit_intended(*, server_pid: int, session_id: str) -> bool:
+    """Validate a short-lived soft quit without consuming it.
+
+    Soft quit closes every view attached to one managed session.  Each helper
+    therefore needs to observe the same exact intent independently.
+    """
+    try:
+        path = _soft_exit_path(tmux_server.socket_label())
+    except tmux_server.TmuxServerError:
+        return False
+    payload = restart_state.read_json_object(path)
+    if payload is None:
+        return False
+    recorded_at = payload.get("recorded_at")
+    now = int(time.time())
+    return bool(
+        payload.get("schema_version") == _SOFT_EXIT_SCHEMA_VERSION
+        and isinstance(recorded_at, int)
+        and now - _SOFT_EXIT_MAX_AGE <= recorded_at <= now + 5
         and payload.get("server_pid") == server_pid
         and payload.get("session_id") == session_id
     )

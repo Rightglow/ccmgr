@@ -109,12 +109,13 @@ class RunningSessionsPane(ScrollableSidebarPane, urwid.WidgetWrap):
 
     @property
     def section_title(self) -> str:
-        return self._section_title
+        suffix = " [filtered]" if self._filter else ""
+        return self._section_title + suffix
 
     def _set_section_title(self, title: str) -> None:
         self._section_title = title
         if self._linebox is not None:
-            self._linebox.set_title(title)
+            self._linebox.set_title(self.section_title)
 
     def set_active(self, tmux_name: str | None) -> None:
         """Persistently highlight the session attached in the right pane."""
@@ -216,7 +217,10 @@ class RunningSessionsPane(ScrollableSidebarPane, urwid.WidgetWrap):
         visible = self._visible_entries()
         if not visible:
             if self._filter:
-                text = f"  (no matching {self._provider_label} sessions)"
+                text = (
+                    f"  (no matching {self._provider_label} sessions — "
+                    "press / to edit, Ctrl-U to clear)"
+                )
                 title = f"Running (0/{len(entries)})"
             else:
                 text = f"  (no running {self._provider_label} sessions)"

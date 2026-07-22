@@ -238,6 +238,22 @@ def test_decode_schemas_fail_closed_independently():
     assert restart_state.decode_instance(dict(local, schema_version=2), identity) is None
 
 
+def test_portable_view_round_trips_all_sidebar_filters():
+    view = restart_state.build_view({
+        "mode": "codex",
+        "project_filter": "project",
+        "session_filter": "session",
+        "running_filter": "running",
+    })
+
+    assert restart_state.validate_view(view) == {
+        "mode": "codex",
+        "project_filter": "project",
+        "session_filter": "session",
+        "running_filter": "running",
+    }
+
+
 def test_portable_view_round_trips_stable_display_without_tmux_authority():
     payload = {
         "schema_version": restart_state.SCHEMA_VERSION,

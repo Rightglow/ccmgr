@@ -447,6 +447,7 @@ def validate_view(raw: object) -> dict | None:
     for source, output in (
         ("projects", "project_filter"),
         ("sessions", "session_filter"),
+        ("running", "running_filter"),
     ):
         value = _bounded_string(filters.get(source), 512)
         if value is not None:
@@ -483,6 +484,7 @@ def build_view(flat: dict) -> dict:
     for source, target in (
         ("project_filter", "projects"),
         ("session_filter", "sessions"),
+        ("running_filter", "running"),
     ):
         value = flat.get(source)
         if isinstance(value, str):

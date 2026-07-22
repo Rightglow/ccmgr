@@ -107,6 +107,21 @@ managed workspace; see the important shared-focus and shared-layout limits in
 | `?` | Full help popup with all keybindings |
 | `q` or `Ctrl-C` | Quit with confirmation |
 
+Inside Help, press `A` or click **Ask Railmux with Claude Code/Codex** to open
+a separate, safety-restricted support session for the current mode. Opening
+Help itself never starts an agent or uses provider tokens. Ask Railmux replaces
+only the Target pane's display; the agent that was there keeps running and can
+be selected again from Running. Codex help is not saved to normal history;
+Railmux hides the dedicated help workspace from both providers' Projects list.
+Local documentation reads and searches run without approval prompts. Codex is
+still enforced by its read-only, network-disabled sandbox; Claude is restricted
+to its built-in `Read`, `Glob`, and `Grep` tools, with shell and mutation tools
+not exposed.
+If the help agent exits in a two-pane layout, that pane returns to Railmux's
+empty launch surface without collapsing or reordering the other agent pane.
+After a soft restart the help session is not restored automatically—open Help
+and choose Ask again to reconnect to it.
+
 `+ New project` works in both Claude Code and Codex modes. Browse to an
 existing directory and choose `. (use this path)`, or type a new relative,
 absolute, or `~`-based path. When no existing entry matches, select the
@@ -116,6 +131,11 @@ railmux creates the directory before starting the agent.
 The rename popup starts with the current title pre-filled. Press
 `Ctrl-U` to clear the entire input, `Enter` to save a non-empty title, or `Esc`
 to cancel.
+
+Press `/` in Projects, Sessions, or Running to filter that section. Active
+filters are marked with `[filtered]` and survive a soft restart; reopening `/`
+shows the current value. Press `Ctrl-U` in the filter editor to clear it, then
+`Enter` to return to the sidebar.
 
 The first Button Bar row keeps Help, Quit, and Detach visible. Select **More**
 to reveal a second row with **Mode**, **Layout**, and **Options**; **Less**
@@ -436,8 +456,11 @@ other agent changes focus without moving either history pane, while a sidebar
 click safely restores them all. F8/F9,
 Help's controller-pane zoom, modal close, and resize invalidate the old pointer
 map before it can be reused. Terminal-native selection overrides remain
-terminal-dependent. Use `--no-mouse` when reliable ordinary terminal selection
-is more important than local history. History preserves text colours and common
+terminal-dependent. Agent-pane clicks still change focus, but reported mouse
+drags are kept local so they cannot accidentally invoke tmux copy-mode;
+`Ctrl-B [` remains the explicit copy-mode path. Use `--no-mouse` when reliable
+ordinary terminal selection is more important than local history. History
+preserves text colours and common
 character styles. For upgrade-only legacy sessions displayed through a nested
 tmux client, Railmux reads scrollback from the identity-validated real agent
 pane rather than the zero-history wrapper; it does not resize or alter the old

@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-07-22
+
+### Added
+
+- Add an explicit **Ask Railmux** action to Help. It opens or reuses a separate
+  support session for the current provider with conservative permissions and
+  local README context, while leaving the user's current agent alive. Static
+  Help remains token-free, and the private help workspace stays out of normal
+  Projects and Running views. Documentation reads now auto-run without approval
+  prompts: Codex remains OS-sandboxed read-only, while Claude receives only its
+  built-in read/search tools.
+
+### Fixed
+
+- Keep an explicitly selected two-agent layout when either provider (including
+  Ask Railmux) exits by rebuilding that numbered slot as an empty launch pane,
+  without moving the surviving agent. Re-adopt a displayed swap-owned agent
+  into Running when only its in-memory row was lost, gated by exact pane,
+  process, window, swap, session, and persisted-binding identity.
+- Classify SSH soft quit from an exact pre-teardown intent so destroying the
+  managed tmux session cannot be mistaken for an unexpected server loss or
+  trigger closing remote views to query tmux concurrently with teardown.
+- Make restored sidebar filters visible in section titles and pre-fill their
+  `/` editor, provide actionable no-match text, and let `Ctrl-U` reliably clear
+  Projects, Sessions, and Running filters. Refresh the idle-tip pool around
+  non-obvious, high-value behavior instead of visible shortcut reminders.
+- Prevent reported mouse drags over `railmux ssh` agent panes from entering
+  tmux copy-mode accidentally while preserving clicks for focus, sidebar mouse
+  behavior, terminal-native selection, and explicit `Ctrl-B [` copy-mode.
+
 ## [0.2.3] - 2026-07-22
 
 ### Added
@@ -542,7 +572,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial PyPI release under the Railmux name.
 
-[Unreleased]: https://github.com/Rightglow/Railmux/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/Rightglow/Railmux/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/Rightglow/Railmux/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/Rightglow/Railmux/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/Rightglow/Railmux/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Rightglow/Railmux/compare/v0.2.0...v0.2.1

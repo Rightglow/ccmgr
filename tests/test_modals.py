@@ -264,7 +264,11 @@ def test_options_keyboard_starts_on_current_layout_choice():
 
 
 def test_help_explains_bottom_left_workspace_target_indicator():
-    modal = HelpModal(on_close=lambda: None)
+    modal = HelpModal(
+        on_close=lambda: None,
+        provider_label="Codex",
+        on_ask=lambda: None,
+    )
 
     text = _rendered_text(modal, size=(60, 80))
     normalized = " ".join(text.replace("│", " ").split())
@@ -274,6 +278,29 @@ def test_help_explains_bottom_left_workspace_target_indicator():
     assert "◧ / ◨" in text
     assert "⬒ / ⬓" in text
     assert "filled half is the Target pane" in normalized
+
+
+def test_help_ask_is_explicit_keyboard_mouse_action_and_close_stays_separate():
+    asked = MagicMock()
+    closed = MagicMock()
+    modal = HelpModal(
+        on_close=closed,
+        provider_label="Claude Code",
+        on_ask=asked,
+    )
+
+    text = _rendered_text(modal, size=(64, 28))
+    assert "Ask Railmux with Claude Code" in text
+    assert "uses provider tokens" in text
+
+    assert modal.keypress((64, 28), "A") is None
+    assert modal._ask_row.mouse_event(
+        (62,), "mouse press", 1, 3, 0, True)
+    assert asked.call_count == 2
+    closed.assert_not_called()
+
+    assert modal.keypress((64, 28), "enter") is None
+    closed.assert_called_once_with()
 
 
 def test_rename_ctrl_u_clears_entire_title_without_closing():

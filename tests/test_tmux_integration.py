@@ -33,7 +33,14 @@ from railmux.display_transport import (
     AgentDisplayTransport,
     recover_interrupted_swaps,
 )
-from railmux.fast_display_protocol import PROTOCOL_VERSION, REMOTE_HELLO_PREFIX
+from railmux.fast_display_protocol import (
+    PROTOCOL_VERSION,
+    REMOTE_ATTACH_ACCEPTED,
+    REMOTE_HELLO_PREFIX,
+    REMOTE_START,
+    RemoteExit,
+    encode_input,
+)
 from railmux.tmux_binding_manager import SharedTmuxBindingManager
 from railmux.selection_isolation import SelectionIsolationManager
 from railmux.modes import CODEX_MODE
@@ -1166,6 +1173,131 @@ def test_real_soft_quit_disconnects_shared_clients_and_agents_survive(
                 os.close(master)
             except OSError:
                 pass
+        shutil.rmtree(socket_root, ignore_errors=True)
+
+
+def test_real_remote_display_soft_quit_keeps_tmux_responsive(
+        monkeypatch, tmp_path):
+    """The SSH helper observes soft quit without wedging its tmux server."""
+    if shutil.which("tmux") is None:
+        pytest.skip("tmux is not installed")
+
+    socket_root = Path(tempfile.mkdtemp(prefix="rx-remote-soft-", dir="/tmp"))
+    home = tmp_path / "home"
+    runtime = tmp_path / "runtime"
+    claude_home = home / ".claude"
+    for directory in (socket_root, home, runtime, claude_home):
+        directory.mkdir(parents=True, exist_ok=True)
+        directory.chmod(0o700)
+
+    label = f"rx-remote-soft-{os.getpid()}"
+    monkeypatch.setenv("TMUX_TMPDIR", str(socket_root))
+    monkeypatch.setenv(tmux_server.SOCKET_LABEL_ENV, label)
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    env = os.environ.copy()
+    env.update({
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDG_RUNTIME_DIR": str(runtime),
+        "TERM": "xterm-256color",
+    })
+    process = None
+    drain_thread = None
+
+    def tmux(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["tmux", "-L", label, *args],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=check,
+        )
+
+    def captured_railmux() -> str:
+        try:
+            return subprocess.check_output(
+                ["tmux", "-L", label, "capture-pane", "-p", "-t", "railmux"],
+                env=env,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=1.0,
+            )
+        except (
+            OSError,
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+        ):
+            return ""
+
+    try:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "railmux",
+                "remote-server",
+                "--protocol",
+                str(PROTOCOL_VERSION),
+                "--width",
+                "140",
+                "--height",
+                "40",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+        assert process.stdin is not None
+        assert process.stdout is not None
+        assert process.stdout.readline().startswith(REMOTE_HELLO_PREFIX)
+        process.stdin.write(REMOTE_START)
+        process.stdin.flush()
+        assert process.stdout.readline() == REMOTE_ATTACH_ACCEPTED
+
+        def drain_output() -> None:
+            assert process is not None and process.stdout is not None
+            while process.stdout.read(65536):
+                pass
+
+        drain_thread = threading.Thread(target=drain_output, daemon=True)
+        drain_thread.start()
+        assert _wait_until(
+            lambda: "q Quit" in captured_railmux(), timeout=8.0)
+
+        tmux("new-session", "-d", "-s", "integration-agent", "sleep", "60")
+        process.stdin.write(encode_input(b"q"))
+        process.stdin.flush()
+        assert _wait_until(
+            lambda: "Quit railmux?" in captured_railmux(), timeout=3.0)
+        process.stdin.write(encode_input(b"s"))
+        process.stdin.flush()
+
+        returncode = process.wait(timeout=8.0)
+        assert process.stderr is not None
+        stderr = process.stderr.read().decode(errors="replace")
+        assert returncode == int(RemoteExit.SOFT_QUIT), stderr
+        assert tmux(
+            "has-session", "-t", "integration-agent", check=False
+        ).returncode == 0
+        assert _wait_until(
+            lambda: tmux(
+                "display-message", "-p", "#{pid}", check=False
+            ).returncode == 0,
+            timeout=3.0,
+        )
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2.0)
+        if drain_thread is not None:
+            drain_thread.join(timeout=1.0)
+        tmux("kill-server", check=False)
         shutil.rmtree(socket_root, ignore_errors=True)
 
 

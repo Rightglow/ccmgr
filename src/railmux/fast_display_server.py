@@ -428,6 +428,10 @@ def _classify_observed_exit(
     session_id: str, target: tmux_server.TmuxServerTarget,
 ) -> RemoteExit:
     """Distinguish an intentional hard quit from an abrupt tmux loss."""
+    if tmux_health.soft_exit_intended(
+            server_pid=target.server_pid, session_id=session_id):
+        return RemoteExit.SOFT_QUIT
+
     exit_kind = _classify_remote_exit(session_id)
     if exit_kind is not RemoteExit.HARD_QUIT:
         return exit_kind

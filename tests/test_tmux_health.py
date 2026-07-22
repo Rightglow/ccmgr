@@ -80,6 +80,28 @@ def test_clean_exit_rejects_expired_or_invalid_identity(monkeypatch, tmp_path):
         server_pid=123, session_id="$4")
 
 
+def test_soft_exit_is_private_exact_broadcast_and_short_lived(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    now = [1_000]
+    monkeypatch.setattr("railmux.tmux_health.time.time", lambda: now[0])
+
+    assert not tmux_health.record_soft_exit(server_pid=0, session_id="$4")
+    assert not tmux_health.record_soft_exit(server_pid=123, session_id="name")
+    assert tmux_health.record_soft_exit(server_pid=123, session_id="$4")
+
+    path = tmp_path / "railmux" / "soft-tmux-exit-railmux.json"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert not tmux_health.soft_exit_intended(
+        server_pid=123, session_id="$5")
+    assert tmux_health.soft_exit_intended(server_pid=123, session_id="$4")
+    assert tmux_health.soft_exit_intended(server_pid=123, session_id="$4")
+    now[0] += 31
+    assert not tmux_health.soft_exit_intended(
+        server_pid=123, session_id="$4")
+
+
 def test_incident_reader_rejects_unknown_or_unbounded_content(
     monkeypatch, tmp_path,
 ):

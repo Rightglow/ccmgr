@@ -433,6 +433,7 @@ class LocalHistoryView:
         self.route_epoch = 1
         self._local_pointer_capture = False
         self._forwarded_pointer_capture = False
+        self._suppress_forwarded_drag = False
         self._next_request_id = 1
 
     @property
@@ -616,6 +617,18 @@ class LocalHistoryView:
         if self._forwarded_pointer_capture:
             if not event.pressed:
                 self._forwarded_pointer_capture = False
+                self._suppress_forwarded_drag = False
+            elif self._suppress_forwarded_drag and event.wheel_direction:
+                # Keep agent wheel input local even while a click capture is
+                # active. If the pointer has moved to the sidebar, wheel()
+                # finds no agent route and preserves normal forwarding.
+                return self.wheel(event)
+            elif self._suppress_forwarded_drag and event.button & 32:
+                # A press that began over an agent is forwarded so tmux can
+                # focus that pane. Do not forward its motion reports: tmux's
+                # stock MouseDrag1Pane binding would otherwise enter copy-mode
+                # implicitly. Explicit Ctrl-B [ remains opaque keyboard input.
+                return HistoryAction()
             return HistoryAction(forwarded_input=event.raw)
         if self._local_pointer_capture:
             if not event.pressed:
@@ -637,6 +650,7 @@ class LocalHistoryView:
             if event.pressed and not event.button & 32:
                 if frozen.pane_id != focused_pane_id:
                     self._forwarded_pointer_capture = True
+                    self._suppress_forwarded_drag = True
                     return HistoryAction(
                         forwarded_input=event.raw,
                         refresh_routes=True,
@@ -646,12 +660,14 @@ class LocalHistoryView:
         if event.pressed and not event.button & 32:
             if self._route_at(event) is not None:
                 self._forwarded_pointer_capture = True
+                self._suppress_forwarded_drag = True
                 return HistoryAction(
                     forwarded_input=event.raw,
                     refresh_routes=True,
                 )
             restore_live = self.invalidate_routes()
             self._forwarded_pointer_capture = True
+            self._suppress_forwarded_drag = False
             return HistoryAction(
                 forwarded_input=event.raw,
                 restore_live=restore_live,
@@ -749,6 +765,7 @@ class LocalHistoryView:
         self._deep_pending.clear()
         self._local_pointer_capture = False
         self._forwarded_pointer_capture = False
+        self._suppress_forwarded_drag = False
         return was_active
 
 

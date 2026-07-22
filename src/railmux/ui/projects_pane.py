@@ -104,7 +104,7 @@ class ProjectsPane(ScrollableSidebarPane, urwid.WidgetWrap):
         ]
         if not rows:
             text = (
-                "  (no matches)"
+                "  (no matches — press / to edit, Ctrl-U to clear)"
                 if self._filter
                 else (
                     f"No {self._provider_label} projects yet\n"
@@ -137,11 +137,18 @@ class ProjectsPane(ScrollableSidebarPane, urwid.WidgetWrap):
         if self._filter == needle:
             return
         self._filter = needle
+        if self._linebox is not None:
+            self._linebox.set_title(self.section_title)
         self._refresh_rows()
 
     @property
     def filter_text(self) -> str:
         return self._filter
+
+    @property
+    def section_title(self) -> str:
+        """Expose otherwise-hidden restored filter state in the pane chrome."""
+        return "Projects [filtered]" if self._filter else "Projects"
 
     def _refresh_rows(self) -> None:
         # Remember the currently-focused row's identity (project encoded_name).

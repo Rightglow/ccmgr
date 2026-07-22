@@ -218,7 +218,7 @@ class _Selectable(urwid.WidgetWrap):
 
 
 class HelpModal(urwid.WidgetWrap):
-    """Read-only popup listing all keybindings. Esc or Enter dismisses."""
+    """Read-only help plus an explicit entry into a separate support agent."""
 
     SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
         ("Navigation", [
@@ -290,8 +290,15 @@ class HelpModal(urwid.WidgetWrap):
             urwid.Text("★ = starred (pinned to top of session list)"),
         ]
 
-    def __init__(self, on_close: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        on_close: Callable[[], None],
+        *,
+        provider_label: str,
+        on_ask: Callable[[], None],
+    ) -> None:
         self._on_close = on_close
+        self._on_ask = on_ask
         rows: list = []
         for section_title, bindings in self.SECTIONS:
             rows.append(urwid.Text(("title", section_title)))
@@ -313,12 +320,49 @@ class HelpModal(urwid.WidgetWrap):
         # the ListBox enters the "must scroll" branch immediately — one
         # keypress / wheel tick scrolls one line.
         self._listbox = urwid.ListBox(urwid.SimpleFocusListWalker(rows))
-        super().__init__(urwid.LineBox(self._listbox, title="Help"))
+        self._ask_row = ClickableRow(
+            urwid.AttrMap(
+                urwid.Text([
+                    ("modal_key", "A"),
+                    f"  Ask Railmux with {provider_label}",
+                ], align="center"),
+                "body",
+                "focus",
+            ),
+            on_click=on_ask,
+        )
+        self._header = urwid.Pile([
+            self._ask_row,
+            urwid.Text(
+                ("dim", "Separate safe help session; uses provider tokens."),
+                align="center",
+            ),
+            urwid.Divider(),
+        ])
+        self._footer = urwid.Pile([
+            urwid.Divider(),
+            _action_legend(
+                [("Esc / Enter", "close"), ("A / click", "ask")],
+                align="center",
+                separator=" · ",
+                wrap="space",
+            ),
+        ])
+        self._frame = urwid.Frame(
+            body=self._listbox,
+            header=self._header,
+            footer=self._footer,
+            focus_part="body",
+        )
+        super().__init__(urwid.LineBox(self._frame, title="Help"))
 
     def selectable(self) -> bool:
         return True
 
     def keypress(self, size, key):
+        if key in ("a", "A"):
+            self._on_ask()
+            return None
         if key in ("enter", "esc"):
             self._on_close()
             return None
@@ -331,7 +375,12 @@ class HelpModal(urwid.WidgetWrap):
             #
             # Adjust size for the LineBox border (1 char each side) so the
             # ListBox's visibility calculations match what's actually on screen.
-            inner = (max(1, size[0] - 2), max(1, size[1] - 2))
+            inner_cols = max(1, size[0] - 2)
+            chrome_rows = (
+                self._header.rows((inner_cols,))
+                + self._footer.rows((inner_cols,))
+            )
+            inner = (inner_cols, max(1, size[1] - 2 - chrome_rows))
             self._listbox.keypress(inner, key)
             return None
         return key

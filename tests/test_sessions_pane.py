@@ -389,6 +389,12 @@ def test_set_filter_no_matches():
     assert len([w for w in pane._walker if isinstance(w, _SessionRow)]) == 0
     assert isinstance(pane._walker[0], urwid.Text)
     assert "no matches" in pane._walker[0].text.lower()
+    assert "Ctrl-U" in pane._walker[0].text
+    assert pane.section_title.endswith(" [filtered]")
+
+    pane.set_filter("")
+
+    assert not pane.section_title.endswith(" [filtered]")
 
 
 # ── Enter key ────────────────────────────────────────────────────────────

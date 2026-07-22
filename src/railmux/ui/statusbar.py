@@ -11,19 +11,20 @@ import urwid
 from railmux.ui import keymap
 
 
-# Idle tips cycled through the status bar when there's no active message. These
-# intentionally avoid the keys already listed in the always-visible HintBar
-# (n/r/s/d, /, i, ?, q, Ctrl-B ←/→) — they surface behaviour that isn't obvious
-# from the hint bar, like soft-quit and history preview.
+# Idle tips are a scarce attention surface: include only high-value behaviour
+# that is not already evident in the visible HintBar, Button Bar, or current
+# screen. Keep each tip actionable, valid in every context where it can appear,
+# and short enough for the status bar. Do not use this pool for redundant key
+# reminders, marketing copy, or transient state that the UI already shows.
 TIPS: tuple[str, ...] = (
-    "Quit with q, then s to soft-quit — leaves every agent session running",
-    "Click a stopped session to preview its history without launching the agent",
-    "Double-click a session to open it and jump focus to the agent pane",
-    "[ / ] resize the sidebar divider — shrink or expand",
-    "␣ mirrors single-click; F8 cycles agent layouts",
-    "F9 toggles fullscreen for the agent pane",
-    "t opens a shell in the focused project's directory",
-    "Codex mode hides codex exec automation threads — only interactive sessions shown",
+    "Soft Quit (q, then s) closes shared views; agents keep running",
+    "Restored filters: / edits; Ctrl-U clears the current filter",
+    "Single-click a stopped session to preview it without starting it",
+    "Sidebar actions target the last-focused pane in two-pane layouts",
+    "Returning to one pane leaves the hidden second agent running",
+    "Codex mode lists interactive sessions and hides codex exec threads",
+    "railmux doctor reports the last detected tmux incident",
+    "In tmux copy-mode, press Esc twice to return to agent input",
 )
 
 

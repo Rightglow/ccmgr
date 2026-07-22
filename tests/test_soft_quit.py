@@ -50,6 +50,10 @@ def _isolate_tmux_identity_stamps(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         "railmux.ui.app.tmux_health.clear_clean_exit", lambda: None)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_health.record_soft_exit",
+        lambda **_kwargs: True,
+    )
 
 def _project(name: str = "test-proj", claude_dir: Path | None = None) -> Project:
     return Project(
@@ -1884,6 +1888,27 @@ def test_discover_orphans_handles_tmux_error():
 
 
 # ── _teardown_tmux branching ────────────────────────────────────────────
+
+def test_commit_soft_exit_publishes_intent_before_teardown(monkeypatch):
+    app = _minimal_app()
+    events = []
+    app._save_state = MagicMock(
+        side_effect=lambda **_kwargs: events.append("state"))
+    app._publish_managed_restart_handoff = MagicMock(
+        side_effect=lambda: events.append("handoff"))
+    app._begin_exit = MagicMock(
+        side_effect=lambda **_kwargs: events.append("begin"))
+    record = MagicMock(
+        side_effect=lambda **_kwargs: events.append("intent") or True)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_health.record_soft_exit", record)
+
+    app._commit_exit(soft=True)
+
+    assert events == ["state", "handoff", "intent", "begin"]
+    record.assert_called_once_with(server_pid=123, session_id="$1")
+    app._begin_exit.assert_called_once_with(soft=True)
+
 
 def test_begin_exit_paints_progress_before_synchronous_cleanup():
     app = _minimal_app()

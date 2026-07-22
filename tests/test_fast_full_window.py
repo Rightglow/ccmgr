@@ -398,6 +398,12 @@ def test_ctrl_right_bracket_is_consumed_locally_with_trailing_data():
     assert split_local_escape(b"ordinary") == (b"ordinary", False)
 
 
+def test_explicit_tmux_copy_mode_key_remains_opaque_remote_input():
+    decoder = TerminalInputDecoder()
+
+    assert decoder.feed(b"\x02[") == [b"\x02["]
+
+
 def test_terminal_input_decoder_preserves_order_and_partial_sgr_mouse():
     decoder = TerminalInputDecoder()
 
@@ -543,6 +549,9 @@ def test_local_history_sidebar_click_invalidates_agent_routes():
     assert action.refresh_routes is True
     assert view.visible_routes == ()
     assert view.pointer_event(
+        SgrMouseEvent(b"sidebar-drag", 32, 6, 2, True)
+    ).forwarded_input == b"sidebar-drag"
+    assert view.pointer_event(
         SgrMouseEvent(b"sidebar-release", 0, 5, 2, False)
     ).forwarded_input == b"sidebar-release"
     assert view.pointer_event(
@@ -572,7 +581,7 @@ def test_local_history_captures_an_in_pane_pointer_gesture_until_release():
     assert view.active is True
 
 
-def test_local_history_forwards_complete_click_to_another_frozen_pane():
+def test_local_history_forwards_click_but_suppresses_drag_in_agent_pane():
     view = LocalHistoryView()
     prefetch = InputFrameDecoder().feed(view.begin_prefetch(1.0))[0]
     prefetch_id, _limit = decode_history_prefetch(prefetch.data)
@@ -600,10 +609,35 @@ def test_local_history_forwards_complete_click_to_another_frozen_pane():
     assert down == HistoryAction(
         forwarded_input=b"down-b", refresh_routes=True
     )
-    assert drag.forwarded_input == b"drag-b"
-    assert wheel.forwarded_input == b"wheel-b"
+    assert drag == HistoryAction()
+    assert wheel.forwarded_input == b""
+    assert wheel.render_history is True
     assert release.forwarded_input == b"release-b"
     assert tuple(view.viewports) == ("%8", "%9")
+
+
+def test_live_agent_click_keeps_focus_and_never_starts_mouse_copy_mode():
+    view = LocalHistoryView()
+    prefetch = InputFrameDecoder().feed(view.begin_prefetch(1.0))[0]
+    request_id, _limit = decode_history_prefetch(prefetch.data)
+    route = HistorySnapshot(
+        request_id, "%8", 30, 0, 30, 3, (b"line",) * 3
+    )
+    view.accept_prefetch(HistoryBatch(request_id, (route,)))
+
+    down = view.pointer_event(SgrMouseEvent(b"down", 0, 40, 2, True))
+    drag = view.pointer_event(SgrMouseEvent(b"drag", 32, 41, 2, True))
+    release = view.pointer_event(SgrMouseEvent(b"release", 0, 41, 2, False))
+
+    assert down == HistoryAction(forwarded_input=b"down", refresh_routes=True)
+    assert drag == HistoryAction()
+    assert release == HistoryAction(forwarded_input=b"release")
+
+    # Capture is over: a stray motion report remains suppressed rather than
+    # being able to invoke tmux's MouseDrag1Pane binding by itself.
+    assert view.pointer_event(
+        SgrMouseEvent(b"stray-drag", 32, 41, 2, True)
+    ) == HistoryAction()
 
 
 def test_local_history_wheel_over_another_pane_preserves_both_viewports():
@@ -2118,9 +2152,33 @@ def test_server_classifies_remote_lifecycle(
     assert fast_display_server._classify_remote_exit("$4") is expected
 
 
+def test_observed_soft_quit_intent_skips_tmux_requery(monkeypatch):
+    target = fast_display_server.tmux_server.TmuxServerTarget(
+        "/tmp/tmux/railmux", 123)
+    intended = MagicMock(return_value=True)
+    classify = MagicMock()
+    consume = MagicMock()
+    monkeypatch.setattr(
+        fast_display_server.tmux_health, "soft_exit_intended", intended)
+    monkeypatch.setattr(
+        fast_display_server, "_classify_remote_exit", classify)
+    monkeypatch.setattr(
+        fast_display_server.tmux_health, "consume_clean_exit", consume)
+
+    assert fast_display_server._classify_observed_exit(
+        "$4", target) is fast_display_server.RemoteExit.SOFT_QUIT
+
+    intended.assert_called_once_with(server_pid=123, session_id="$4")
+    classify.assert_not_called()
+    consume.assert_not_called()
+
+
 def test_observed_hard_quit_requires_matching_clean_exit(monkeypatch):
     target = fast_display_server.tmux_server.TmuxServerTarget(
         "/tmp/tmux/railmux", 123)
+    monkeypatch.setattr(
+        fast_display_server.tmux_health, "soft_exit_intended",
+        lambda **_kwargs: False)
     monkeypatch.setattr(
         fast_display_server, "_classify_remote_exit",
         lambda _session: fast_display_server.RemoteExit.HARD_QUIT,
@@ -2141,6 +2199,9 @@ def test_observed_hard_quit_requires_matching_clean_exit(monkeypatch):
 def test_observed_unexpected_tmux_loss_records_incident(monkeypatch):
     target = fast_display_server.tmux_server.TmuxServerTarget(
         "/tmp/tmux/railmux", 123)
+    monkeypatch.setattr(
+        fast_display_server.tmux_health, "soft_exit_intended",
+        lambda **_kwargs: False)
     monkeypatch.setattr(
         fast_display_server, "_classify_remote_exit",
         lambda _session: fast_display_server.RemoteExit.HARD_QUIT,
@@ -2176,6 +2237,9 @@ def test_observed_surviving_session_does_not_consume_clean_exit(
 ):
     target = fast_display_server.tmux_server.TmuxServerTarget(
         "/tmp/tmux/railmux", 123)
+    monkeypatch.setattr(
+        fast_display_server.tmux_health, "soft_exit_intended",
+        lambda **_kwargs: False)
     monkeypatch.setattr(
         fast_display_server, "_classify_remote_exit",
         lambda _session: exit_kind,

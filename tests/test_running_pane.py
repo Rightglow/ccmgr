@@ -188,8 +188,9 @@ def test_filter_empty_copy_is_provider_aware_and_keeps_snapshot():
     pane.set_filter("missing")
 
     assert "matching Codex" in pane._walker[0].text
+    assert "Ctrl-U" in pane._walker[0].text
     assert pane._entries[0].tmux_name == "cx-a"
-    assert pane._linebox.title_widget.text.strip() == "Running (0/1)"
+    assert pane._linebox.title_widget.text.strip() == "Running (0/1) [filtered]"
 
 
 def test_filter_clear_restores_pre_filter_focus():

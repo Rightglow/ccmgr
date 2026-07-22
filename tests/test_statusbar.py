@@ -4,6 +4,7 @@ the outer tmux bar (see test_tmux_status.py), not an in-pane widget."""
 from unittest.mock import MagicMock
 
 import pytest
+import urwid
 
 from railmux.config import Config
 from railmux.ui import app as app_mod
@@ -193,6 +194,12 @@ def test_error_status_does_not_add_an_in_pane_footer_row(app, clock, shown):
 
 # ── idle tip rotation ────────────────────────────────────────────────────
 
+def test_idle_tips_are_unique_single_line_content():
+    assert len(TIPS) == len(set(TIPS))
+    assert all(tip and tip == tip.strip() and "\n" not in tip for tip in TIPS)
+    assert all(urwid.calc_width(tip, 0, len(tip)) <= 68 for tip in TIPS)
+
+
 def test_tips_rotate_on_interval(app, clock, shown):
     # First idle update shows a tip immediately.
     app._update_status()
@@ -214,6 +221,43 @@ def test_explicit_message_interrupts_tips(app, clock, shown):
     app._set_status("→ opened X")
     assert shown[-1] == "→ opened X"
     assert app._status_text == "→ opened X"
+
+
+@pytest.mark.parametrize(
+    ("sidebar_index", "pane_name"),
+    (
+        (0, "_projects_pane"),
+        (1, "_sessions_pane"),
+        (2, "_running_pane"),
+    ),
+)
+def test_filter_editor_prefills_restored_value_and_ctrl_u_clears(
+        app, sidebar_index, pane_name):
+    pane = getattr(app, pane_name)
+    pane.set_filter("restored-filter")
+    app._sidebar.focus_position = sidebar_index
+
+    app._enter_filter_mode()
+
+    footer = app._frame.contents["footer"][0]
+    edit = footer.contents[1][0]
+    assert isinstance(edit, urwid.Edit)
+    assert edit.edit_text == "restored-filter"
+    assert "filtered" in pane.section_title.lower()
+
+    assert edit.keypress((80,), "ctrl u") is None
+    assert edit.edit_text == ""
+    assert pane.filter_text == ""
+    assert "filtered" not in pane.section_title.lower()
+
+    assert edit.keypress((80,), "enter") is None
+    assert footer.contents[1][0] is app._button_bar
+
+
+def test_running_filter_is_included_in_soft_restart_view(app):
+    app._running_pane.set_filter("active-agent")
+
+    assert app._view_state_data()["running_filter"] == "active-agent"
 
 
 # ── HintBar: context-sensitive, two-line wrap, overflow paging ──────────

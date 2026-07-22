@@ -1,11 +1,15 @@
 """Bounded agent-workspace state and legacy primary-slot accessors."""
+import json
+from pathlib import Path
 from unittest.mock import MagicMock
 
+from railmux import tmux_ctl
 from railmux.display_transport import KillPreparation
 from railmux.ui.app import App, _Running
 from railmux.ui.workspace import (
     AgentWorkspace,
     SlotRestoreState,
+    SwapState,
     WorkspaceLayout,
     next_workspace_layout,
 )
@@ -112,6 +116,8 @@ def _reconcile_app() -> tuple[App, AgentWorkspace, MagicMock]:
     transport = MagicMock()
     transport.close_slot.side_effect = (
         lambda slot: slot.clear_display() or True)
+    transport.create_primary.side_effect = lambda: (
+        setattr(workspace.primary, "pane_id", "%5") or True)
     transport.create_secondary.side_effect = lambda layout: (
         setattr(workspace, "layout", layout)
         or setattr(workspace.secondary, "pane_id", "%4")
@@ -222,8 +228,9 @@ def test_swap_surface_failure_repaints_partial_safe_return():
         "returned home; surface failed", "error")
 
 
-def test_secondary_agent_exit_collapses_to_truthful_single_layout(monkeypatch):
+def test_secondary_agent_exit_keeps_dual_layout_with_empty_target(monkeypatch):
     app, workspace, _transport = _reconcile_app()
+    workspace.set_target(AgentWorkspace.SECONDARY)
     monkeypatch.setattr(
         "railmux.ui.app.tmux_ctl.kill_pane", lambda _pane: True)
 
@@ -232,19 +239,23 @@ def test_secondary_agent_exit_collapses_to_truthful_single_layout(monkeypatch):
         lambda _pane: True,
     )
 
-    assert workspace.layout is WorkspaceLayout.SINGLE
+    assert workspace.layout is WorkspaceLayout.SIDE_BY_SIDE
     assert workspace.primary.agent_tmux_name == "cc-primary"
-    assert workspace.secondary.pane_id is None
-    assert workspace.target_slot_key == AgentWorkspace.PRIMARY
+    assert workspace.secondary.pane_id == "%4"
+    assert workspace.secondary.agent_tmux_name is None
+    assert workspace.target_slot_key == AgentWorkspace.SECONDARY
+    app._set_status.assert_called_with(
+        "Pane 2 exited; kept the layout with an empty pane.", "warn")
 
 
-def test_primary_exit_promotes_surviving_secondary_safely(monkeypatch):
+def test_primary_agent_exit_rebuilds_empty_primary_without_moving_secondary(
+        monkeypatch):
     app, workspace, transport = _reconcile_app()
     monkeypatch.setattr(
         "railmux.ui.app.tmux_ctl.kill_pane", lambda _pane: True)
 
     def attach(slot, name, *, steal_focus):
-        slot.pane_id = "%5"
+        slot.pane_id = "%5" if slot is workspace.primary else "%4"
         slot.agent_tmux_name = name
         return True
 
@@ -254,10 +265,108 @@ def test_primary_exit_promotes_surviving_secondary_safely(monkeypatch):
         lambda _pane: True,
     )
 
-    assert workspace.layout is WorkspaceLayout.SINGLE
-    assert workspace.primary.agent_tmux_name == "cx-secondary"
-    assert workspace.secondary.pane_id is None
+    assert workspace.layout is WorkspaceLayout.SIDE_BY_SIDE
+    assert workspace.primary.pane_id == "%5"
+    assert workspace.primary.agent_tmux_name is None
+    assert workspace.secondary.pane_id == "%4"
+    assert workspace.secondary.agent_tmux_name == "cx-secondary"
     transport.close_slot.assert_called_once_with(workspace.secondary)
+    app._set_status.assert_called_with(
+        "Pane 1 exited; kept the layout with an empty pane.", "warn")
+
+
+def test_rebuilt_live_pane_status_does_not_claim_it_is_empty(monkeypatch):
+    app, workspace, _transport = _reconcile_app()
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.kill_pane", lambda _pane: True)
+
+    def attach(slot, name, *, steal_focus):
+        slot.agent_tmux_name = name
+        return True
+
+    app._attach_agent_slot.side_effect = attach
+    app._reconcile_display_slots(
+        lambda _name: True,
+        lambda pane: pane != "%3",
+    )
+
+    assert workspace.secondary.agent_tmux_name == "cx-secondary"
+    app._set_status.assert_called_with(
+        "Pane 2 was rebuilt and its agent was restored.", "warn")
+
+
+def test_exact_displayed_swap_binding_recovers_missing_running_entry(
+        monkeypatch):
+    app, workspace, _transport = _reconcile_app()
+    app._running = {}
+    app._project_snapshot = []
+    app._codex_index = MagicMock()
+    app._codex_index.all_cwds.return_value = {}
+    app._codex_index.get.return_value = None
+    app._renames = MagicMock()
+    app._renames.get.return_value = "Recovered"
+    app._valid_running_binding = MagicMock(
+        wraps=app._valid_running_binding)
+    workspace.primary.agent_tmux_name = "cx-displayed"
+    workspace.primary.swap_state = SwapState(
+        transaction_id="tx",
+        agent_tmux_name="cx-displayed",
+        agent_pane_id="%9",
+        agent_pane_pid=909,
+        home_window_id="@8",
+        placeholder_pane_id="%8",
+        display_window_id="@1",
+        keeper_session="keeper",
+        keeper_session_id="$8",
+        outer_session_name="railmux",
+        outer_session_id="$1",
+        owner_pane_id="%1",
+    )
+    identity = tmux_ctl.PaneIdentity(
+        pane_id="%9", pane_pid=909, session_name="railmux",
+        session_id="$1", window_id="@1", dead=False, width=80, height=24,
+    )
+    current_identity = [tmux_ctl.PaneIdentity(
+        pane_id="%9", pane_pid=908, session_name="railmux",
+        session_id="$1", window_id="@1", dead=False, width=80, height=24,
+    )]
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.pane_identity",
+        lambda _pane: current_identity[0],
+    )
+    binding = {
+        "key": "session-id",
+        "tmux_name": "cx-displayed",
+        "session_type": "codex",
+        "cwd": "/project",
+    }
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.show_session_user_option",
+        lambda *_args: json.dumps(binding),
+    )
+    server = tmux_ctl.ServerSnapshot(
+        sessions=frozenset({"cx-displayed"}),
+        panes=frozenset({"%9"}),
+    )
+
+    # A reused pane id with the wrong process identity is not sufficient
+    # authority to adopt a session merely because its name and binding match.
+    assert app._recover_unrepresented_displayed_agents(server) == 0
+    assert app._running == {}
+    app._valid_running_binding.assert_not_called()
+
+    current_identity[0] = identity
+    assert app._recover_unrepresented_displayed_agents(server) == 1
+    assert set(app._running) == {"session-id"}
+    assert app._running["session-id"].tmux_name == "cx-displayed"
+    assert app._running["session-id"].label.endswith("/Recovered")
+    args = app._valid_running_binding.call_args.args
+    assert args[0] == binding
+    assert args[1] == {"cx-displayed": (Path("/project"), 0)}
+    assert app._valid_running_binding.call_args.kwargs == {
+        "allow_missing_codex_metadata": True,
+        "probe_live_writer": False,
+    }
 
 
 def test_single_pane_close_returns_to_sidebar_without_rebuild(monkeypatch):

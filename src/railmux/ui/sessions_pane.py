@@ -242,12 +242,13 @@ class SessionsPane(ScrollableSidebarPane, urwid.WidgetWrap):
 
     @property
     def section_title(self) -> str:
-        return self._section_title
+        suffix = " [filtered]" if self._filter else ""
+        return self._section_title + suffix
 
     def _set_section_title(self, title: str) -> None:
         self._section_title = title
         if self._linebox is not None:
-            self._linebox.set_title(title)
+            self._linebox.set_title(self.section_title)
 
     def set_sessions(self, project: Project | None, sessions: list[SessionMeta],
                      running_ids: set[str] | None = None,
@@ -341,6 +342,8 @@ class SessionsPane(ScrollableSidebarPane, urwid.WidgetWrap):
         if self._filter == needle:
             return
         self._filter = needle
+        if self._linebox is not None:
+            self._linebox.set_title(self.section_title)
         if self._project is not None:
             self._render(self._visible_sessions())
 
@@ -393,7 +396,7 @@ class SessionsPane(ScrollableSidebarPane, urwid.WidgetWrap):
             ))
         if not rows:
             text = (
-                "  (no matches)"
+                "  (no matches — press / to edit, Ctrl-U to clear)"
                 if self._filter
                 else (
                     f"No {self._provider_label} sessions yet\n"

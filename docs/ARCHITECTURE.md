@@ -54,8 +54,13 @@ reports current dedicated-server reachability and the privacy-safe last incident
 without exposing socket paths or tmux/session identities. Intentional hard quit
 is distinguished from an abrupt server disappearance by a private, exact
 server-PID/session-ID sentinel that is consumed once and expires after 30
-seconds. This sentinel is diagnostic evidence only; it never authorizes session
-mutation or recovery.
+seconds. A committed soft quit publishes a separate exact 30-second intent
+before pane teardown. It is non-consuming because every helper attached to the
+same managed session must independently return the soft-quit result. Helpers
+consult it before any post-exit tmux query, so destroying the managed session
+cannot be misreported or queried concurrently by its closing SSH views. These
+sentinels classify lifecycle only; they never authorize session mutation or
+recovery.
 
 The SSH display's headless terminal must implement every screen-content
 operation that its private tmux client advertises through `TERM`; sending a
@@ -334,6 +339,26 @@ the old agent; an unusable split degrades to single while retaining a validated
 secondary agent in Running. Portable restoration deliberately remains a single
 stable Target display wish and never carries tmux identity or process authority.
 
+Ask Railmux is an explicit auxiliary display, not a provider-session recovery
+authority. Opening static Help performs no provider work. The Ask action
+materializes installed user documentation under the per-user XDG data tree and
+opens a stable, Railmux-namespaced tmux help session for the current provider.
+That session is excluded from `_running`, provider Projects views, launch
+correlation, and persisted workspace content; a soft restart therefore leaves
+the Target empty until the user explicitly reconnects from Help. Replacing the
+Target display must not stop or reinterpret its prior agent. Codex help must
+disable YOLO, use a read-only sandbox, and disable transcript persistence;
+Claude help must use its safe customization boundary and non-editing plan
+permissions. Hard quit may kill only help-session names actually used by that
+App instance.
+
+Read-only support must also be interruption-free. Codex combines its OS-level
+`read-only` sandbox with `approval=never`: reads auto-run, while attempted
+writes or network actions fail instead of escalating. Claude exposes only the
+built-in `Read`, `Glob`, and `Grep` tools and bypasses prompts inside that closed
+tool set; it receives neither Bash nor mutation tools. The versioned helper
+identity safely replaces an older live helper when this policy changes.
+
 User layout preference is a separate versioned settings profile containing
 only layout name and sidebar/primary proportions in thousandths. It never
 stores pane, process, socket, session, or window identity. `Always` retains the
@@ -366,7 +391,15 @@ idle surface and clears only that slot's content state. The caller may remove
 the Running entry only after the exact tmux identity is confirmed dead. A
 failed kill therefore leaves a truthful empty display slot and a still-live
 Running entry that can be reopened; it must not collapse an explicitly chosen
-dual layout.
+dual layout. Natural provider exit follows the same visible-layout invariant:
+the exited slot becomes the branded empty surface, while the other slot keeps
+its position and Target remains on the same numbered pane.
+
+A real swap-owned pane may temporarily outlive an in-memory `_running` entry.
+Refresh may re-adopt it only when the displayed pane id, pane PID, display
+window, swap owner, provider session name, and persisted binding all agree.
+This recovery never infers ownership from a session name and never launches,
+resumes, moves, or kills a process.
 
 Before a real pane moves, a detached tmux session group shares the outer window.
 This keeper adds no pane or PTY and prevents a direct kill of the original outer
@@ -553,6 +586,15 @@ release markers before moving panes, while periodic reconciliation heals a
 missed hook after interruption. tmux 2.7-2.9 keeps its existing selection
 behavior because configurable hooks and pane-local options are unavailable.
 
+The `railmux ssh` client owns a different mouse boundary before input reaches
+the remote tmux client. A press/release over an agent remains forwarded for
+pane focus, but intervening reported drag motion is dropped so tmux's stock
+`MouseDrag1Pane` cannot enter copy-mode accidentally. Sidebar gestures are
+still forwarded, terminal-native selection overrides never enter the client,
+and the opaque keyboard sequence `Ctrl-B [` remains the explicit copy-mode
+path. This is client-side input policy and does not mutate shared remote tmux
+bindings used by ordinary attached terminals.
+
 tmux routes wheel events by pointer location rather than keyboard focus. Each
 sidebar pane therefore consumes buttons 4/5 at its outer widget boundary and
 routes them to its own `ListBox`, including events over titles, borders,
@@ -608,6 +650,13 @@ Modal overlays must remain inside the current sidebar pane after responsive
 scaling. Long editable or read-only content scrolls within the modal while its
 action legend remains visible; confirmation heights continue to derive from
 wrapped content and clamp to the available terminal rows.
+
+Idle tips are reserved for valuable behavior that is not already obvious from
+the visible Hint Bar, Button Bar, or current screen. Every tip must be concise,
+actionable, and true in every context where it can appear. Redundant shortcut
+reminders, marketing copy, and facts already exposed by the UI do not belong in
+the rotating pool. Persistent but otherwise hidden state, recovery paths, and
+cross-pane consequences are appropriate tip material.
 
 Detached agent sessions commonly begin at 80x24. Before attaching a nested
 tmux client, create/identify the outer display pane, read its exact dimensions,
