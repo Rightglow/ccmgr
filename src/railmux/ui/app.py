@@ -3247,10 +3247,11 @@ class App:
         """Return only private helpers whose persisted identity we own."""
         candidates = set(getattr(self, "_help_session_names_used", set()))
         server = tmux_ctl.server_snapshot()
-        candidates.update(
-            name for name in server.sessions
-            if self._is_help_session_name(name)
-        )
+        if server is not None:
+            candidates.update(
+                name for name in server.sessions
+                if self._is_help_session_name(name)
+            )
         allowed = {
             identity
             for mode in self._modes().modes

@@ -220,6 +220,23 @@ def test_hard_quit_helper_sweep_requires_exact_persisted_identity(
     }
 
 
+def test_hard_quit_helper_sweep_tolerates_unavailable_tmux_snapshot(
+    monkeypatch, tmp_path,
+):
+    app = _app("codex", tmp_path)
+    app._help_session_names_used = {"railmux-help-v1-codex"}
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.server_snapshot", lambda: None)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.show_session_user_option",
+        lambda *_args: "codex:read-only-auto-v2",
+    )
+
+    assert app._verified_help_session_names() == {
+        "railmux-help-v1-codex",
+    }
+
+
 def test_help_display_is_not_persisted_as_normal_agent(tmp_path):
     app = _app("codex", tmp_path)
     slot = app._workspace.primary
