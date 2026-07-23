@@ -578,11 +578,12 @@ def test_root_status_click_scopes_pane_range_and_keeps_zoom():
     argv = call.call_args.args[0]
     assert argv[:5] == [
         "tmux", "bind-key", "-T", "root", "MouseDown1Status"]
-    assert argv[5:9] == ["if-shell", "-F", "-t", "="]
-    assert "mouse_status_range" in argv[9]
-    assert tmux_ctl.RAILMUX_CONTROLLER_OPTION in argv[9]
-    assert "railmux-status-pane-v1-owner123" in argv[9]
-    assert "tmux select-pane -Z -t '#{mouse_status_range}'" in argv[10]
+    assert argv[5:7] == ["if-shell", "-F"]
+    assert "-t" not in argv[5:8]
+    assert "mouse_status_range" in argv[7]
+    assert tmux_ctl.RAILMUX_CONTROLLER_OPTION in argv[7]
+    assert "railmux-status-pane-v1-owner123" in argv[7]
+    assert "tmux select-pane -Z -t '#{mouse_status_range}'" in argv[8]
     assert argv[-1] == "select-window -t ="
 
 

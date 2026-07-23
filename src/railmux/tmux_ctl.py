@@ -2031,7 +2031,10 @@ def set_root_status_click_forwarding(
         subprocess.check_call(
             [
                 "tmux", "bind-key", "-T", "root", _ROOT_STATUS_CLICK_KEY,
-                "if-shell", "-F", "-t", "=", condition,
+                # A user status range deliberately has no implicit pane target.
+                # Supplying ``-t =`` worked by fallback on tmux 3.4 but makes
+                # tmux 3.7 reject the command before evaluating the range.
+                "if-shell", "-F", condition,
                 (
                     'run-shell "tmux select-pane -Z -t '
                     "'#{mouse_status_range}'"

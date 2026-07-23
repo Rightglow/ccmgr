@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-07-23
+
+### Fixed
+
+- Keep compact status-bar page clicks working on tmux 3.7 and newer. User
+  status ranges intentionally have no implicit mouse pane target; the managed
+  binding now evaluates in the current client/window context and selects only
+  the explicit, validated `%N` range argument.
+- Make the cross-platform real-tmux click test wait for the client-specific
+  status range to paint and drive its PTY without relying on BSD `script(1)` or
+  one negotiated mouse encoding.
+
 ## [0.2.5] - 2026-07-23
 
 ### Added
@@ -604,7 +616,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial PyPI release under the Railmux name.
 
-[Unreleased]: https://github.com/Rightglow/Railmux/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/Rightglow/Railmux/compare/v0.2.6...HEAD
+[0.2.6]: https://github.com/Rightglow/Railmux/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/Rightglow/Railmux/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/Rightglow/Railmux/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/Rightglow/Railmux/compare/v0.2.2...v0.2.3
