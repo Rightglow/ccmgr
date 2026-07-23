@@ -1961,6 +1961,22 @@ def test_real_tmux_status_pane_range_selects_and_keeps_zoom(
             ["tmux", "list-clients", "-F", "#{client_name}"],
             text=True,
         ).strip()
+        subprocess.run(
+            ["tmux", "refresh-client", "-S", "-t", client_name],
+            check=True,
+        )
+        os.set_blocking(master_fd, False)
+        painted = bytearray()
+        paint_deadline = time.monotonic() + 3.0
+        while time.monotonic() < paint_deadline and b"[R]" not in painted:
+            readable, _, _ = select.select([master_fd], [], [], 0.1)
+            if not readable:
+                continue
+            try:
+                painted.extend(os.read(master_fd, 65536))
+            except BlockingIOError:
+                pass
+        assert b"[R]" in painted
         client_height = int(subprocess.check_output(
             ["tmux", "display-message", "-p", "-c", client_name,
              "#{client_height}"],
