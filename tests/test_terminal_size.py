@@ -1,5 +1,5 @@
 """Non-blocking warnings for cramped terminal layouts."""
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 from railmux.settings import LayoutProfile
 from railmux.ui.app import App, PALETTE
@@ -118,25 +118,80 @@ def test_dual_layout_uses_single_agent_before_physical_compact():
     ) is WorkspacePresentation.COMPACT
 
 
-def test_wide_resize_reflows_sidebar_from_old_absolute_width(monkeypatch):
+def test_wide_resize_reflows_both_side_by_side_dividers(monkeypatch):
     app = _app()
     app._workspace = AgentWorkspace()
     app._workspace.layout = WorkspaceLayout.SIDE_BY_SIDE
+    app._workspace.primary.pane_id = "%2"
+    app._workspace.secondary.pane_id = "%3"
     app._railmux_pane_id = "%1"
     app._last_workspace_size = (120, 54)
     app._last_size_class = "comfortable"
     app._active_sidebar_permille = None
-    resize = MagicMock(return_value=True)
+    app._active_primary_permille = None
+    sizes = {
+        "%1": (24, 54),
+        "%2": (45, 54),
+        "%3": (100, 54),
+    }
+
+    def resize_pane(pane, width):
+        sizes[pane] = (width, 54)
+        if pane == "%1":
+            # tmux takes the sidebar's extra columns from the adjacent pane.
+            sizes["%2"] = (35, 54)
+        return True
+
+    resize = MagicMock(side_effect=resize_pane)
     monkeypatch.setattr(
         "railmux.ui.app.tmux_ctl.window_size", lambda _pane: (171, 54))
     monkeypatch.setattr(
-        "railmux.ui.app.tmux_ctl.pane_size", lambda _pane: (24, 54))
+        "railmux.ui.app.tmux_ctl.pane_size", lambda pane: sizes[pane])
     monkeypatch.setattr(
         "railmux.ui.app.tmux_ctl.resize_pane_width", resize)
 
     app._check_terminal_size((171, 54))
 
-    resize.assert_called_once_with("%1", 34)
+    assert resize.call_args_list == [
+        call("%1", 34),
+        call("%2", 68),
+    ]
+
+
+def test_wide_resize_reflows_stacked_agent_divider_on_height_change(
+    monkeypatch,
+):
+    app = _app()
+    app._workspace = AgentWorkspace()
+    app._workspace.layout = WorkspaceLayout.STACKED
+    app._workspace.primary.pane_id = "%2"
+    app._workspace.secondary.pane_id = "%3"
+    app._railmux_pane_id = "%1"
+    app._last_workspace_size = (160, 30)
+    app._last_size_class = "comfortable"
+    app._active_sidebar_permille = None
+    app._active_primary_permille = 600
+    resize_width = MagicMock(return_value=True)
+    resize_height = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.window_size", lambda _pane: (160, 50))
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.pane_size",
+        lambda pane: {
+            "%1": (32, 50),
+            "%2": (127, 20),
+            "%3": (127, 29),
+        }[pane],
+    )
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.resize_pane_width", resize_width)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.resize_pane_height", resize_height)
+
+    app._check_terminal_size((160, 50))
+
+    resize_width.assert_not_called()
+    resize_height.assert_called_once_with("%2", 29)
 
 
 def test_agent_pane_warns_after_divider_makes_its_area_too_small(monkeypatch):

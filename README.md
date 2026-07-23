@@ -147,6 +147,8 @@ After an explicit layout change (`F8` or `[` / `]`), quitting offers to keep
 the current pane proportions: **Always** keeps the latest custom layout,
 **This time** restores it on the next launch only, and **No** leaves it
 unsaved for this exit; **Never** also disables future layout prompts.
+`[` and `]` move only the sidebar's right divider; dual-agent layouts split
+the remaining area evenly again.
 Proportions, rather than cell counts or tmux pane identities, are stored, so a
 later terminal may have a different size. If a saved split cannot fit, Railmux
 uses safe responsive defaults for that run without overwriting the saved

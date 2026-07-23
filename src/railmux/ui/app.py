@@ -1171,6 +1171,7 @@ class App:
             self._set_workspace_target(slot.key)
             self._paint_slot_active_target(
                 slot, slot.active_session_id, slot.agent_tmux_name)
+            self._sync_sidebar_to_agent_project(slot.agent_tmux_name)
             # While focus stays somewhere in the agent region, tmux does not
             # send another focus event to the already-unfocused sidebar when a
             # mouse click moves directly between P1 and P2. The refresh loop
@@ -2390,6 +2391,36 @@ class App:
         if current[0] == desired:
             return True
         return tmux_ctl.resize_pane_width(sidebar_id, desired)
+
+    def _reflow_layout_for_window_resize(
+        self,
+        *,
+        width_changed: bool,
+        height_changed: bool,
+    ) -> bool:
+        """Reapply every responsive divider affected by an outer resize."""
+        workspace = self._agent_workspace()
+        if workspace.presentation is not WorkspacePresentation.WIDE:
+            return True
+        if width_changed and not self._resize_sidebar_for_layout(
+                workspace.layout):
+            return False
+        if workspace.layout is WorkspaceLayout.SINGLE:
+            return True
+        primary_axis_changed = (
+            width_changed
+            if workspace.layout is WorkspaceLayout.SIDE_BY_SIDE
+            else height_changed
+        )
+        if not primary_axis_changed:
+            return True
+        region = self._agent_region_size()
+        if region is None or not self._layout_fits(region, workspace.layout):
+            return False
+        ratio = getattr(self, "_active_primary_permille", None)
+        if ratio is None:
+            ratio = 500
+        return self._resize_primary_for_ratio(region, ratio)
 
     def _capture_layout_profile(self, scope: str) -> LayoutProfile | None:
         """Capture current pane proportions without persisting tmux identity."""
@@ -8180,31 +8211,55 @@ class App:
     # --- resize divider ---
 
     def _resize_divider(self, expand_railmux: bool) -> None:
-        """Move the vertical divider: [ shrinks railmux, ] expands it."""
+        """Move only the sidebar divider; keep a dual agent region balanced."""
         if (self._agent_workspace().presentation
                 is WorkspacePresentation.COMPACT):
             self._set_status(
                 "Divider resizing is available again in wide view.", "tip")
             return
-        pane_id = self._primary_slot.pane_id
-        if not pane_id or not tmux_ctl.pane_alive(pane_id):
-            self._set_status("No agent pane to resize against.")
+        workspace = self._agent_workspace()
+        sidebar_id = getattr(self, "_railmux_pane_id", None)
+        if not sidebar_id or not tmux_ctl.pane_alive(sidebar_id):
+            self._set_status("Sidebar pane is unavailable.")
             return
-        direction = "-R" if expand_railmux else "-L"
-        if tmux_ctl.resize_pane(pane_id, direction, 5):
-            sidebar_id = getattr(self, "_railmux_pane_id", None)
-            window = (
-                tmux_ctl.window_size(sidebar_id) if sidebar_id else None)
-            sidebar = (
-                tmux_ctl.pane_size(sidebar_id) if sidebar_id else None)
-            if window is not None and sidebar is not None and window[0] > 0:
-                self._active_sidebar_permille = min(
-                    800,
-                    max(50, round(sidebar[0] * 1000 / window[0])),
-                )
-                self._layout_geometry_user_owned = True
-                self._layout_profile_fallback = False
-        self._check_agent_slot_size(self._primary_slot)
+        window = tmux_ctl.window_size(sidebar_id)
+        sidebar = tmux_ctl.pane_size(sidebar_id)
+        if window is None or sidebar is None or window[0] <= 0:
+            self._set_status("Sidebar size is unavailable.")
+            return
+        minimum = (
+            self._DUAL_SIDEBAR_MIN_WIDTH
+            if workspace.layout is not WorkspaceLayout.SINGLE else 1
+        )
+        desired = min(
+            max(1, window[0] - 2),
+            max(minimum, sidebar[0] + (5 if expand_railmux else -5)),
+        )
+        if (desired == sidebar[0]
+                or not tmux_ctl.resize_pane_width(sidebar_id, desired)):
+            return
+
+        resized_sidebar = tmux_ctl.pane_size(sidebar_id)
+        if resized_sidebar is not None:
+            self._active_sidebar_permille = min(
+                800,
+                max(50, round(
+                    resized_sidebar[0] * 1000 / window[0])),
+            )
+        if workspace.layout is not WorkspaceLayout.SINGLE:
+            # `[` / `]` owns the outer sidebar divider only. Tmux may take the
+            # requested columns from whichever adjacent agent pane it chooses,
+            # so explicitly rebalance the remaining agent region afterwards.
+            self._active_primary_permille = 500
+            region = self._agent_region_size()
+            if (region is not None
+                    and self._layout_fits(region, workspace.layout)):
+                self._resize_primary_for_ratio(region, 500)
+        self._layout_geometry_user_owned = True
+        self._layout_profile_fallback = False
+        for slot in workspace.slots:
+            if slot.pane_id:
+                self._check_agent_slot_size(slot)
 
     # --- responsive-size guard ------------------------------------------
 
@@ -8349,14 +8404,14 @@ class App:
             self._restore_compact_page()
         adaptive_change = self._sync_adaptive_single_view(width, height)
         if (size_changed and previous_size is not None
-                and previous_size[0] != width
                 and workspace.presentation is WorkspacePresentation.WIDE):
-            # tmux does not preserve divider ratios when a client changes the
-            # window width: it may leave the sidebar at its old absolute
-            # column count and give all new space to agent panes. Reapply the
-            # active ratio (default, restored, or changed with [ / ]) after
-            # responsive topology transitions have settled.
-            self._resize_sidebar_for_layout(workspace.layout)
+            # tmux preserves divider positions as absolute cells when the
+            # outer client changes size. Reapply both affected proportional
+            # dividers after responsive topology transitions have settled.
+            self._reflow_layout_for_window_resize(
+                width_changed=previous_size[0] != width,
+                height_changed=previous_size[1] != height,
+            )
         previous = getattr(self, "_last_size_class", None)
         current = self._terminal_size_class(width, height)
         if current != previous:

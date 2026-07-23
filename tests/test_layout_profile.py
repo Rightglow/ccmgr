@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import subprocess
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 from railmux.settings import LayoutProfile
 from railmux.ui.app import App, _Running
@@ -45,6 +45,43 @@ def test_capture_layout_uses_size_independent_proportions(monkeypatch):
 
     assert app._capture_layout_profile("always") == LayoutProfile(
         "always", "side-by-side", 200, 434)
+
+
+def test_divider_keys_resize_sidebar_and_rebalance_dual_agents(monkeypatch):
+    app = _app(WorkspaceLayout.SIDE_BY_SIDE)
+    sizes = {
+        "%1": (36, 40),
+        "%2": (61, 40),
+        "%3": (81, 40),
+    }
+
+    def resize_width(pane, width):
+        sizes[pane] = (width, 40)
+        if pane == "%1":
+            sizes["%2"] = (56, 40)
+        return True
+
+    resize = MagicMock(side_effect=resize_width)
+    app._check_agent_slot_size = MagicMock()
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.pane_alive", lambda _pane: True)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.window_size", lambda _pane: (180, 40))
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.pane_size", lambda pane: sizes[pane])
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.resize_pane_width", resize)
+
+    app._resize_divider(expand_railmux=True)
+
+    assert resize.call_args_list == [
+        call("%1", 41),
+        call("%2", 68),
+    ]
+    assert app._active_sidebar_permille == 228
+    assert app._active_primary_permille == 500
+    assert app._layout_geometry_user_owned is True
+    assert app._check_agent_slot_size.call_count == 2
 
 
 def test_apply_one_time_stacked_profile_consumes_after_success(monkeypatch):

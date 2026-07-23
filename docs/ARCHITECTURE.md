@@ -498,11 +498,16 @@ routing with focus, selection, or history.
   than retaining the zoomed page's tmux reflow. Single-agent layout assigns
   about 30% of the outer width to the sidebar; either dual layout assigns about
   20%, clamped to at least 30 columns. Ratio changes are best-effort and must
-  not make layout creation or recovery fail.
+  not make layout creation or recovery fail. Subsequent wide-window resizes
+  must reapply both affected proportional dividers: the sidebar on width
+  changes and the two-agent divider on its layout axis. Tmux's retained
+  absolute cell width or height is never new ratio authority.
 - A saved proportional profile may override those responsive ratios after pane
   topology exists. It is applied after exact workspace restoration, and only a
   successful explicit F8/divider operation may become newer preference
-  authority.
+  authority. `[` and `]` resize the sidebar pane directly and never address an
+  agent pane directionally; after either key, a dual layout assigns each agent
+  half of the remaining region.
 - Narrow screens should prefer stacked panes because three side-by-side columns
   make agent TUIs unusably narrow.
 - Railmux globally routes `F8` to the sidebar controller and cycles

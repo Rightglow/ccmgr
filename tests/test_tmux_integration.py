@@ -50,6 +50,7 @@ from railmux.ui.workspace import (
     AgentWorkspace,
     DisplayTransportKind,
     WorkspaceLayout,
+    WorkspacePresentation,
 )
 
 
@@ -1433,6 +1434,7 @@ def test_real_transient_compact_profile_restores_both_dividers(isolated_tmux):
     app = App.__new__(App)
     app._workspace = AgentWorkspace()
     app._workspace.layout = WorkspaceLayout.SIDE_BY_SIDE
+    app._workspace.presentation = WorkspacePresentation.WIDE
     app._workspace.primary.pane_id = primary
     app._workspace.secondary.pane_id = secondary
     app._railmux_pane_id = sidebar
@@ -1453,6 +1455,35 @@ def test_real_transient_compact_profile_restores_both_dividers(isolated_tmux):
     assert abs(
         restored.primary_permille - profile.primary_permille
     ) <= 2
+
+    subprocess.run(
+        ["tmux", "resize-pane", "-t", sidebar, "-x", "60"], check=True)
+    subprocess.run(
+        ["tmux", "resize-pane", "-t", primary, "-x", "40"], check=True)
+    assert app._reflow_layout_for_window_resize(
+        width_changed=True,
+        height_changed=False,
+    )
+    reflowed = app._capture_layout_profile("always")
+    assert reflowed is not None
+    assert reflowed.sidebar_permille == restored.sidebar_permille
+    assert abs(
+        reflowed.primary_permille - restored.primary_permille
+    ) <= 2
+
+    app._layout_geometry_user_owned = False
+    app._layout_profile_fallback = False
+    app._check_agent_slot_size = lambda _slot: None
+    app._set_status = lambda *_args, **_kwargs: None
+    sidebar_before = tmux_ctl.pane_size(sidebar)
+    assert sidebar_before is not None
+    app._resize_divider(expand_railmux=True)
+    sidebar_after = tmux_ctl.pane_size(sidebar)
+    assert sidebar_after is not None
+    assert sidebar_after[0] == sidebar_before[0] + 5
+    bracket_profile = app._capture_layout_profile("always")
+    assert bracket_profile is not None
+    assert abs(bracket_profile.primary_permille - 500) <= 5
 
 
 def test_real_tmux_agent_focus_heals_external_gray_border_drift(isolated_tmux):

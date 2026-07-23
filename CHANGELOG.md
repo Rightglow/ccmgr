@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-07-23
+
+### Fixed
+
+- Reapply both responsive dividers when a wide terminal changes size. Returning
+  from compact mode now keeps the sidebar and both agent panes at their active
+  proportional layout instead of allowing tmux to retain one agent pane's old
+  absolute width; stacked layouts receive the equivalent height correction.
+- Make `[` and `]` move only the sidebar divider and rebalance the remaining
+  dual-agent region evenly, instead of allowing a directional tmux resize to
+  move the Agent 1/2 divider.
+- Synchronize Projects and Sessions when mouse or tmux focus moves directly
+  from one agent pane to the other, so the sidebar follows the newly targeted
+  running session instead of updating only its Running highlight.
+
 ## [0.2.8] - 2026-07-23
 
 ### Fixed
@@ -686,7 +701,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial PyPI release under the Railmux name.
 
-[Unreleased]: https://github.com/Rightglow/Railmux/compare/v0.2.8...HEAD
+[Unreleased]: https://github.com/Rightglow/Railmux/compare/v0.2.9...HEAD
+[0.2.9]: https://github.com/Rightglow/Railmux/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/Rightglow/Railmux/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/Rightglow/Railmux/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/Rightglow/Railmux/compare/v0.2.5...v0.2.6
