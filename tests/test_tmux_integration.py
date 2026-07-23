@@ -1895,6 +1895,11 @@ def test_real_tmux_binding_manager_round_trip_and_user_reload(
 def test_real_tmux_status_pane_range_selects_and_keeps_zoom(
         isolated_tmux, monkeypatch, tmp_path):
     """A compact status control targets its declared pane, not the pane below."""
+    if sys.platform == "darwin":
+        pytest.skip(
+            "a bare macOS PTY cannot answer tmux 3.7 terminal capability "
+            "queries; the real click path is covered on Linux"
+        )
     if tmux_ctl.tmux_version() < (3, 4):
         pytest.skip("pane-ID user status ranges need tmux 3.4")
     display_session, owner_pane, socket_path = isolated_tmux
