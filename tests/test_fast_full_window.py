@@ -352,6 +352,79 @@ def test_terminal_surface_hides_cursor_covered_by_a_frozen_pane():
     assert stream.getvalue().endswith(b"\033[?25l")
 
 
+def test_terminal_surface_projects_short_local_viewport_from_logical_bottom():
+    screen = ScreenModel().apply(
+        ClientScreenUpdateDecoder().feed(
+            encode_update(_keyframe(width=105, height=22))
+        )[0],
+        os.terminal_size((105, 22)),
+    )
+    assert screen is not None
+    screen = fast_display_client.replace(
+        screen, cursor_x=7, cursor_y=20, clear=True
+    )
+    stream = io.BytesIO()
+    surface = TerminalSurface(stream)
+    surface.set_physical_size(os.terminal_size((105, 4)))
+
+    surface.paint(screen)
+
+    rendered = stream.getvalue()
+    assert b"\033[1;1H\033[2Krow-18" in rendered
+    assert b"\033[2;1H\033[2Krow-19" in rendered
+    assert b"\033[3;1H\033[2Krow-20" in rendered
+    assert b"\033[4;1H\033[2Krow-21" in rendered
+    assert b"row-17" not in rendered
+    assert rendered.endswith(b"\033[3;8H\033[?25h")
+
+
+def test_terminal_surface_clips_projected_patches_overlays_and_cursor():
+    screen = ScreenModel().apply(
+        ClientScreenUpdateDecoder().feed(
+            encode_update(_keyframe(width=20, height=15))
+        )[0],
+        os.terminal_size((20, 15)),
+    )
+    assert screen is not None
+    screen = fast_display_client.replace(
+        screen, cursor_y=2, changed_rows=(2, 11, 14), clear=False
+    )
+    overlay = HistorySnapshot(
+        1, "%9", x=3, y=10, width=6, height=4,
+        lines=(b"hidden", b"one", b"two", b"three"),
+    )
+    stream = io.BytesIO()
+    surface = TerminalSurface(stream)
+    surface.set_physical_size(os.terminal_size((20, 4)))
+
+    surface.paint(screen, ((overlay, overlay.lines),))
+
+    rendered = stream.getvalue()
+    assert b"row-2" not in rendered
+    assert b"\033[1;1H\033[2Krow-11" in rendered
+    assert b"\033[4;1H\033[2Krow-14" in rendered
+    assert b"hidden" not in rendered
+    assert b"\033[1;4H\033[6Xone" in rendered
+    assert rendered.endswith(b"\033[1;1H\033[?25l")
+
+
+def test_terminal_surface_maps_projected_mouse_rows_to_logical_screen():
+    surface = TerminalSurface(io.BytesIO())
+    surface.set_physical_size(os.terminal_size((105, 4)))
+
+    top = surface.translate_mouse_event(
+        SgrMouseEvent(b"\x1b[<64;8;1M", 64, 8, 1, True),
+        logical_height=22,
+    )
+    status = surface.translate_mouse_event(
+        SgrMouseEvent(b"\x1b[<0;8;4m", 0, 8, 4, False),
+        logical_height=22,
+    )
+
+    assert (top.x, top.y, top.raw) == (8, 19, b"\x1b[<64;8;19M")
+    assert (status.x, status.y, status.raw) == (8, 22, b"\x1b[<0;8;22m")
+
+
 def test_mode_only_patch_reconciles_terminal_modes_once_and_restores_them():
     decoder = ClientScreenUpdateDecoder()
     model = ScreenModel()
@@ -396,6 +469,64 @@ def test_ctrl_right_bracket_is_consumed_locally_with_trailing_data():
     assert forwarded == b"before"
     assert should_exit is True
     assert split_local_escape(b"ordinary") == (b"ordinary", False)
+
+
+def test_initial_terminal_size_waits_for_soft_keyboard_to_close(
+    monkeypatch, capsys,
+):
+    sizes = iter((
+        os.terminal_size((105, 4)),
+        os.terminal_size((105, 4)),
+        os.terminal_size((105, 22)),
+    ))
+    monkeypatch.setattr(
+        fast_display_client.os, "get_terminal_size", lambda _fd: next(sizes)
+    )
+    sleep = MagicMock()
+    monkeypatch.setattr(fast_display_client.time, "sleep", sleep)
+
+    size = fast_display_client.wait_for_usable_terminal_size(9)
+
+    assert size == os.terminal_size((105, 22))
+    assert sleep.call_count == 2
+    error = capsys.readouterr().err
+    assert "reports 105x4" in error
+    assert "at least 40x12" in error
+    assert "now 105x22" in error
+
+
+def test_initial_terminal_size_rejects_a_terminal_that_is_too_narrow(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        fast_display_client.os,
+        "get_terminal_size",
+        lambda _fd: os.terminal_size((30, 50)),
+    )
+    sleep = MagicMock()
+    monkeypatch.setattr(fast_display_client.time, "sleep", sleep)
+
+    with pytest.raises(
+        fast_display_client.ProbeError,
+        match=r"30x50.*at least 40x12",
+    ):
+        fast_display_client.wait_for_usable_terminal_size(9)
+
+    sleep.assert_not_called()
+
+
+def test_same_width_short_resize_is_only_a_local_projection():
+    logical = os.terminal_size((105, 22))
+
+    assert fast_display_client._is_soft_keyboard_projection(
+        os.terminal_size((105, 4)), logical
+    )
+    assert not fast_display_client._is_soft_keyboard_projection(
+        os.terminal_size((104, 4)), logical
+    )
+    assert not fast_display_client._is_soft_keyboard_projection(
+        os.terminal_size((105, 12)), logical
+    )
 
 
 def test_explicit_tmux_copy_mode_key_remains_opaque_remote_input():
@@ -1658,6 +1789,86 @@ def test_older_remote_protocol_prompts_for_matching_remote_upgrade(monkeypatch):
     assert "uses older SSH protocol" in questions[0]
     assert old.terminated
     assert upgraded.stdin.getvalue() == REMOTE_START
+
+
+def test_older_compatible_remote_can_be_upgraded_to_local_version(monkeypatch):
+    _accept_attach(monkeypatch)
+    monkeypatch.setattr(fast_display_client, "__version__", "0.2.5")
+    old = _PreflightProcess()
+    upgraded = _PreflightProcess()
+    args = parse_client_args(["server"])
+    monkeypatch.setattr(
+        fast_display_client, "_spawn_remote", lambda _argv: old
+    )
+    monkeypatch.setattr(
+        fast_display_client,
+        "await_remote_startup",
+        lambda _process: RemoteStartup(
+            RemoteStartKind.HELLO,
+            RemoteHello("0.2.4", PROTOCOL_VERSION, True),
+        ),
+    )
+    questions = []
+    monkeypatch.setattr(
+        fast_display_client,
+        "_confirm",
+        lambda question: questions.append(question) or True,
+    )
+    installed_versions = []
+
+    def install(_args, _size, version):
+        installed_versions.append(version)
+        return (
+            upgraded,
+            RemoteStartup(
+                RemoteStartKind.HELLO,
+                RemoteHello("0.2.5", PROTOCOL_VERSION, True),
+            ),
+        )
+
+    monkeypatch.setattr(
+        fast_display_client, "_install_remote_and_start", install
+    )
+
+    selected = prepare_remote_process(args, os.terminal_size((120, 40)))
+
+    assert selected is upgraded
+    assert installed_versions == ["0.2.5"]
+    assert "Remote Railmux 0.2.4 is older than local 0.2.5" in questions[0]
+    assert old.terminated
+    assert upgraded.stdin.getvalue() == REMOTE_START
+
+
+def test_older_compatible_remote_can_continue_when_upgrade_declined(
+    monkeypatch, capsys,
+):
+    _accept_attach(monkeypatch)
+    monkeypatch.setattr(fast_display_client, "__version__", "0.2.5")
+    process = _PreflightProcess()
+    args = parse_client_args(["server"])
+    monkeypatch.setattr(
+        fast_display_client, "_spawn_remote", lambda _argv: process
+    )
+    monkeypatch.setattr(
+        fast_display_client,
+        "await_remote_startup",
+        lambda _process: RemoteStartup(
+            RemoteStartKind.HELLO,
+            RemoteHello("0.2.4", PROTOCOL_VERSION, True),
+        ),
+    )
+    monkeypatch.setattr(
+        fast_display_client, "_confirm", lambda _question: False
+    )
+
+    selected = prepare_remote_process(args, os.terminal_size((120, 40)))
+
+    assert selected is process
+    assert not process.terminated
+    assert process.stdin.getvalue() == REMOTE_START
+    assert "continuing with compatible remote Railmux 0.2.4" in (
+        capsys.readouterr().err
+    )
 
 
 def test_higher_remote_version_is_offered_to_local_before_protocol_direction(

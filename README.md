@@ -188,6 +188,30 @@ changing that Target, then toggles back to it. `Ctrl-B` plus an arrow remains
 spatial: left/right moves across a side-by-side split, while up/down moves
 between stacked agent panes.
 
+### Phones and compact terminals
+
+Railmux automatically switches to a one-page-at-a-time compact workspace when
+either terminal dimension is cramped: fewer than 80 columns or fewer than 24
+rows. The existing panes and layout remain alive; the bottom status bar exposes
+`[R]` for the Railmux sidebar and `[1]`/`[2]` for the agent panes. The current
+page is highlighted. Click a page label when mouse reporting is enabled and
+the remote tmux is 3.4 or newer. `Ctrl-B Tab` remains the portable keyboard
+toggle between `[R]` and the current Target agent.
+
+F8 still creates, removes, and remembers the second agent pane in compact mode,
+although only one page is shown at a time. F9 and divider-resize controls are
+unnecessary while a page already fills the screen, so they safely do nothing.
+Help and Options temporarily use the sidebar page and return to the previous
+page afterward.
+
+Compact mode is selected from the available character-cell geometry, not the
+device name or portrait orientation. A phone landscape reported as `20 105` by
+`stty size` (20 rows by 105 columns) is compact because it is short; a portrait
+desktop monitor such as 60 rows by 100 columns retains the normal wide,
+multi-pane UI. Railmux waits until at least 84 columns and 26 rows are available
+before returning to wide mode, avoiding repeated changes around the boundary.
+The minimum usable workspace is 40 columns by 12 rows.
+
 ### Finding running sessions
 
 Plain text matches the visible session label, project, and provider without
@@ -466,6 +490,17 @@ tmux client, Railmux reads scrollback from the identity-validated real agent
 pane rather than the zero-history wrapper; it does not resize or alter the old
 session.
 Bracketed paste and terminal focus events follow the active remote application.
+
+On mobile terminals such as Termux, opening the soft keyboard may temporarily
+make `stty size` report fewer than 12 rows. At startup, `railmux ssh` waits in
+ordinary cooked mode for the keyboard to close instead of corrupting the remote
+layout. During an attached session, it keeps the remote logical terminal size
+unchanged and shows a bottom-anchored local projection so the tmux status bar
+and nearby input rows remain visible. Closing the keyboard restores and repaints
+the full view. This projection expects the terminal's column count to remain
+stable; close the keyboard before rotating the device. A terminal narrower than
+40 columns is rejected immediately; hide the keyboard or reduce the terminal
+font size before connecting.
 
 Both the ordinary launcher and SSH display keep a low-frequency watchdog
 outside the attached tmux client. Three consecutive dedicated-server health

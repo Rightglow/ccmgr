@@ -13,9 +13,15 @@ from railmux.ui.app import (
     _TMUX_BRAND_NORMAL,
     _TMUX_BRAND_ERROR,
     _TMUX_LEVEL_STYLE,
+    _compact_tmux_status_left,
     _tmux_status_left,
 )
-from railmux.ui.workspace import AgentWorkspace, WorkspaceLayout
+from railmux.ui.workspace import (
+    AgentWorkspace,
+    WorkspaceLayout,
+    WorkspacePage,
+    WorkspacePresentation,
+)
 
 
 def _status_app(*, enabled=True, session="railmux", codex_mode=False):
@@ -228,6 +234,64 @@ def test_status_left_pure_function():
 
     with_layout = _tmux_status_left(False, "Codex", "◨")
     assert with_layout.endswith("· Codex · ◨ #[default]")
+
+
+def test_compact_status_left_has_stable_phone_navigation_and_mode_abbreviation():
+    value, visible = _compact_tmux_status_left(
+        False,
+        "Claude Code",
+        WorkspacePage.PRIMARY,
+        ("%1", "%2", "%3"),
+        40,
+    )
+
+    assert "[R]" in value and "[1]" in value and "[2]" in value
+    assert " CC " in value
+    assert "#[fg=colour231][1]" in value
+    assert "#[fg=colour0][R]" in value
+    assert visible == len("[R][1][2] CC ")
+
+
+def test_compact_status_left_expands_without_shortening_tip_pool():
+    value, visible = _compact_tmux_status_left(
+        False,
+        "Codex",
+        WorkspacePage.SIDEBAR,
+        ("%1", "%2", "%3"),
+        105,
+    )
+
+    assert "[Railmux]" in value
+    assert "[Agent 1]" in value
+    assert "[Agent 2]" in value
+    assert " Codex " in value
+    assert visible == len("[Railmux][Agent 1][Agent 2] Codex ")
+
+
+def test_apply_bar_uses_dynamic_compact_left_length(monkeypatch):
+    run = MagicMock()
+    monkeypatch.setattr("subprocess.run", run)
+    app = _status_app()
+    app._workspace = AgentWorkspace()
+    app._workspace.presentation = WorkspacePresentation.COMPACT
+    app._workspace.compact_page = WorkspacePage.SIDEBAR
+    app._workspace.primary.pane_id = "%2"
+    app._railmux_pane_id = "%1"
+    app._last_workspace_size = (40, 20)
+    app._tmux_binding_manager = None
+
+    app._apply_tmux_bar(error=False)
+
+    lengths = _style_calls(run, "status-left-length")
+    assert lengths[-1] == str(len("[R][1][2] CC "))
+    right_lengths = _style_calls(run, "status-right-length")
+    assert right_lengths[-1] == str(40 - len("[R][1][2] CC "))
+
+    run.reset_mock()
+    app._workspace.presentation = WorkspacePresentation.WIDE
+    app._apply_tmux_bar(error=False)
+    assert _style_calls(run, "status-right-length")[-1] == str(
+        app._TMUX_STATUS_RIGHT_LENGTH)
 
 
 def test_status_left_keeps_layout_and_target_visible_across_focus(monkeypatch):

@@ -20,6 +20,10 @@ def _install_mocks(monkeypatch, tmp_path):
     right_click_backup = {
         "MouseDown3Pane": "bind-key -T root MouseDown3Pane display-menu",
     }
+    status_click_backup = {
+        "MouseDown1Status":
+        "bind-key -T root MouseDown1Status select-window -t =",
+    }
     monkeypatch.setattr(
         "railmux.tmux_binding_manager.restart_state.runtime_state_dir",
         lambda: tmp_path,
@@ -45,6 +49,10 @@ def _install_mocks(monkeypatch, tmp_path):
     monkeypatch.setattr(
         tmux_ctl, "prepare_selection_mode_hook", lambda: 9000)
     monkeypatch.setattr(
+        tmux_ctl, "prepare_root_status_click_binding",
+        lambda: status_click_backup,
+    )
+    monkeypatch.setattr(
         tmux_ctl, "read_root_function_bindings", lambda: backup)
     monkeypatch.setattr(
         tmux_ctl, "read_prefix_target_binding", lambda: prefix_backup)
@@ -52,14 +60,20 @@ def _install_mocks(monkeypatch, tmp_path):
         tmux_ctl, "read_root_right_click_binding",
         lambda: right_click_backup,
     )
+    monkeypatch.setattr(
+        tmux_ctl, "read_root_status_click_binding",
+        lambda: status_click_backup,
+    )
     install = MagicMock(return_value=True)
     restore = MagicMock()
     install.prefix = MagicMock(return_value=True)
     install.right_click = MagicMock(return_value=True)
     install.selection_hook = MagicMock(return_value=True)
+    install.status_click = MagicMock(return_value=True)
     restore.prefix = MagicMock()
     restore.right_click = MagicMock()
     restore.selection_hook = MagicMock()
+    restore.status_click = MagicMock()
     set_controller = MagicMock(return_value=True)
     unset_controller = MagicMock(return_value=True)
     monkeypatch.setattr(tmux_ctl, "set_root_function_forwarding", install)
@@ -77,6 +91,10 @@ def _install_mocks(monkeypatch, tmp_path):
     monkeypatch.setattr(
         tmux_ctl, "restore_selection_mode_hook", restore.selection_hook)
     monkeypatch.setattr(
+        tmux_ctl, "set_root_status_click_forwarding", install.status_click)
+    monkeypatch.setattr(
+        tmux_ctl, "restore_root_status_click_binding", restore.status_click)
+    monkeypatch.setattr(
         tmux_ctl, "root_function_bindings_owned_by", lambda _token: True)
     monkeypatch.setattr(
         tmux_ctl, "prefix_target_binding_owned_by", lambda _token: True)
@@ -90,6 +108,12 @@ def _install_mocks(monkeypatch, tmp_path):
         tmux_ctl, "selection_mode_hook_owned_by",
         lambda _index, _token: True,
     )
+    monkeypatch.setattr(
+        tmux_ctl, "root_status_click_binding_is_original_or_owned",
+        lambda _binding, _original, _token: True,
+    )
+    monkeypatch.setattr(
+        tmux_ctl, "root_status_click_binding_owned_by", lambda _token: True)
     monkeypatch.setattr(tmux_ctl, "set_window_user_option", set_controller)
     monkeypatch.setattr(
         tmux_ctl, "unset_window_user_option_if_value", unset_controller)
@@ -109,6 +133,7 @@ def test_multiple_owners_share_install_and_last_owner_restores(
     assert install.prefix.call_count == 1
     assert install.right_click.call_count == 1
     assert install.selection_hook.call_count == 1
+    assert install.status_click.call_count == 1
     assert set_controller.call_count == 2
     first.close()
     restore.assert_not_called()
@@ -119,6 +144,7 @@ def test_multiple_owners_share_install_and_last_owner_restores(
     restore.prefix.assert_called_once()
     restore.right_click.assert_called_once()
     restore.selection_hook.assert_called_once()
+    restore.status_click.assert_called_once()
     assert restore.call_args.args[0] == backup
 
 
@@ -157,7 +183,7 @@ def test_v1_function_lease_upgrades_in_place_with_new_bindings(
 
     def install_after_backup_is_durable(_backup, _token):
         persisted = json.loads(state_path.read_text())
-        assert persisted["version"] == 4
+        assert persisted["version"] == 5
         assert persisted["phase"] == "installing"
         assert persisted["prefix_tab_backup"] == {"Tab": None}
         assert persisted["right_click_backup"]["MouseDown3Pane"]
@@ -170,7 +196,7 @@ def test_v1_function_lease_upgrades_in_place_with_new_bindings(
 
     assert second.open()
     upgraded = json.loads(state_path.read_text())
-    assert upgraded["version"] == 4
+    assert upgraded["version"] == 5
     assert upgraded["prefix_tab_backup"] == {"Tab": None}
     assert upgraded["prefix_tab_managed"] is True
     assert upgraded["selection_hook_managed"] is True
@@ -192,6 +218,54 @@ def test_prefix_failure_keeps_function_keys_active(monkeypatch, tmp_path):
 
     manager.close()
     restore.assert_called_once()
+
+
+def test_v4_lease_upgrades_status_click_after_durable_backup(
+        monkeypatch, tmp_path):
+    _backup, install, _restore, _set, _unset = _install_mocks(
+        monkeypatch, tmp_path)
+    first = SharedTmuxBindingManager("server", "%1")
+    assert first.open()
+    state_path = first._state_path
+    assert state_path is not None
+    state = json.loads(state_path.read_text())
+    state["version"] = 4
+    del state["status_click_backup"]
+    del state["status_click_managed"]
+    state_path.write_text(json.dumps(state))
+    prior_calls = install.status_click.call_count
+
+    def installed_after_backup(_backup, _token):
+        persisted = json.loads(state_path.read_text())
+        assert persisted["version"] == 5
+        assert persisted["phase"] == "installing"
+        assert persisted["status_click_backup"]["MouseDown1Status"]
+        return True
+
+    install.status_click.side_effect = installed_after_backup
+    second = SharedTmuxBindingManager("server", "%2")
+
+    assert second.open()
+    assert second.status_navigation_available is True
+    assert install.status_click.call_count == prior_calls + 1
+
+
+def test_status_click_failure_disables_only_mouse_navigation(
+        monkeypatch, tmp_path):
+    _backup, install, restore, _set, _unset = _install_mocks(
+        monkeypatch, tmp_path)
+    install.status_click.return_value = False
+    manager = SharedTmuxBindingManager("server", "%1")
+
+    assert manager.open()
+    assert manager.status_navigation_available is False
+    assert manager.target_toggle_available is True
+    state = json.loads(manager._state_path.read_text())
+    assert state["status_click_managed"] is False
+
+    manager.close()
+    restore.assert_called_once()
+    restore.status_click.assert_called_once()
 
 
 def test_hook_failure_disables_only_selection_isolation(monkeypatch, tmp_path):
@@ -239,6 +313,22 @@ def test_live_owner_and_user_reload_fails_closed(monkeypatch, tmp_path):
     assert not SharedTmuxBindingManager("server", "%2").open()
     assert install.call_count == 1
     restore.assert_not_called()
+
+
+def test_live_owner_and_status_binding_reload_fails_closed(
+        monkeypatch, tmp_path):
+    _backup, install, restore, _set, _unset = _install_mocks(
+        monkeypatch, tmp_path)
+    first = SharedTmuxBindingManager("server", "%1")
+    assert first.open()
+    monkeypatch.setattr(
+        tmux_ctl, "root_status_click_binding_owned_by",
+        lambda _token: False,
+    )
+
+    assert not SharedTmuxBindingManager("server", "%2").open()
+    assert install.status_click.call_count == 1
+    restore.status_click.assert_not_called()
 
 
 def test_busy_coordination_lock_never_blocks_startup(monkeypatch, tmp_path):

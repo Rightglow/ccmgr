@@ -1720,6 +1720,7 @@ def test_real_tmux_binding_manager_round_trip_and_user_reload(
     original = tmux_ctl.read_root_function_bindings()
     original_prefix_tab = tmux_ctl.read_prefix_target_binding()
     original_right_click = tmux_ctl.read_root_right_click_binding()
+    original_status_click = tmux_ctl.read_root_status_click_binding()
     assert original["F8"] is not None and original["F9"] is None
 
     manager = SharedTmuxBindingManager("integration-server", owner_pane)
@@ -1728,6 +1729,8 @@ def test_real_tmux_binding_manager_round_trip_and_user_reload(
     current_prefix_tab = tmux_ctl.read_prefix_target_binding()["Tab"]
     current_right_click = (
         tmux_ctl.read_root_right_click_binding()["MouseDown3Pane"])
+    current_status_click = (
+        tmux_ctl.read_root_status_click_binding()["MouseDown1Status"])
     assert all(
         binding is not None
         and "railmux-function-forward-v1-" in binding
@@ -1742,6 +1745,15 @@ def test_real_tmux_binding_manager_round_trip_and_user_reload(
     assert "railmux-right-click-forward-v1-" in current_right_click
     assert "select-pane -t =" in current_right_click
     assert "send-keys -M" in current_right_click
+    if tmux_ctl.tmux_version() >= (3, 4):
+        assert manager.status_navigation_available
+        assert current_status_click is not None
+        assert "railmux-status-pane-v1-" in current_status_click
+        assert "mouse_status_range" in current_status_click
+        assert "select-pane -Z -t" in current_status_click
+    else:
+        assert not manager.status_navigation_available
+        assert current_status_click == original_status_click["MouseDown1Status"]
     assert tmux_ctl.show_window_user_option(
         owner_pane, tmux_ctl.RAILMUX_CONTROLLER_OPTION) == owner_pane
     subprocess.run(["tmux", "set-option", "-g", "mouse", "on"], check=True)
@@ -1821,6 +1833,8 @@ def test_real_tmux_binding_manager_round_trip_and_user_reload(
         assert tmux_ctl.set_window_user_option(
             owner_pane, tmux_ctl.RAILMUX_TARGET_OPTION, other_pane)
         subprocess.run(
+            ["tmux", "resize-pane", "-Z", "-t", other_pane], check=True)
+        subprocess.run(
             ["tmux", "send-keys", "-K", "-c", client_name, "C-b"],
             check=True,
         )
@@ -1830,6 +1844,11 @@ def test_real_tmux_binding_manager_round_trip_and_user_reload(
         )
         assert _wait_until(
             lambda: tmux_ctl.active_pane_id(owner_pane) == owner_pane)
+        assert subprocess.check_output(
+            ["tmux", "display-message", "-p", "-t", owner_pane,
+             "#{window_zoomed_flag}"],
+            text=True,
+        ).strip() == "1"
         subprocess.run(
             ["tmux", "send-keys", "-K", "-c", client_name, "C-b"],
             check=True,
@@ -1840,6 +1859,11 @@ def test_real_tmux_binding_manager_round_trip_and_user_reload(
         )
         assert _wait_until(
             lambda: tmux_ctl.active_pane_id(owner_pane) == other_pane)
+        assert subprocess.check_output(
+            ["tmux", "display-message", "-p", "-t", other_pane,
+             "#{window_zoomed_flag}"],
+            text=True,
+        ).strip() == "1"
         subprocess.run(
             ["tmux", "detach-client", "-t", client_name], check=True)
         output = client_process.communicate(timeout=2)[0]
@@ -1863,8 +1887,86 @@ def test_real_tmux_binding_manager_round_trip_and_user_reload(
     assert restored["F9"] is not None and "new-user-f9" in restored["F9"]
     assert tmux_ctl.read_prefix_target_binding() == original_prefix_tab
     assert tmux_ctl.read_root_right_click_binding() == original_right_click
+    assert tmux_ctl.read_root_status_click_binding() == original_status_click
     assert tmux_ctl.show_window_user_option(
         owner_pane, tmux_ctl.RAILMUX_CONTROLLER_OPTION) is None
+
+
+def test_real_tmux_status_pane_range_selects_and_keeps_zoom(
+        isolated_tmux, monkeypatch, tmp_path):
+    """A compact status control targets its declared pane, not the pane below."""
+    if tmux_ctl.tmux_version() < (3, 4):
+        pytest.skip("pane-ID user status ranges need tmux 3.4")
+    display_session, owner_pane, socket_path = isolated_tmux
+    monkeypatch.setattr(
+        "railmux.tmux_binding_manager.restart_state.runtime_state_dir",
+        lambda: tmp_path,
+    )
+    manager = SharedTmuxBindingManager("status-range-server", owner_pane)
+    assert manager.open()
+    assert manager.status_navigation_available
+    subprocess.run(["tmux", "set-option", "-g", "mouse", "on"], check=True)
+    other_pane = subprocess.check_output(
+        [
+            "tmux", "split-window", "-h", "-t", owner_pane,
+            "-P", "-F", "#{pane_id}", "sleep 60",
+        ],
+        text=True,
+    ).strip()
+    subprocess.run(
+        [
+            "tmux", "set-option", "-t", display_session, "status-left",
+            tmux_ctl.status_pane_range(owner_pane, "[R]"),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        ["tmux", "set-option", "-t", display_session,
+         "status-left-length", "3"],
+        check=True,
+    )
+    subprocess.run(
+        ["tmux", "resize-pane", "-Z", "-t", other_pane], check=True)
+    client = subprocess.Popen(
+        _script_command(
+            f"env TERM=xterm-256color tmux -S {shlex.quote(socket_path)} "
+            f"attach-session -t {shlex.quote(display_session)}"
+        ),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    try:
+        assert _wait_until(
+            lambda: bool(subprocess.check_output(
+                ["tmux", "list-clients", "-F", "#{client_name}"],
+                text=True,
+            ).strip())
+        )
+        client_name = subprocess.check_output(
+            ["tmux", "list-clients", "-F", "#{client_name}"],
+            text=True,
+        ).strip()
+        client_height = int(subprocess.check_output(
+            ["tmux", "display-message", "-p", "-c", client_name,
+             "#{client_height}"],
+            text=True,
+        ).strip())
+        assert client.stdin is not None
+        client.stdin.write(f"\x1b[<0;2;{client_height}M".encode())
+        client.stdin.flush()
+        assert _wait_until(
+            lambda: tmux_ctl.active_pane_id(owner_pane) == owner_pane)
+        assert subprocess.check_output(
+            ["tmux", "display-message", "-p", "-t", owner_pane,
+             "#{window_zoomed_flag}"],
+            text=True,
+        ).strip() == "1"
+    finally:
+        if client.poll() is None:
+            client.kill()
+            client.wait()
+        manager.close()
 
 
 def test_real_selection_isolation_freezes_only_sibling_agent(

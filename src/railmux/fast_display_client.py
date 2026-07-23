@@ -65,6 +65,11 @@ _REMOTE_ATTACH_RETRY_DELAY = 0.2
 _HEARTBEAT_INTERVAL = 5.0
 _DISPLAY_MAGIC_PREFIX = b"RMUXD"
 _REMOTE_VENV = ".local/share/railmux/ssh-venv"
+_MIN_TERMINAL_COLUMNS = 40
+_MIN_TERMINAL_LINES = 12
+_MAX_TERMINAL_COLUMNS = 1000
+_MAX_TERMINAL_LINES = 500
+_TERMINAL_SIZE_POLL_INTERVAL = 0.1
 
 
 @dataclass(frozen=True)
@@ -309,6 +314,19 @@ class SgrMouseEvent:
         if not self.pressed or not self.button & 64 or base_button not in (0, 1):
             return 0
         return -1 if base_button == 1 else 1
+
+    def translated_y(self, offset: int) -> "SgrMouseEvent":
+        """Translate a local projected row back into remote screen space."""
+        if offset == 0:
+            return self
+        y = self.y + offset
+        terminator = b"M" if self.pressed else b"m"
+        raw = (
+            _SGR_MOUSE_PREFIX
+            + f"{self.button};{self.x};{y}".encode()
+            + terminator
+        )
+        return replace(self, raw=raw, y=y)
 
 
 class TerminalInputDecoder:
@@ -799,6 +817,68 @@ def split_local_escape(data: bytes) -> tuple[bytes, bool]:
     return data[:escape_at], True
 
 
+def _terminal_size_is_usable(size: os.terminal_size) -> bool:
+    return (
+        size.columns >= _MIN_TERMINAL_COLUMNS
+        and size.lines >= _MIN_TERMINAL_LINES
+    )
+
+
+def _terminal_size_exceeds_limits(size: os.terminal_size) -> bool:
+    return (
+        size.columns > _MAX_TERMINAL_COLUMNS
+        or size.lines > _MAX_TERMINAL_LINES
+    )
+
+
+def wait_for_usable_terminal_size(fd: int) -> os.terminal_size:
+    """Wait in cooked mode for a soft-keyboard-sized terminal to recover."""
+    reported: os.terminal_size | None = None
+    while True:
+        size = os.get_terminal_size(fd)
+        if _terminal_size_exceeds_limits(size):
+            raise ProbeError(
+                "local terminal reports "
+                f"{size.columns}x{size.lines}; SSH display limits are "
+                f"{_MAX_TERMINAL_COLUMNS}x{_MAX_TERMINAL_LINES}"
+            )
+        if _terminal_size_is_usable(size):
+            if reported is not None:
+                print(
+                    "railmux ssh: local terminal is now "
+                    f"{size.columns}x{size.lines}; continuing",
+                    file=sys.stderr,
+                )
+            return size
+        if size.columns < _MIN_TERMINAL_COLUMNS:
+            raise ProbeError(
+                "local terminal reports "
+                f"{size.columns}x{size.lines}; SSH display requires at least "
+                f"{_MIN_TERMINAL_COLUMNS}x{_MIN_TERMINAL_LINES}"
+            )
+        if size != reported:
+            print(
+                "railmux ssh: local terminal reports "
+                f"{size.columns}x{size.lines}; waiting for at least "
+                f"{_MIN_TERMINAL_COLUMNS}x{_MIN_TERMINAL_LINES} "
+                "(hide the soft keyboard; Ctrl-C cancels)",
+                file=sys.stderr,
+            )
+            reported = size
+        time.sleep(_TERMINAL_SIZE_POLL_INTERVAL)
+
+
+def _is_soft_keyboard_projection(
+    physical_size: os.terminal_size,
+    logical_size: os.terminal_size,
+) -> bool:
+    """Recognize the same-width, short-height resize used by soft keyboards."""
+    return (
+        physical_size.columns == logical_size.columns
+        and 0 < physical_size.lines < _MIN_TERMINAL_LINES
+    )
+
+
 class RawTerminal:
     def __init__(self, fd: int) -> None:
         self.fd = fd
@@ -823,6 +903,28 @@ class TerminalSurface:
         self.mouse = mouse
         self.active = False
         self.terminal_modes = TerminalMode.NONE
+        self.physical_size: os.terminal_size | None = None
+
+    def set_physical_size(self, size: os.terminal_size) -> None:
+        """Set the local viewport without changing the remote screen geometry."""
+        self.physical_size = size
+
+    def _projection(self, screen_height: int) -> tuple[int, int]:
+        visible_height = screen_height
+        if self.physical_size is not None:
+            visible_height = min(visible_height, self.physical_size.lines)
+        visible_height = max(0, visible_height)
+        return screen_height - visible_height, visible_height
+
+    def translate_mouse_event(
+        self,
+        event: SgrMouseEvent,
+        *,
+        logical_height: int,
+    ) -> SgrMouseEvent:
+        """Map an SGR report from the bottom-anchored viewport to tmux."""
+        top, _visible_height = self._projection(logical_height)
+        return event.translated_y(top)
 
     def start(self) -> None:
         if self.active:
@@ -869,16 +971,29 @@ class TerminalSurface:
     def _append_overlay_rows(
         rendered: list[bytes],
         overlays: tuple[tuple[HistorySnapshot, tuple[bytes, ...]], ...],
+        *,
+        projection_top: int = 0,
+        visible_height: int | None = None,
         changed_rows: frozenset[int] | None = None,
     ) -> None:
         for snapshot, lines in overlays:
             for index in range(snapshot.height):
                 row = snapshot.y + index
+                if (
+                    visible_height is not None
+                    and not projection_top
+                    <= row
+                    < projection_top + visible_height
+                ):
+                    continue
                 if changed_rows is not None and row not in changed_rows:
                     continue
                 line = lines[index] if index < len(lines) else b""
                 rendered.extend((
-                    f"\033[{row + 1};{snapshot.x + 1}H".encode(),
+                    (
+                        f"\033[{row - projection_top + 1};"
+                        f"{snapshot.x + 1}H"
+                    ).encode(),
                     f"\033[{snapshot.width}X".encode(),
                     line,
                 ))
@@ -889,13 +1004,28 @@ class TerminalSurface:
         rendered: list[bytes],
         screen: AppliedScreen,
         overlays: tuple[tuple[HistorySnapshot, tuple[bytes, ...]], ...],
+        *,
+        projection_top: int = 0,
+        visible_height: int | None = None,
     ) -> None:
+        cursor_in_projection = (
+            visible_height is None
+            or projection_top
+            <= screen.cursor_y
+            < projection_top + visible_height
+        )
         rendered.extend((
             b"\033[0m\033[?7h",
-            f"\033[{screen.cursor_y + 1};{screen.cursor_x + 1}H".encode(),
+            (
+                f"\033[{screen.cursor_y - projection_top + 1};"
+                f"{screen.cursor_x + 1}H"
+            ).encode()
+            if cursor_in_projection
+            else b"\033[1;1H",
             (
                 b"\033[?25h"
                 if screen.cursor_visible
+                and cursor_in_projection
                 and not cls._cursor_is_covered(screen, overlays)
                 else b"\033[?25l"
             ),
@@ -908,19 +1038,36 @@ class TerminalSurface:
     ) -> None:
         self.start()
         self._reconcile_terminal_modes(screen.terminal_modes)
+        projection_top, visible_height = self._projection(screen.height)
         rendered = [b"\033[?7l"]
         if screen.clear:
             rendered.append(b"\033[0m\033[2J")
         for row_index in screen.changed_rows:
+            if not (
+                projection_top
+                <= row_index
+                < projection_top + visible_height
+            ):
+                continue
             rendered.extend((
-                f"\033[{row_index + 1};1H".encode(),
+                f"\033[{row_index - projection_top + 1};1H".encode(),
                 b"\033[2K",
                 screen.rows[row_index],
             ))
         self._append_overlay_rows(
-            rendered, overlays, frozenset(screen.changed_rows)
+            rendered,
+            overlays,
+            projection_top=projection_top,
+            visible_height=visible_height,
+            changed_rows=frozenset(screen.changed_rows),
         )
-        self._append_cursor(rendered, screen, overlays)
+        self._append_cursor(
+            rendered,
+            screen,
+            overlays,
+            projection_top=projection_top,
+            visible_height=visible_height,
+        )
         self.stream.write(b"".join(rendered))
         self.stream.flush()
 
@@ -930,9 +1077,21 @@ class TerminalSurface:
         overlays: tuple[tuple[HistorySnapshot, tuple[bytes, ...]], ...],
     ) -> None:
         self.start()
+        projection_top, visible_height = self._projection(screen.height)
         rendered: list[bytes] = [b"\033[?7l"]
-        self._append_overlay_rows(rendered, overlays)
-        self._append_cursor(rendered, screen, overlays)
+        self._append_overlay_rows(
+            rendered,
+            overlays,
+            projection_top=projection_top,
+            visible_height=visible_height,
+        )
+        self._append_cursor(
+            rendered,
+            screen,
+            overlays,
+            projection_top=projection_top,
+            visible_height=visible_height,
+        )
         self.stream.write(b"".join(rendered))
         self.stream.flush()
 
@@ -1405,6 +1564,7 @@ def prepare_remote_process(
     process = _spawn_remote(argv)
     startup = await_remote_startup(process)
     install_version = __version__
+    optional_compatible_upgrade = False
 
     install_reason: str | None = None
     if startup.kind is RemoteStartKind.MISSING:
@@ -1427,6 +1587,9 @@ def prepare_remote_process(
         versions = _version_pair(hello.version)
         remote_is_newer = bool(
             versions is not None and versions[1] > versions[0]
+        )
+        remote_is_older = bool(
+            versions is not None and versions[1] < versions[0]
         )
         if remote_is_newer:
             protocol_note = (
@@ -1475,6 +1638,13 @@ def prepare_remote_process(
                 f"Remote Railmux {hello.version} is missing its SSH display "
                 "dependency."
             )
+        elif remote_is_older:
+            install_reason = (
+                f"Remote Railmux {hello.version} is older than local "
+                f"{__version__}, although SSH protocol v{PROTOCOL_VERSION} "
+                "is compatible."
+            )
+            optional_compatible_upgrade = True
         else:
             if not remote_is_newer and hello.version != __version__:
                 print(
@@ -1487,6 +1657,13 @@ def prepare_remote_process(
 
     assert install_reason is not None
     if not _confirm_remote_install(args, install_reason, install_version):
+        if optional_compatible_upgrade:
+            print(
+                f"warning: continuing with compatible remote Railmux "
+                f"{startup.hello.version}",
+                file=sys.stderr,
+            )
+            return _finish_remote_attach(args, current_size, process)
         _stop_unstarted_remote(process)
         raise ProbeError(remote_install_help(args.destination, install_version))
     _stop_unstarted_remote(process)
@@ -1574,14 +1751,17 @@ def run(args: argparse.Namespace) -> int:
     if shutil.which("ssh") is None:
         raise ProbeError("ssh is not installed or not on PATH")
 
-    current_size = os.get_terminal_size(sys.stdout.fileno())
-    if current_size.columns < 40 or current_size.lines < 12:
-        raise ProbeError("local terminal must be at least 40x12")
-    if current_size.columns > 1000 or current_size.lines > 500:
-        raise ProbeError("local terminal exceeds SSH display limits of 1000x500")
+    try:
+        current_size = wait_for_usable_terminal_size(sys.stdout.fileno())
+    except KeyboardInterrupt:
+        print("\nrailmux ssh: cancelled while waiting for terminal size",
+              file=sys.stderr)
+        return 130
     process = prepare_remote_process(args, current_size)
 
     surface = TerminalSurface(sys.stdout.buffer, mouse=not args.no_mouse)
+    surface.set_physical_size(current_size)
+    local_size = current_size
     decoder = ServerMessageDecoder()
     model = ScreenModel()
     terminal_input = TerminalInputDecoder()
@@ -1625,6 +1805,9 @@ def run(args: argparse.Namespace) -> int:
     ) -> None:
         nonlocal route_refresh_needed
         if isinstance(part, SgrMouseEvent):
+            part = surface.translate_mouse_event(
+                part, logical_height=current_size.lines
+            )
             # Keep a frozen viewport stable across reported clicks and drags.
             # Terminal-native selection overrides never arrive here.
             focused_pane_id = (
@@ -1678,23 +1861,55 @@ def run(args: argparse.Namespace) -> int:
         with RawTerminal(sys.stdin.fileno()):
             while True:
                 observed_size = os.get_terminal_size(sys.stdout.fileno())
-                if observed_size != current_size:
-                    if observed_size.columns < 40 or observed_size.lines < 12:
-                        raise ProbeError("resized terminal is smaller than 40x12")
-                    if observed_size.columns > 1000 or observed_size.lines > 500:
+                if observed_size != local_size:
+                    if _terminal_size_exceeds_limits(observed_size):
                         raise ProbeError(
-                            "resized terminal exceeds SSH display limits"
+                            "resized terminal reports "
+                            f"{observed_size.columns}x{observed_size.lines}; "
+                            "SSH display limits are "
+                            f"{_MAX_TERMINAL_COLUMNS}x{_MAX_TERMINAL_LINES}"
                         )
-                    if history.active and latest_screen is not None:
-                        surface.paint(full_repaint(latest_screen))
-                    history.clear_cache()
-                    route_refresh_needed = True
-                    process.stdin.write(encode_resize(
-                        observed_size.columns, observed_size.lines
-                    ))
-                    process.stdin.flush()
-                    current_size = observed_size
-                    awaiting_keyframe = True
+                    if _is_soft_keyboard_projection(
+                        observed_size, current_size
+                    ):
+                        surface.set_physical_size(observed_size)
+                        local_size = observed_size
+                        if latest_screen is not None:
+                            surface.paint(
+                                full_repaint(latest_screen),
+                                history.overlays(),
+                            )
+                    elif not _terminal_size_is_usable(observed_size):
+                        raise ProbeError(
+                            "resized terminal reports "
+                            f"{observed_size.columns}x{observed_size.lines}; "
+                            "the minimum is "
+                            f"{_MIN_TERMINAL_COLUMNS}x"
+                            f"{_MIN_TERMINAL_LINES}"
+                        )
+                    elif observed_size == current_size:
+                        # The soft keyboard closed. Restore the complete
+                        # logical screen even if no remote patch is pending.
+                        surface.set_physical_size(observed_size)
+                        local_size = observed_size
+                        if latest_screen is not None:
+                            surface.paint(
+                                full_repaint(latest_screen),
+                                history.overlays(),
+                            )
+                    else:
+                        surface.set_physical_size(observed_size)
+                        local_size = observed_size
+                        if history.active and latest_screen is not None:
+                            surface.paint(full_repaint(latest_screen))
+                        history.clear_cache()
+                        route_refresh_needed = True
+                        process.stdin.write(encode_resize(
+                            observed_size.columns, observed_size.lines
+                        ))
+                        process.stdin.flush()
+                        current_size = observed_size
+                        awaiting_keyframe = True
                 events = selector.select(timeout=terminal_input.next_timeout())
                 for key, _mask in events:
                     if key.data == "remote":

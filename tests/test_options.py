@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 from railmux.settings import LayoutProfile, Settings
 from railmux.ui.app import App
 from railmux.ui.modals import OptionsModal
+from railmux.ui.workspace import WorkspacePresentation
 
 
 def _app(tmp_path, monkeypatch) -> App:
@@ -35,6 +36,8 @@ def test_options_layout_choices_persist_and_update_live_preference(
 
     modal._option_rows["layout"][0].keypress((60,), "enter")
     assert app._settings.layout_save_policy == "always"
+    # Captured before the full-sidebar Options zoom, never from its geometry.
+    app._capture_layout_profile.assert_called_once_with("always")
     assert app._settings.layout_profile == LayoutProfile(
         "always", "single", 300)
     assert app._layout_profile == app._settings.layout_profile
@@ -43,6 +46,24 @@ def test_options_layout_choices_persist_and_update_live_preference(
     assert app._settings.layout_save_policy == "never"
     assert app._settings.layout_profile is None
     assert app._layout_profile is None
+
+
+def test_options_always_preserves_saved_wide_profile_in_compact_view(
+    tmp_path, monkeypatch,
+):
+    app = _app(tmp_path, monkeypatch)
+    saved = LayoutProfile("once", "stacked", 240, 600)
+    assert app._settings.set_layout_save_policy("ask", saved)
+    app._layout_profile = saved
+    app._agent_workspace().presentation = WorkspacePresentation.COMPACT
+
+    app._open_options_modal()
+    modal = app._open_full_sidebar_modal.call_args.args[0]
+    modal._option_rows["layout"][0].keypress((60,), "enter")
+
+    assert app._capture_layout_profile.call_count == 0
+    assert app._settings.layout_profile == LayoutProfile(
+        "always", "stacked", 240, 600)
 
 
 def test_options_yolo_policy_changes_only_future_launches(tmp_path, monkeypatch):

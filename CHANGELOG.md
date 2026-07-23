@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-07-23
+
+### Added
+
+- Add a responsive compact workspace for phones and other terminals with fewer
+  than 80 columns or 24 rows. It presents the existing sidebar and up to two
+  agent panes as full-window `[R]`, `[1]`, and `[2]` pages, keeps F8 layout
+  state intact, and returns to the wide workspace only after both dimensions
+  clear a hysteresis threshold. Large portrait monitors therefore keep the
+  normal multi-pane UI.
+- Make compact status navigation clickable on tmux 3.4 and newer, with
+  crash-safe shared binding ownership and exact restoration of a user's prior
+  binding. `Ctrl-B Tab` remains the portable fallback on older tmux versions.
+- Let `railmux ssh` survive a mobile soft keyboard temporarily reducing the
+  reported terminal below 12 rows. The local client keeps the remote logical
+  size stable and shows a bottom-anchored projection containing the status and
+  input area, then repaints the full display when the keyboard closes.
+- Offer to upgrade an older remote Railmux to the local version even when its
+  private SSH protocol remains compatible; declining continues safely with the
+  compatible helper.
+
+### Fixed
+
+- Preserve pre-existing F9 zoom across compact-mode transitions and full-sidebar
+  Help or Options screens, and prevent compact modal geometry from overwriting
+  a saved wide-layout profile.
+- Keep compact status content within the available width, preserve zoom while
+  switching pages, and avoid rejecting valid phone landscapes such as
+  105 columns by 20 rows.
+- Reject terminals narrower than 40 columns immediately instead of waiting
+  indefinitely for a soft-keyboard recovery that cannot increase their width.
+
 ## [0.2.4] - 2026-07-22
 
 ### Added
@@ -572,7 +604,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial PyPI release under the Railmux name.
 
-[Unreleased]: https://github.com/Rightglow/Railmux/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/Rightglow/Railmux/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/Rightglow/Railmux/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/Rightglow/Railmux/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/Rightglow/Railmux/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/Rightglow/Railmux/compare/v0.2.1...v0.2.2

@@ -550,12 +550,68 @@ def test_root_right_click_restore_does_not_overwrite_user_change():
     call.assert_not_called()
 
 
+def test_status_pane_range_requires_tmux_34_and_valid_pane():
+    with patch.object(tmux_ctl, "tmux_version", return_value=(3, 3)):
+        assert tmux_ctl.status_pane_range("%7", "[1]") == "[1]"
+    with patch.object(tmux_ctl, "tmux_version", return_value=(3, 4)):
+        assert tmux_ctl.status_pane_range("%7", "#[fg=white][1]") == (
+            "#[range=user|%7]#[fg=white][1]#[norange]"
+        )
+        try:
+            tmux_ctl.status_pane_range("session:0.1", "[1]")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("unsafe pane target was accepted")
+
+
+def test_root_status_click_scopes_pane_range_and_keeps_zoom():
+    backup = {
+        "MouseDown1Status":
+        "bind-key -T root MouseDown1Status select-window -t =",
+    }
+    with patch.object(tmux_ctl, "tmux_version", return_value=(3, 4)), \
+            _mock_check_call() as call:
+        assert tmux_ctl.set_root_status_click_forwarding(
+            backup, "owner123")
+
+    argv = call.call_args.args[0]
+    assert argv[:5] == [
+        "tmux", "bind-key", "-T", "root", "MouseDown1Status"]
+    assert argv[5:9] == ["if-shell", "-F", "-t", "="]
+    assert "mouse_status_range" in argv[9]
+    assert tmux_ctl.RAILMUX_CONTROLLER_OPTION in argv[9]
+    assert "railmux-status-pane-v1-owner123" in argv[9]
+    assert "tmux select-pane -Z -t '#{mouse_status_range}'" in argv[10]
+    assert argv[-1] == "select-window -t ="
+
+
+def test_root_status_click_declines_old_tmux_and_preserves_user_reload():
+    with patch.object(tmux_ctl, "tmux_version", return_value=(3, 3)), \
+            patch.object(tmux_ctl, "read_root_status_click_binding") as read:
+        assert tmux_ctl.prepare_root_status_click_binding() is None
+        read.assert_not_called()
+
+    backup = {"MouseDown1Status": None}
+    current = {
+        "MouseDown1Status": (
+            "bind-key -T root MouseDown1Status display-message user-custom"),
+    }
+    with patch.object(
+            tmux_ctl, "read_root_status_click_binding",
+            return_value=current), _mock_check_call() as call:
+        tmux_ctl.restore_root_status_click_binding(
+            backup, token="owner123")
+    call.assert_not_called()
+
+
 def test_prefix_target_binding_scopes_toggle_and_preserves_fallback():
     backup = {
         "Tab": "bind-key -T prefix Tab display-message original-tab",
     }
 
-    with _mock_check_call() as call:
+    with patch.object(tmux_ctl, "tmux_version", return_value=(3, 4)), \
+            _mock_check_call() as call:
         assert tmux_ctl.set_prefix_target_binding(backup, "owner123")
 
     argv = call.call_args.args[0]
@@ -563,7 +619,20 @@ def test_prefix_target_binding_scopes_toggle_and_preserves_fallback():
     assert any("railmux-target-toggle-v1-owner123" in arg for arg in argv)
     assert any(tmux_ctl.RAILMUX_CONTROLLER_OPTION in arg for arg in argv)
     assert any(tmux_ctl.RAILMUX_TARGET_OPTION in arg for arg in argv)
+    assert "select-pane -Z" in argv[-2]
     assert argv[-1] == "display-message original-tab"
+
+
+def test_prefix_target_pre_31_reapplies_zoom_only_when_needed():
+    with patch.object(tmux_ctl, "tmux_version", return_value=(3, 0)), \
+            _mock_check_call() as call:
+        assert tmux_ctl.set_prefix_target_binding({"Tab": None}, "owner123")
+
+    toggle = call.call_args.args[0][-2]
+    assert "window_zoomed_flag" in toggle
+    assert "tmux select-pane -t" in toggle
+    assert "tmux resize-pane -Z" in toggle
+    assert '!= 1' in toggle
 
 
 def test_unbound_prefix_target_fallback_is_noop():

@@ -1360,6 +1360,7 @@ ScrollBindingBackup = dict[tuple[str, str], Optional[str]]
 RootWheelBindingBackup = dict[str, Optional[str]]
 RootFunctionBindingBackup = dict[str, Optional[str]]
 RootRightClickBindingBackup = dict[str, Optional[str]]
+RootStatusClickBindingBackup = dict[str, Optional[str]]
 PrefixTargetBindingBackup = dict[str, Optional[str]]
 _ROOT_WHEEL_KEYS = ("WheelUpPane", "WheelDownPane")
 _ROOT_WHEEL_MARKER = "railmux-wheel-forward-v1"
@@ -1367,6 +1368,8 @@ _ROOT_FUNCTION_KEYS = ("F8", "F9")
 _ROOT_FUNCTION_MARKER = "railmux-function-forward-v1"
 _ROOT_RIGHT_CLICK_KEY = "MouseDown3Pane"
 _ROOT_RIGHT_CLICK_MARKER = "railmux-right-click-forward-v1"
+_ROOT_STATUS_CLICK_KEY = "MouseDown1Status"
+_ROOT_STATUS_CLICK_MARKER = "railmux-status-pane-v1"
 _PREFIX_TARGET_KEY = "Tab"
 _PREFIX_TARGET_MARKER = "railmux-target-toggle-v1"
 RAILMUX_CONTROLLER_OPTION = "@railmux_controller_pane"
@@ -1375,6 +1378,55 @@ RAILMUX_SELECTION_KEY_OPTION = "@railmux_selection_key"
 RAILMUX_SELECTION_PEER_OPTION = "@railmux_selection_peer"
 RAILMUX_SELECTION_FROZEN_OPTION = "@railmux_selection_frozen_by"
 _SELECTION_HOOK_MARKER = "railmux-selection-hook-v1"
+
+
+def status_pane_ranges_supported() -> bool:
+    """Whether tmux can target a pane from a status-format mouse range.
+
+    User status ranges and ``mouse_status_range`` were added in tmux 3.4.
+    Older servers keep the compact keyboard navigation but receive no status
+    mouse wrapper and no range markup.
+    """
+    return tmux_version() >= (3, 4)
+
+
+def status_pane_range(pane_id: str, content: str) -> str:
+    """Make *content* a clickable status range targeting *pane_id*.
+
+    The pane ID is deliberately strict because this string becomes tmux
+    format syntax.  Callers may include their own style sequences in content.
+    Unsupported tmux versions return the content unchanged.
+    """
+    if not re.fullmatch(r"%[0-9]+", pane_id):
+        raise ValueError(f"invalid tmux pane id: {pane_id!r}")
+    if not status_pane_ranges_supported():
+        return content
+    # A pane range sets ``mouse_status_range`` to only the literal ``pane``;
+    # ``=`` still resolves to the pane geometrically below the status cell,
+    # not to X. A user range preserves the strict pane ID as its argument, so
+    # the managed binding can select the intended compact page explicitly.
+    return f"#[range=user|{pane_id}]{content}#[norange]"
+
+
+def _select_pane_preserving_zoom_shell(target: str) -> str:
+    """Return shell source selecting *target* without losing window zoom."""
+    if tmux_version() >= (3, 1):
+        return f"tmux select-pane -Z -t {shlex.quote(target)}"
+    quoted = shlex.quote(target)
+    # select-pane before 3.1 has no -Z.  Only reapply zoom when the window was
+    # zoomed and selecting the target actually removed it; blindly toggling
+    # resize-pane -Z would unzoom servers which already preserved the state.
+    zoom_probe = (
+        f"tmux display-message -p -t {quoted} "
+        "'#{window_zoomed_flag}'"
+    )
+    return (
+        f"railmux_was_zoomed=$({zoom_probe}); "
+        f"tmux select-pane -t {quoted} || exit; "
+        'if [ "$railmux_was_zoomed" = 1 ] && '
+        f'[ "$({zoom_probe})" != 1 ]; then '
+        f"tmux resize-pane -Z -t {quoted}; fi"
+    )
 
 
 def prepare_selection_mode_hook() -> int | None:
@@ -1933,6 +1985,125 @@ def restore_root_right_click_binding(
         pass
 
 
+def read_root_status_click_binding() -> RootStatusClickBindingBackup:
+    """Capture the root binding used for pane ranges in the status line."""
+    return {
+        _ROOT_STATUS_CLICK_KEY:
+        _read_key_binding("root", _ROOT_STATUS_CLICK_KEY),
+    }
+
+
+def prepare_root_status_click_binding() -> RootStatusClickBindingBackup | None:
+    """Return a replayable status-click binding, or decline management."""
+    if not status_pane_ranges_supported():
+        return None
+    backup = read_root_status_click_binding()
+    binding = backup[_ROOT_STATUS_CLICK_KEY]
+    if binding and _ROOT_STATUS_CLICK_MARKER in binding:
+        return None
+    if binding is not None:
+        try:
+            _binding_command(binding)
+        except ValueError:
+            return None
+    return backup
+
+
+def set_root_status_click_forwarding(
+    backup: RootStatusClickBindingBackup, token: str,
+) -> bool:
+    """Select Railmux pane-ID user ranges and replay all other status clicks."""
+    if not status_pane_ranges_supported():
+        return False
+    marker = f"{_ROOT_STATUS_CLICK_MARKER}-{token}"
+    condition = (
+        "#{&&:"
+        "#{m/r:^%[0-9]+$,#{mouse_status_range}},"
+        "#{!=:#{@railmux_controller_pane},},"
+        f"#{{==:{marker},{marker}}}}}"
+    )
+    original = backup.get(_ROOT_STATUS_CLICK_KEY)
+    try:
+        fallback = (
+            _binding_command(original)
+            if original is not None else 'run-shell "true"'
+        )
+        subprocess.check_call(
+            [
+                "tmux", "bind-key", "-T", "root", _ROOT_STATUS_CLICK_KEY,
+                "if-shell", "-F", "-t", "=", condition,
+                (
+                    'run-shell "tmux select-pane -Z -t '
+                    "'#{mouse_status_range}'"
+                    '"'
+                ),
+                fallback,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except (ValueError, subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
+def root_status_click_binding_owned_by(token: str) -> bool:
+    marker = f"{_ROOT_STATUS_CLICK_MARKER}-{token}"
+    binding = read_root_status_click_binding().get(_ROOT_STATUS_CLICK_KEY)
+    return bool(
+        binding
+        and marker in binding
+        and RAILMUX_CONTROLLER_OPTION in binding
+        and "mouse_status_range" in binding
+        and "select-pane -Z -t" in binding
+    )
+
+
+def root_status_click_binding_is_original_or_owned(
+    binding: str | None,
+    original: str | None,
+    token: str,
+) -> bool:
+    if binding == original:
+        return True
+    marker = f"{_ROOT_STATUS_CLICK_MARKER}-{token}"
+    return bool(binding and marker in binding)
+
+
+def restore_root_status_click_binding(
+    backup: RootStatusClickBindingBackup, *, token: str,
+) -> None:
+    """Restore MouseDown1Status only while the live wrapper is still ours."""
+    live = read_root_status_click_binding().get(_ROOT_STATUS_CLICK_KEY)
+    marker = f"{_ROOT_STATUS_CLICK_MARKER}-{token}"
+    if live is None or marker not in live:
+        return
+    original = backup.get(_ROOT_STATUS_CLICK_KEY)
+    try:
+        if original is None:
+            subprocess.check_call(
+                ["tmux", "unbind-key", "-T", "root",
+                 _ROOT_STATUS_CLICK_KEY],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            fd, path = tempfile.mkstemp(
+                prefix="railmux-root-status-click-", suffix=".conf")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(original + "\n")
+                subprocess.check_call(
+                    ["tmux", "source-file", path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            finally:
+                os.unlink(path)
+    except (OSError, subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+
 def read_prefix_target_binding() -> PrefixTargetBindingBackup:
     """Capture the prefix-Tab binding used for Sidebar/Target toggling."""
     return {_PREFIX_TARGET_KEY: _read_key_binding("prefix", _PREFIX_TARGET_KEY)}
@@ -1994,14 +2165,18 @@ def set_prefix_target_binding(
         # comment. Pane IDs are Railmux-owned values (%N); an empty Target
         # intentionally does nothing, and a stale Target makes select-pane
         # fail without moving focus.
-        toggle = (
-            'run-shell "if [ \'#{pane_id}\' = '
-            '\'#{@railmux_controller_pane}\' ]; then '
-            'if [ -n \'#{@railmux_target_pane}\' ]; then '
-            'tmux select-pane -t \'#{@railmux_target_pane}\'; fi; '
-            'else tmux select-pane -t \'#{@railmux_controller_pane}\'; fi; '
-            f': {marker}"'
+        target_select = _select_pane_preserving_zoom_shell(
+            "#{@railmux_target_pane}")
+        controller_select = _select_pane_preserving_zoom_shell(
+            "#{@railmux_controller_pane}")
+        toggle_script = (
+            "if [ '#{pane_id}' = '#{@railmux_controller_pane}' ]; then "
+            "if [ -n '#{@railmux_target_pane}' ]; then "
+            f"{target_select}; fi; "
+            f"else {controller_select}; fi; "
+            f": {marker}"
         )
+        toggle = f'run-shell {shlex.quote(toggle_script)}'
         subprocess.check_call(
             [
                 "tmux", "bind-key", "-T", "prefix", _PREFIX_TARGET_KEY,

@@ -15,14 +15,14 @@ def _app():
 def test_critical_and_recommended_size_transitions_report_once():
     app = _app()
 
-    app._check_terminal_size((79, 19))
+    app._check_terminal_size((39, 11))
     assert app._set_status.call_args.args[1] == "error"
 
     # Remaining in the same class must not spam the one-second refresh loop.
-    app._check_terminal_size((70, 18))
+    app._check_terminal_size((35, 10))
     assert app._set_status.call_count == 1
 
-    app._check_terminal_size((100, 25))
+    app._check_terminal_size((79, 19))
     assert app._set_status.call_args.args[1] == "warn"
 
     app._check_terminal_size((120, 30))
@@ -74,13 +74,13 @@ def test_terminal_check_falls_back_to_tty_when_window_probe_fails(monkeypatch):
     app = _app()
     app._railmux_pane_id = "%142"
     app._loop = MagicMock()
-    app._loop.screen.get_cols_rows.return_value = (79, 19)
+    app._loop.screen.get_cols_rows.return_value = (39, 11)
     monkeypatch.setattr(
         "railmux.ui.app.tmux_ctl.window_size", lambda _pane: None)
 
     app._check_terminal_size()
 
-    assert app._last_workspace_size == (79, 19)
+    assert app._last_workspace_size == (39, 11)
     assert app._set_status.call_args.args[1] == "error"
 
 

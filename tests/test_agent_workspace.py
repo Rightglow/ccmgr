@@ -11,7 +11,9 @@ from railmux.ui.workspace import (
     SlotRestoreState,
     SwapState,
     WorkspaceLayout,
+    WorkspacePresentation,
     next_workspace_layout,
+    presentation_for_geometry,
 )
 
 
@@ -89,6 +91,29 @@ def test_workspace_layout_cycles_single_columns_rows_single():
     layout = next_workspace_layout(layout)
     assert layout is WorkspaceLayout.STACKED
     assert next_workspace_layout(layout) is WorkspaceLayout.SINGLE
+
+
+def test_compact_presentation_uses_two_dimensional_hysteresis():
+    assert presentation_for_geometry(
+        WorkspacePresentation.WIDE, 105, 20,
+    ) is WorkspacePresentation.COMPACT
+    assert presentation_for_geometry(
+        WorkspacePresentation.WIDE, 100, 60,
+    ) is WorkspacePresentation.WIDE
+    assert presentation_for_geometry(
+        WorkspacePresentation.WIDE, 120, 70,
+    ) is WorkspacePresentation.WIDE
+
+    # One recovered dimension is not enough to flap back to wide.
+    assert presentation_for_geometry(
+        WorkspacePresentation.COMPACT, 100, 25,
+    ) is WorkspacePresentation.COMPACT
+    assert presentation_for_geometry(
+        WorkspacePresentation.COMPACT, 83, 40,
+    ) is WorkspacePresentation.COMPACT
+    assert presentation_for_geometry(
+        WorkspacePresentation.COMPACT, 84, 26,
+    ) is WorkspacePresentation.WIDE
 
 
 def _reconcile_app() -> tuple[App, AgentWorkspace, MagicMock]:

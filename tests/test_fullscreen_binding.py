@@ -3,7 +3,12 @@ from unittest.mock import MagicMock
 
 from railmux.config import Config
 from railmux.ui.app import App
-from railmux.ui.workspace import AgentWorkspace, WorkspaceLayout
+from railmux.ui.workspace import (
+    AgentWorkspace,
+    WorkspaceLayout,
+    WorkspacePage,
+    WorkspacePresentation,
+)
 
 
 def _bare_app(**attrs):
@@ -329,6 +334,111 @@ def test_fullscreen_uses_actual_focused_secondary(monkeypatch):
 
     assert workspace.target_slot_key == AgentWorkspace.SECONDARY
     assert toggled == ["%3"]
+
+
+def test_f9_is_noop_in_compact_presentation(monkeypatch):
+    app = _bare_app(_railmux_pane_id="%1")
+    workspace = app._agent_workspace()
+    workspace.presentation = WorkspacePresentation.COMPACT
+    workspace.primary.pane_id = "%2"
+    app._set_status = MagicMock()
+    toggle = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.toggle_pane_zoom", toggle)
+
+    app._toggle_agent_fullscreen()
+
+    toggle.assert_not_called()
+    app._set_status.assert_called_once()
+
+
+def test_compact_layout_cycle_bypasses_only_pane_fit_gate():
+    app = _bare_app()
+    workspace = app._agent_workspace()
+    workspace.presentation = WorkspacePresentation.COMPACT
+    app._layout_fits = MagicMock(return_value=False)
+
+    assert app._next_available_layout(
+        WorkspaceLayout.SINGLE, (40, 12),
+    ) is WorkspaceLayout.SIDE_BY_SIDE
+    app._layout_fits.assert_not_called()
+
+
+def test_compact_page_switch_retargets_and_rezooms_without_losing_layout(
+    monkeypatch,
+):
+    app = _bare_app(_railmux_pane_id="%1", _tmux_error_bar=False)
+    workspace = app._agent_workspace()
+    workspace.presentation = WorkspacePresentation.COMPACT
+    workspace.primary.pane_id = "%2"
+    workspace.secondary.pane_id = "%3"
+    workspace.layout = WorkspaceLayout.SIDE_BY_SIDE
+    app._sync_target_pane_option = MagicMock(return_value=True)
+    app._set_railmux_focus = MagicMock()
+    app._apply_tmux_bar = MagicMock()
+    state = {"active": "%1", "zoomed": True}
+    toggles = []
+
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.active_pane_id",
+        lambda _pane: state["active"],
+    )
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.select_pane",
+        lambda pane: state.update(active=pane) or True,
+    )
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.toggle_pane_zoom",
+        lambda pane: (
+            toggles.append(pane)
+            or state.update(zoomed=not state["zoomed"])
+            or True
+        ),
+    )
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.pane_alive", lambda _pane: True)
+    app._window_is_zoomed = lambda: state["zoomed"]
+
+    assert app._select_workspace_page(WorkspacePage.PRIMARY)
+
+    assert state == {"active": "%2", "zoomed": True}
+    assert toggles == ["%1", "%2"]
+    assert workspace.compact_page is WorkspacePage.PRIMARY
+    assert workspace.target is workspace.primary
+    assert workspace.layout is WorkspaceLayout.SIDE_BY_SIDE
+    app._set_railmux_focus.assert_called_once_with(
+        False, force_border=True)
+
+
+def test_full_sidebar_modal_restores_preexisting_agent_zoom(monkeypatch):
+    app = _bare_app(_railmux_pane_id="%1")
+    app._show_overlay = MagicMock()
+    app._close_modal = MagicMock()
+    app._window_is_zoomed = MagicMock(return_value=True)
+    active = {"pane": "%2"}
+    toggles = []
+
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.active_pane_id",
+        lambda _pane: active["pane"],
+    )
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.select_pane",
+        lambda pane: active.update(pane=pane) or True,
+    )
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.toggle_pane_zoom",
+        lambda pane: toggles.append(pane) or True,
+    )
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.pane_alive", lambda _pane: True)
+
+    app._open_full_sidebar_modal(MagicMock(), MagicMock())
+    assert toggles == ["%2", "%1"]
+    assert app._full_sidebar_return_zoom_pane == "%2"
+
+    app._close_full_sidebar_modal()
+    assert toggles == ["%2", "%1", "%1", "%2"]
 
 
 def test_f9_remains_global_while_modal_is_open():

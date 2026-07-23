@@ -16,6 +16,53 @@ class WorkspaceLayout(str, Enum):
     SIDE_BY_SIDE = "side-by-side"
 
 
+class WorkspacePresentation(str, Enum):
+    """How the existing pane topology is presented to one terminal.
+
+    Presentation is intentionally independent from :class:`WorkspaceLayout`.
+    A compact client still owns the same one/two agent panes; it merely zooms
+    one page at a time instead of forcing those panes into unusably small
+    rectangles.
+    """
+
+    WIDE = "wide"
+    COMPACT = "compact"
+
+
+class WorkspacePage(str, Enum):
+    """One full-window page available in compact presentation."""
+
+    SIDEBAR = "sidebar"
+    PRIMARY = "primary"
+    SECONDARY = "secondary"
+
+
+COMPACT_ENTER_WIDTH = 80
+COMPACT_ENTER_HEIGHT = 24
+COMPACT_EXIT_WIDTH = 84
+COMPACT_EXIT_HEIGHT = 26
+
+
+def presentation_for_geometry(
+    current: WorkspacePresentation,
+    width: int,
+    height: int,
+) -> WorkspacePresentation:
+    """Apply hysteresis to responsive presentation selection.
+
+    Either cramped dimension enters compact mode. Both dimensions must clear
+    the larger exit threshold before a resize returns to wide mode. Thus a
+    short 105x20 phone is compact while a 100x60 portrait monitor remains wide.
+    """
+    if current is WorkspacePresentation.WIDE:
+        if width < COMPACT_ENTER_WIDTH or height < COMPACT_ENTER_HEIGHT:
+            return WorkspacePresentation.COMPACT
+        return current
+    if width >= COMPACT_EXIT_WIDTH and height >= COMPACT_EXIT_HEIGHT:
+        return WorkspacePresentation.WIDE
+    return current
+
+
 def next_workspace_layout(layout: WorkspaceLayout) -> WorkspaceLayout:
     """Cycle single -> columns -> rows -> single."""
     return {
@@ -121,6 +168,8 @@ class AgentWorkspace:
 
     def __init__(self) -> None:
         self.layout = WorkspaceLayout.SINGLE
+        self.presentation = WorkspacePresentation.WIDE
+        self.compact_page = WorkspacePage.SIDEBAR
         self.target_slot_key = self.PRIMARY
         # Closing the outer secondary pane must not kill its detached agent.
         # Keep its exact instance-local tmux name so F8 can reopen the same
