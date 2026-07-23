@@ -1927,15 +1927,29 @@ def test_real_tmux_status_pane_range_selects_and_keeps_zoom(
     )
     subprocess.run(
         ["tmux", "resize-pane", "-Z", "-t", other_pane], check=True)
-    client = subprocess.Popen(
-        _script_command(
-            f"env TERM=xterm-256color tmux -S {shlex.quote(socket_path)} "
-            f"attach-session -t {shlex.quote(display_session)}"
-        ),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+    master_fd, slave_fd = pty.openpty()
+    fcntl.ioctl(
+        slave_fd,
+        termios.TIOCSWINSZ,
+        struct.pack("HHHH", 24, 80, 0, 0),
     )
+    client_env = os.environ.copy()
+    client_env.pop("TMUX", None)
+    client_env.pop("TMUX_PANE", None)
+    client_env["TERM"] = "xterm-256color"
+    client = subprocess.Popen(
+        [
+            "tmux", "-S", socket_path,
+            "attach-session", "-t", display_session,
+        ],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        env=client_env,
+        start_new_session=True,
+    )
+    os.close(slave_fd)
+    slave_fd = -1
     try:
         assert _wait_until(
             lambda: bool(subprocess.check_output(
@@ -1952,9 +1966,7 @@ def test_real_tmux_status_pane_range_selects_and_keeps_zoom(
              "#{client_height}"],
             text=True,
         ).strip())
-        assert client.stdin is not None
-        client.stdin.write(f"\x1b[<0;2;{client_height}M".encode())
-        client.stdin.flush()
+        os.write(master_fd, f"\x1b[<0;2;{client_height}M".encode())
         assert _wait_until(
             lambda: tmux_ctl.active_pane_id(owner_pane) == owner_pane)
         assert subprocess.check_output(
@@ -1966,6 +1978,9 @@ def test_real_tmux_status_pane_range_selects_and_keeps_zoom(
         if client.poll() is None:
             client.kill()
             client.wait()
+        os.close(master_fd)
+        if slave_fd >= 0:
+            os.close(slave_fd)
         manager.close()
 
 
