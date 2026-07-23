@@ -39,9 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   status buttons therefore keep their correct bottom-row hit targets after a
   resize, and supported compact geometry now shows guidance instead of a
   misleading cramped-layout warning.
-- Temporarily present a dual-pane layout as compact single-page navigation
-  when a resize would force either agent below its minimum usable dimensions,
-  then restore the same split/stacked topology once space returns.
+- Add an intermediate responsive view before compact mode: when a dual layout
+  no longer fits, keep the sidebar and current Target agent attached while the
+  other agent continues in Running, then restore both original slots and their
+  split/stacked topology once space returns.
 - Snapshot the live wide-view divider ratios before compact zoom and replay
   both the sidebar and Agent 1/2 split when returning to a larger terminal.
 - Mark only the private `railmux ssh` tmux client as RGB-capable on tmux 3.2+,

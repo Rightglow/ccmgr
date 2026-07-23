@@ -192,6 +192,13 @@ between stacked agent panes.
 
 ### Phones and compact terminals
 
+Before switching to full-page compact mode, a dual-agent workspace that can no
+longer give both agents at least 50x12 temporarily shows the sidebar plus the
+current Target agent. The other agent keeps running in its detached tmux
+session. Widening the terminal restores both original slots, their saved
+split/stacked proportions, and the attached Target; this responsive projection
+does not change the user's saved F8 layout.
+
 Railmux automatically switches to a one-page-at-a-time compact workspace when
 either terminal dimension is cramped: fewer than 80 columns or fewer than 24
 rows. The existing panes and layout remain alive; the bottom status bar exposes

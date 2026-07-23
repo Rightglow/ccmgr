@@ -1,10 +1,12 @@
 """Non-blocking warnings for cramped terminal layouts."""
 from unittest.mock import MagicMock
 
+from railmux.settings import LayoutProfile
 from railmux.ui.app import App, PALETTE
 from railmux.ui.workspace import (
     WorkspaceLayout,
     WorkspacePresentation,
+    presentation_for_geometry,
 )
 
 
@@ -89,32 +91,30 @@ def test_terminal_check_falls_back_to_tty_when_window_probe_fails(monkeypatch):
     assert app._set_status.call_args.args[1] == "error"
 
 
-def test_dual_layout_uses_compact_pages_when_its_panes_no_longer_fit():
+def test_dual_layout_uses_single_agent_before_physical_compact():
     app = _app()
     workspace = app._agent_workspace()
     workspace.layout = WorkspaceLayout.SIDE_BY_SIDE
+    app._enter_adaptive_single_view = MagicMock(return_value=True)
 
-    assert app._responsive_presentation(130, 30) == (
-        WorkspacePresentation.COMPACT, True)
-    assert workspace.layout is WorkspaceLayout.SIDE_BY_SIDE
+    assert app._sync_adaptive_single_view(130, 30) == "entered"
+    assert workspace.presentation is WorkspacePresentation.WIDE
+    app._enter_adaptive_single_view.assert_called_once_with()
 
     # Leaving the adaptive view requires a small margin beyond the exact
-    # minimum, so dragging across one column cannot flap the presentation.
-    workspace.presentation = WorkspacePresentation.COMPACT
-    assert app._responsive_presentation(134, 30) == (
-        WorkspacePresentation.COMPACT, True)
-    assert app._responsive_presentation(136, 30) == (
-        WorkspacePresentation.WIDE, False)
+    # minimum, so dragging across one column cannot flap back to dual.
+    app._adaptive_single_state = {
+        "workspace": {"layout": WorkspaceLayout.SIDE_BY_SIDE.value},
+        "profile": LayoutProfile("always", "side-by-side", 200, 500),
+    }
+    app._restore_adaptive_dual_view = MagicMock(return_value=True)
+    assert app._sync_adaptive_single_view(134, 30) is None
+    assert app._sync_adaptive_single_view(136, 30) == "restored"
 
-    workspace.layout = WorkspaceLayout.STACKED
-    workspace.presentation = WorkspacePresentation.WIDE
-    assert app._responsive_presentation(100, 24) == (
-        WorkspacePresentation.COMPACT, True)
-    workspace.presentation = WorkspacePresentation.COMPACT
-    assert app._responsive_presentation(100, 26) == (
-        WorkspacePresentation.COMPACT, True)
-    assert app._responsive_presentation(100, 28) == (
-        WorkspacePresentation.WIDE, False)
+    # The smaller physical threshold remains a separate full-page mode.
+    assert presentation_for_geometry(
+        WorkspacePresentation.WIDE, 79, 30,
+    ) is WorkspacePresentation.COMPACT
 
 
 def test_agent_pane_warns_after_divider_makes_its_area_too_small(monkeypatch):

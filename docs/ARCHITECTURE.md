@@ -485,10 +485,14 @@ routing with focus, selection, or history.
 - The same background tmux session should not be attached in both slots.
 - Layout names are `stacked` and `side-by-side`, avoiding ambiguous
   horizontal/vertical terminology.
-- Orientation changes only through F8 and must not flip during terminal resize.
-  Single-agent layout assigns about 30% of the outer width to the sidebar;
-  either dual layout assigns about 20%, clamped to at least 30 columns. Ratio
-  changes are best-effort and must not make layout creation or recovery fail.
+- F8 is the only operation that changes the user's logical layout preference.
+  A resize may temporarily project an undersized dual layout as Sidebar plus
+  its current Target agent; the other agent returns home without being killed.
+  The exact slot identities, focus, orientation, and proportions must return
+  when both panes fit again. Single-agent layout assigns about 30% of the outer
+  width to the sidebar; either dual layout assigns about 20%, clamped to at
+  least 30 columns. Ratio changes are best-effort and must not make layout
+  creation or recovery fail.
 - A saved proportional profile may override those responsive ratios after pane
   topology exists. It is applied after exact workspace restoration, and only a
   successful explicit F8/divider operation may become newer preference

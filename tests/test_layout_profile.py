@@ -137,6 +137,141 @@ def test_compact_transition_captures_and_restores_runtime_geometry(monkeypatch):
     assert app._pre_compact_layout_profile is None
 
 
+def test_adaptive_single_view_keeps_secondary_target_attached_in_primary():
+    app = _app(WorkspaceLayout.SIDE_BY_SIDE)
+    workspace = app._agent_workspace()
+    workspace.primary.agent_tmux_name = "cx-primary"
+    workspace.secondary.agent_tmux_name = "cx-target"
+    workspace.set_target(AgentWorkspace.SECONDARY)
+    saved = {
+        "layout": WorkspaceLayout.SIDE_BY_SIDE.value,
+        "target": AgentWorkspace.SECONDARY,
+        "focus": AgentWorkspace.SECONDARY,
+        "slots": {
+            AgentWorkspace.PRIMARY: {
+                "kind": "agent", "tmux": "cx-primary"},
+            AgentWorkspace.SECONDARY: {
+                "kind": "agent", "tmux": "cx-target"},
+        },
+    }
+    app._workspace_recovery_state_data = MagicMock(return_value=saved)
+    profile = LayoutProfile("always", "side-by-side", 200, 500)
+    app._capture_layout_profile = MagicMock(return_value=profile)
+    app._set_single_view_focus = MagicMock()
+
+    def close_secondary(*, announce):
+        assert announce is False
+        workspace.secondary.clear_display()
+        workspace.layout = WorkspaceLayout.SINGLE
+        workspace.set_target(AgentWorkspace.PRIMARY)
+        return True
+
+    def replace(slot, content):
+        assert slot is workspace.primary
+        slot.agent_tmux_name = content["tmux"]
+        return True
+
+    app._close_secondary_split = MagicMock(side_effect=close_secondary)
+    app._replace_slot_content = MagicMock(side_effect=replace)
+
+    assert app._enter_adaptive_single_view() is True
+
+    assert workspace.layout is WorkspaceLayout.SINGLE
+    assert workspace.primary.agent_tmux_name == "cx-target"
+    assert workspace.collapsed_secondary_agent == "cx-primary"
+    assert app._adaptive_single_state == {
+        "workspace": saved, "profile": profile}
+
+
+def test_adaptive_dual_restore_returns_target_to_its_original_slot(monkeypatch):
+    app = _app(WorkspaceLayout.SINGLE)
+    workspace = app._agent_workspace()
+    workspace.primary.agent_tmux_name = "cx-target"
+    workspace.primary.active_session_id = "target-session"
+    saved = {
+        "layout": WorkspaceLayout.SIDE_BY_SIDE.value,
+        "target": AgentWorkspace.SECONDARY,
+        "focus": AgentWorkspace.SECONDARY,
+        "slots": {
+            AgentWorkspace.PRIMARY: {
+                "kind": "agent", "tmux": "cx-primary"},
+            AgentWorkspace.SECONDARY: {
+                "kind": "agent", "tmux": "cx-target"},
+        },
+    }
+    profile = LayoutProfile("always", "side-by-side", 200, 500)
+    app._adaptive_single_state = {
+        "workspace": saved, "profile": profile}
+    app._railmux_has_focus = False
+    app._slot_recovery_state_data = MagicMock(return_value={
+        "kind": "agent",
+        "tmux": "cx-target",
+        "session": "target-session",
+    })
+    app._restore_transient_layout_profile = MagicMock(return_value=True)
+    app._set_railmux_focus = MagicMock()
+    app._paint_slot_active_target = MagicMock()
+    app._install_tmux_bindings = MagicMock()
+    transport = MagicMock()
+
+    def create_secondary(layout):
+        workspace.secondary.pane_id = "%3"
+        workspace.layout = layout
+        return True
+
+    def replace(slot, content):
+        slot.agent_tmux_name = content.get("tmux")
+        slot.active_session_id = content.get("session")
+        return True
+
+    transport.create_secondary.side_effect = create_secondary
+    app._display_transport_manager = transport
+    app._replace_slot_content = MagicMock(side_effect=replace)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.select_pane", lambda _pane: True)
+
+    assert app._restore_adaptive_dual_view() is True
+
+    assert workspace.layout is WorkspaceLayout.SIDE_BY_SIDE
+    assert workspace.primary.agent_tmux_name == "cx-primary"
+    assert workspace.secondary.agent_tmux_name == "cx-target"
+    assert workspace.target is workspace.secondary
+    assert app._adaptive_single_state is None
+
+
+def test_adaptive_recovery_keeps_live_target_as_agent_not_preview():
+    app = _app(WorkspaceLayout.SINGLE)
+    app._railmux_has_focus = False
+    logical = {
+        "layout": WorkspaceLayout.SIDE_BY_SIDE.value,
+        "target": AgentWorkspace.SECONDARY,
+        "focus": AgentWorkspace.SECONDARY,
+        "slots": {
+            AgentWorkspace.PRIMARY: {
+                "kind": "agent", "tmux": "cx-primary"},
+            AgentWorkspace.SECONDARY: {
+                "kind": "agent", "tmux": "cx-target"},
+        },
+    }
+    app._adaptive_single_state = {
+        "workspace": logical,
+        "profile": LayoutProfile("always", "side-by-side", 200, 500),
+    }
+    app._slot_recovery_state_data = MagicMock(return_value={
+        "kind": "agent",
+        "tmux": "cx-target",
+        "session": "target-session",
+    })
+
+    saved = app._workspace_recovery_state_data()
+
+    assert saved["layout"] == WorkspaceLayout.SIDE_BY_SIDE.value
+    assert saved["target"] == AgentWorkspace.SECONDARY
+    assert saved["focus"] == AgentWorkspace.SECONDARY
+    assert saved["slots"][AgentWorkspace.SECONDARY]["kind"] == "agent"
+    assert saved["slots"][AgentWorkspace.SECONDARY]["tmux"] == "cx-target"
+
+
 def test_failed_new_secondary_ratio_rolls_back_to_single(monkeypatch):
     app = _app()
     app._layout_profile = LayoutProfile(

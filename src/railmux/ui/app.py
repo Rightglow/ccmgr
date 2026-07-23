@@ -6,6 +6,7 @@ a session-info popup.
 """
 from __future__ import annotations
 
+import copy
 import math
 import shutil
 import threading
@@ -666,6 +667,9 @@ class App:
         self._layout_profile_applied = False
         self._layout_profile_fallback = False
         self._layout_geometry_user_owned = False
+        self._adaptive_single_state: dict | None = None
+        self._adaptive_single_failed_geometry: tuple[int, int] | None = None
+        self._pending_adaptive_layout_profile: LayoutProfile | None = None
         self._codex_yolo_runtime = False
         self._codex_yolo_prompt_handled = False
         # Every agent session this Railmux instance has opened, keyed by
@@ -2278,7 +2282,11 @@ class App:
         compact_profile = getattr(
             self, "_pre_compact_layout_profile", None)
         self._pre_compact_layout_profile = None
-        if not self._restore_transient_layout_profile(compact_profile):
+        restored_profile = self._restore_transient_layout_profile(
+            compact_profile)
+        self._pending_adaptive_layout_profile = (
+            None if restored_profile else compact_profile)
+        if not restored_profile:
             self._resize_sidebar_for_layout(workspace.layout)
         self._apply_layout_profile(allow_create=True)
         self._reconcile_focus_from_tmux()
@@ -2366,6 +2374,11 @@ class App:
         """Capture current pane proportions without persisting tmux identity."""
         if scope not in {"always", "once"}:
             return None
+        adaptive = getattr(self, "_adaptive_single_state", None)
+        if isinstance(adaptive, dict):
+            profile = adaptive.get("profile")
+            if isinstance(profile, LayoutProfile):
+                return replace(profile, scope=scope)
         workspace = self._agent_workspace()
         if workspace.presentation is WorkspacePresentation.COMPACT:
             # Compact zoom leaves hidden panes reporting their old narrow
@@ -2451,6 +2464,179 @@ class App:
         self._active_sidebar_permille = old_sidebar
         self._active_primary_permille = old_primary
         return False
+
+    def _replace_slot_content(self, slot: AgentSlot, saved: dict) -> bool:
+        """Replace one display slot from an in-memory validated state."""
+        if saved.get("kind") == "empty":
+            if not self._display_transport().reset_slot(slot):
+                return False
+            slot.clear_content()
+            return True
+        return self._restore_workspace_slot(slot, saved)
+
+    @staticmethod
+    def _saved_agent_name(saved: dict) -> str | None:
+        value = saved.get("tmux")
+        return (
+            value
+            if saved.get("kind") == "agent" and isinstance(value, str)
+            else None
+        )
+
+    def _set_single_view_focus(self, sidebar_focused: bool) -> None:
+        """Restore focus after an automatic dual-to-single transition."""
+        workspace = self._agent_workspace()
+        workspace.set_target(AgentWorkspace.PRIMARY)
+        pane_id = (
+            getattr(self, "_railmux_pane_id", None)
+            if sidebar_focused else workspace.primary.pane_id
+        )
+        if pane_id is not None:
+            tmux_ctl.select_pane(pane_id)
+        self._set_railmux_focus(sidebar_focused, force_border=True)
+        self._paint_slot_active_target(
+            workspace.primary,
+            workspace.primary.active_session_id,
+            workspace.primary.agent_tmux_name,
+        )
+        self._install_tmux_bindings()
+
+    def _enter_adaptive_single_view(self) -> bool:
+        """Temporarily show Sidebar + Target while preserving both agents."""
+        workspace = self._agent_workspace()
+        if (workspace.layout is WorkspaceLayout.SINGLE
+                or workspace.presentation is not WorkspacePresentation.WIDE
+                or getattr(self, "_adaptive_single_state", None) is not None):
+            return False
+        saved = self._workspace_recovery_state_data()
+        pending_profile = getattr(
+            self, "_pending_adaptive_layout_profile", None)
+        profile = (
+            pending_profile
+            if isinstance(pending_profile, LayoutProfile)
+            and pending_profile.layout == workspace.layout.value
+            else self._capture_layout_profile("always")
+        )
+        self._pending_adaptive_layout_profile = None
+        layout = workspace.layout
+        target_key = workspace.target_slot_key
+        sidebar_focused = saved.get("focus") == "sidebar"
+        secondary_saved = saved["slots"][AgentWorkspace.SECONDARY]
+
+        restoring = getattr(self, "_restoring_workspace", False)
+        self._restoring_workspace = True
+        try:
+            if not self._close_secondary_split(announce=False):
+                return False
+            if target_key == AgentWorkspace.SECONDARY:
+                if not self._replace_slot_content(
+                        workspace.primary, secondary_saved):
+                    # Best-effort rollback keeps every agent session alive and
+                    # returns the previous two-pane surface when possible.
+                    if self._display_transport().create_secondary(layout):
+                        if self._replace_slot_content(
+                                workspace.secondary, secondary_saved):
+                            workspace.collapsed_secondary_agent = None
+                            workspace.set_target(target_key)
+                            target = workspace.target
+                            if not sidebar_focused and target.pane_id:
+                                tmux_ctl.select_pane(target.pane_id)
+                            self._set_railmux_focus(
+                                sidebar_focused, force_border=True)
+                            self._restore_transient_layout_profile(profile)
+                            self._install_tmux_bindings()
+                    return False
+                hidden = self._saved_agent_name(
+                    saved["slots"][AgentWorkspace.PRIMARY])
+            else:
+                hidden = self._saved_agent_name(secondary_saved)
+            workspace.collapsed_secondary_agent = hidden
+            self._adaptive_single_state = {
+                "workspace": saved,
+                "profile": profile,
+            }
+            self._set_single_view_focus(sidebar_focused)
+            return True
+        finally:
+            self._restoring_workspace = restoring
+
+    def _rollback_adaptive_single_view(
+        self, visible: dict, sidebar_focused: bool,
+    ) -> None:
+        """Return to the safe single surface after a failed wide restore."""
+        workspace = self._agent_workspace()
+        if workspace.secondary.is_open:
+            self._display_transport().close_slot(workspace.secondary)
+        workspace.layout = WorkspaceLayout.SINGLE
+        self._replace_slot_content(workspace.primary, visible)
+        state = getattr(self, "_adaptive_single_state", None)
+        if isinstance(state, dict):
+            original = state["workspace"]
+            hidden_key = (
+                AgentWorkspace.SECONDARY
+                if original["target"] == AgentWorkspace.PRIMARY
+                else AgentWorkspace.PRIMARY
+            )
+            workspace.collapsed_secondary_agent = self._saved_agent_name(
+                original["slots"][hidden_key])
+        self._resize_sidebar_for_layout(WorkspaceLayout.SINGLE)
+        self._set_single_view_focus(sidebar_focused)
+
+    def _restore_adaptive_dual_view(self) -> bool:
+        """Restore both original slots after an adaptive single-agent view."""
+        state = getattr(self, "_adaptive_single_state", None)
+        if not isinstance(state, dict):
+            return False
+        workspace = self._agent_workspace()
+        saved = state["workspace"]
+        layout = WorkspaceLayout(saved["layout"])
+        target_key = saved["target"]
+        sidebar_focused = bool(
+            getattr(self, "_railmux_has_focus", True))
+        visible = self._slot_recovery_state_data(workspace.primary)
+        saved["slots"][target_key] = visible
+
+        restoring = getattr(self, "_restoring_workspace", False)
+        self._restoring_workspace = True
+        try:
+            if target_key == AgentWorkspace.SECONDARY:
+                if not self._replace_slot_content(
+                        workspace.primary,
+                        saved["slots"][AgentWorkspace.PRIMARY]):
+                    self._rollback_adaptive_single_view(
+                        visible, sidebar_focused)
+                    return False
+            if not self._display_transport().create_secondary(layout):
+                self._rollback_adaptive_single_view(
+                    visible, sidebar_focused)
+                return False
+            secondary_saved = saved["slots"][AgentWorkspace.SECONDARY]
+            if not self._replace_slot_content(
+                    workspace.secondary, secondary_saved):
+                self._rollback_adaptive_single_view(
+                    visible, sidebar_focused)
+                return False
+
+            workspace.layout = layout
+            workspace.collapsed_secondary_agent = None
+            self._restore_transient_layout_profile(state.get("profile"))
+            workspace.set_target(target_key)
+            target = workspace.target
+            pane_id = (
+                getattr(self, "_railmux_pane_id", None)
+                if sidebar_focused else target.pane_id
+            )
+            if pane_id is not None:
+                tmux_ctl.select_pane(pane_id)
+            self._set_railmux_focus(
+                sidebar_focused, force_border=True)
+            self._paint_slot_active_target(
+                target, target.active_session_id, target.agent_tmux_name)
+            self._install_tmux_bindings()
+            self._adaptive_single_state = None
+            return True
+        finally:
+            self._restoring_workspace = restoring
 
     def _layout_profile_failed_to_fit(self) -> bool:
         """Retain the preference while returning this run to safe defaults."""
@@ -2655,6 +2841,10 @@ class App:
 
     def _rotate_split(self) -> None:
         """Cycle layout, committing new geometry authority only on success."""
+        # F8 is explicit user ownership. Keep the currently visible Target in
+        # Pane 1 and let normal single-layout semantics remember the hidden
+        # agent instead of later replaying an automatic resize snapshot.
+        self._adaptive_single_state = None
         old_sidebar = getattr(self, "_active_sidebar_permille", None)
         old_primary = getattr(self, "_active_primary_permille", None)
         # A new orientation starts from responsive defaults. If it cannot be
@@ -4276,6 +4466,21 @@ class App:
     def _workspace_recovery_state_data(self) -> dict:
         """Full local workspace wish; never written to portable state."""
         workspace = self._agent_workspace()
+        adaptive = getattr(self, "_adaptive_single_state", None)
+        if isinstance(adaptive, dict):
+            # Persist the logical dual workspace, not its temporary responsive
+            # projection. Any session selected while narrow replaces the
+            # original Target slot and remains attached after a restart.
+            data = copy.deepcopy(adaptive["workspace"])
+            target_key = data["target"]
+            data["slots"][target_key] = self._slot_recovery_state_data(
+                workspace.primary)
+            data["focus"] = (
+                "sidebar"
+                if getattr(self, "_railmux_has_focus", True)
+                else target_key
+            )
+            return data
         focus = (
             "sidebar"
             if getattr(self, "_railmux_has_focus", True)
@@ -7899,6 +8104,8 @@ class App:
         width: int,
         height: int,
         *,
+        layout: WorkspaceLayout | None = None,
+        sidebar_permille: int | None = None,
         exit_margin: bool = False,
     ) -> bool:
         """Whether the saved dual layout remains usable without page zoom.
@@ -7909,40 +8116,75 @@ class App:
         toggling presentation at the exact minimum.
         """
         workspace = self._agent_workspace()
-        if workspace.layout is WorkspaceLayout.SINGLE:
+        layout = layout or workspace.layout
+        if layout is WorkspaceLayout.SINGLE:
             return True
+        if sidebar_permille is None:
+            sidebar_permille = getattr(
+                self, "_active_sidebar_permille", None)
         sidebar_width = self._sidebar_width_for_layout(
-            workspace.layout,
+            layout,
             width,
-            getattr(self, "_active_sidebar_permille", None),
+            sidebar_permille,
         )
         agent_region = (max(0, width - sidebar_width - 1), height)
         pane_width, pane_height = projected_agent_size(
-            agent_region, workspace.layout)
+            agent_region, layout)
         min_width, min_height = self._MINIMUM_AGENT_PANE_SIZE
         if exit_margin:
             min_width += 2
             min_height += 1
         return pane_width >= min_width and pane_height >= min_height
 
-    def _responsive_presentation(
+    def _sync_adaptive_single_view(
         self, width: int, height: int,
-    ) -> tuple[WorkspacePresentation, bool]:
-        """Choose presentation and report a dual-layout space constraint."""
+    ) -> str | None:
+        """Enter or leave Sidebar + Target according to dual-pane fit."""
         workspace = self._agent_workspace()
-        geometry_choice = presentation_for_geometry(
-            workspace.presentation, width, height)
-        if geometry_choice is WorkspacePresentation.COMPACT:
-            return geometry_choice, False
-        layout_fits = self._wide_layout_fits_geometry(
-            width,
-            height,
-            exit_margin=(
-                workspace.presentation is WorkspacePresentation.COMPACT),
-        )
-        if layout_fits:
-            return WorkspacePresentation.WIDE, False
-        return WorkspacePresentation.COMPACT, True
+        if workspace.presentation is not WorkspacePresentation.WIDE:
+            return None
+        if getattr(
+                self, "_adaptive_single_failed_geometry", None
+        ) == (width, height):
+            return None
+        self._adaptive_single_failed_geometry = None
+        state = getattr(self, "_adaptive_single_state", None)
+        if isinstance(state, dict):
+            self._pending_adaptive_layout_profile = None
+            saved = state["workspace"]
+            profile = state.get("profile")
+            layout = WorkspaceLayout(saved["layout"])
+            sidebar_permille = (
+                profile.sidebar_permille
+                if isinstance(profile, LayoutProfile) else None
+            )
+            if not self._wide_layout_fits_geometry(
+                    width,
+                    height,
+                    layout=layout,
+                    sidebar_permille=sidebar_permille,
+                    exit_margin=True):
+                return None
+            result = (
+                "restored"
+                if self._restore_adaptive_dual_view()
+                else "failed"
+            )
+            if result == "failed":
+                self._adaptive_single_failed_geometry = (width, height)
+            return result
+        if (workspace.layout is not WorkspaceLayout.SINGLE
+                and not self._wide_layout_fits_geometry(width, height)):
+            result = (
+                "entered"
+                if self._enter_adaptive_single_view()
+                else "failed"
+            )
+            if result == "failed":
+                self._adaptive_single_failed_geometry = (width, height)
+            return result
+        self._pending_adaptive_layout_profile = None
+        return None
 
     def _check_terminal_size(
         self, size: tuple[int, int] | None = None,
@@ -7961,8 +8203,8 @@ class App:
         # its responsive status tier must use this resize, not the prior width.
         self._last_workspace_size = (width, height)
         workspace = self._agent_workspace()
-        presentation, layout_constrained = self._responsive_presentation(
-            width, height)
+        presentation = presentation_for_geometry(
+            workspace.presentation, width, height)
         presentation_changed = presentation is not workspace.presentation
         if presentation_changed:
             self._set_workspace_presentation(presentation)
@@ -7974,6 +8216,7 @@ class App:
             # Retry a transient failed zoom and heal manual/unexpected unzoom;
             # compact presentation is defined by exactly one visible page.
             self._restore_compact_page()
+        adaptive_change = self._sync_adaptive_single_view(width, height)
         previous = getattr(self, "_last_size_class", None)
         current = self._terminal_size_class(width, height)
         if current != previous:
@@ -8006,12 +8249,21 @@ class App:
                 self._set_status(
                     f"Workspace size restored: {width}×{height}.", "info",
                     force=True)
-        if (presentation_changed and layout_constrained
-                and current == "comfortable"):
+        if adaptive_change == "entered":
             self._set_status(
-                "Compact view: the dual-pane layout needs more space; "
-                "resize wider/taller to restore both panes.",
+                "Single-agent view: the Target stays attached; resize "
+                "wider/taller to restore both agent panes.",
                 "info",
+                force=True,
+            )
+        elif adaptive_change == "restored":
+            self._set_status(
+                "Dual-agent layout restored.", "info", force=True)
+        elif adaptive_change == "failed":
+            self._set_status(
+                "Responsive layout change failed safely; agent sessions "
+                "continue in Running.",
+                "warn",
                 force=True,
             )
         if size_changed:
