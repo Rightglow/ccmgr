@@ -7844,6 +7844,56 @@ class App:
         except Exception:
             return None
 
+    def _wide_layout_fits_geometry(
+        self,
+        width: int,
+        height: int,
+        *,
+        exit_margin: bool = False,
+    ) -> bool:
+        """Whether the saved dual layout remains usable without page zoom.
+
+        This estimates the unzoomed agent region from the full window instead
+        of sampling pane sizes: while compact, the selected pane reports the
+        full zoomed geometry. A small exit margin prevents resize jitter from
+        toggling presentation at the exact minimum.
+        """
+        workspace = self._agent_workspace()
+        if workspace.layout is WorkspaceLayout.SINGLE:
+            return True
+        sidebar_width = self._sidebar_width_for_layout(
+            workspace.layout,
+            width,
+            getattr(self, "_active_sidebar_permille", None),
+        )
+        agent_region = (max(0, width - sidebar_width - 1), height)
+        pane_width, pane_height = projected_agent_size(
+            agent_region, workspace.layout)
+        min_width, min_height = self._MINIMUM_AGENT_PANE_SIZE
+        if exit_margin:
+            min_width += 2
+            min_height += 1
+        return pane_width >= min_width and pane_height >= min_height
+
+    def _responsive_presentation(
+        self, width: int, height: int,
+    ) -> tuple[WorkspacePresentation, bool]:
+        """Choose presentation and report a dual-layout space constraint."""
+        workspace = self._agent_workspace()
+        geometry_choice = presentation_for_geometry(
+            workspace.presentation, width, height)
+        if geometry_choice is WorkspacePresentation.COMPACT:
+            return geometry_choice, False
+        layout_fits = self._wide_layout_fits_geometry(
+            width,
+            height,
+            exit_margin=(
+                workspace.presentation is WorkspacePresentation.COMPACT),
+        )
+        if layout_fits:
+            return WorkspacePresentation.WIDE, False
+        return WorkspacePresentation.COMPACT, True
+
     def _check_terminal_size(
         self, size: tuple[int, int] | None = None,
     ) -> None:
@@ -7861,8 +7911,8 @@ class App:
         # its responsive status tier must use this resize, not the prior width.
         self._last_workspace_size = (width, height)
         workspace = self._agent_workspace()
-        presentation = presentation_for_geometry(
-            workspace.presentation, width, height)
+        presentation, layout_constrained = self._responsive_presentation(
+            width, height)
         presentation_changed = presentation is not workspace.presentation
         if presentation_changed:
             self._set_workspace_presentation(presentation)
@@ -7887,16 +7937,33 @@ class App:
                     force=True,
                 )
             elif current == "reduced":
-                self._set_status(
-                    f"Workspace {width}×{height} is cramped; "
-                    f"{rec_width}×{rec_height} or larger is recommended.",
-                    "warn",
-                    force=True,
-                )
+                if workspace.presentation is WorkspacePresentation.COMPACT:
+                    self._set_status(
+                        "Compact view: use the status page buttons or "
+                        "Ctrl-B Tab to move between Railmux and the Target "
+                        "agent.",
+                        "info",
+                        force=True,
+                    )
+                else:
+                    self._set_status(
+                        f"Workspace {width}×{height} is cramped; "
+                        f"{rec_width}×{rec_height} or larger is recommended.",
+                        "warn",
+                        force=True,
+                    )
             elif previous in ("critical", "reduced"):
                 self._set_status(
                     f"Workspace size restored: {width}×{height}.", "info",
                     force=True)
+        if (presentation_changed and layout_constrained
+                and current == "comfortable"):
+            self._set_status(
+                "Compact view: the dual-pane layout needs more space; "
+                "resize wider/taller to restore both panes.",
+                "info",
+                force=True,
+            )
         if size_changed:
             repeat_agent_warning = (
                 current == "comfortable"

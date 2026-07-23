@@ -1332,6 +1332,62 @@ def test_real_tmux_single_sidebar_focus_clears_stale_target_format(isolated_tmux
         ).strip() == "fg=colour240"
 
 
+def test_real_private_tmux_client_applies_runtime_pty_resize(isolated_tmux):
+    session_name, _sidebar_pane, socket_path = isolated_tmux
+    master_fd, slave_fd = pty.openpty()
+    fcntl.ioctl(
+        slave_fd,
+        termios.TIOCSWINSZ,
+        struct.pack("HHHH", 24, 80, 0, 0),
+    )
+    env = os.environ.copy()
+    env.pop("TMUX", None)
+    env.pop("TMUX_PANE", None)
+    env["TERM"] = "xterm-256color"
+    process = subprocess.Popen(
+        [
+            "tmux", "-S", socket_path,
+            "attach-session", "-t", session_name,
+        ],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        env=env,
+        start_new_session=True,
+    )
+    os.close(slave_fd)
+    try:
+        def client_size() -> str:
+            return subprocess.check_output(
+                ["tmux", "-S", socket_path, "list-clients", "-F",
+                 "#{client_width}x#{client_height}"],
+                text=True,
+            ).strip()
+
+        assert _wait_until(lambda: client_size() == "80x24")
+        fast_display_server._resize_tmux_client(
+            process.pid, master_fd, 70, 18)
+        assert _wait_until(lambda: client_size() == "70x18")
+        assert subprocess.check_output(
+            ["tmux", "-S", socket_path,
+             "display-message", "-p", "-t", session_name,
+             "#{window_width}x#{window_height}"],
+            text=True,
+        ).strip() == "70x17"
+    finally:
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2.0)
+
+
 def test_real_tmux_agent_focus_heals_external_gray_border_drift(isolated_tmux):
     display_session, _sidebar_pane, _socket_path = isolated_tmux
     primary = subprocess.check_output(

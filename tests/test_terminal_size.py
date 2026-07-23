@@ -2,6 +2,10 @@
 from unittest.mock import MagicMock
 
 from railmux.ui.app import App, PALETTE
+from railmux.ui.workspace import (
+    WorkspaceLayout,
+    WorkspacePresentation,
+)
 
 
 def _app():
@@ -23,7 +27,8 @@ def test_critical_and_recommended_size_transitions_report_once():
     assert app._set_status.call_count == 1
 
     app._check_terminal_size((79, 19))
-    assert app._set_status.call_args.args[1] == "warn"
+    assert app._set_status.call_args.args[1] == "info"
+    assert "Compact view" in app._set_status.call_args.args[0]
 
     app._check_terminal_size((120, 30))
     assert app._set_status.call_args.args[1] == "info"
@@ -82,6 +87,34 @@ def test_terminal_check_falls_back_to_tty_when_window_probe_fails(monkeypatch):
 
     assert app._last_workspace_size == (39, 11)
     assert app._set_status.call_args.args[1] == "error"
+
+
+def test_dual_layout_uses_compact_pages_when_its_panes_no_longer_fit():
+    app = _app()
+    workspace = app._agent_workspace()
+    workspace.layout = WorkspaceLayout.SIDE_BY_SIDE
+
+    assert app._responsive_presentation(130, 30) == (
+        WorkspacePresentation.COMPACT, True)
+    assert workspace.layout is WorkspaceLayout.SIDE_BY_SIDE
+
+    # Leaving the adaptive view requires a small margin beyond the exact
+    # minimum, so dragging across one column cannot flap the presentation.
+    workspace.presentation = WorkspacePresentation.COMPACT
+    assert app._responsive_presentation(134, 30) == (
+        WorkspacePresentation.COMPACT, True)
+    assert app._responsive_presentation(136, 30) == (
+        WorkspacePresentation.WIDE, False)
+
+    workspace.layout = WorkspaceLayout.STACKED
+    workspace.presentation = WorkspacePresentation.WIDE
+    assert app._responsive_presentation(100, 24) == (
+        WorkspacePresentation.COMPACT, True)
+    workspace.presentation = WorkspacePresentation.COMPACT
+    assert app._responsive_presentation(100, 26) == (
+        WorkspacePresentation.COMPACT, True)
+    assert app._responsive_presentation(100, 28) == (
+        WorkspacePresentation.WIDE, False)
 
 
 def test_agent_pane_warns_after_divider_makes_its_area_too_small(monkeypatch):

@@ -709,6 +709,25 @@ def _set_winsize(fd: int, width: int, height: int) -> None:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", height, width, 0, 0))
 
 
+def _resize_tmux_client(
+    pid: int, master_fd: int, width: int, height: int,
+) -> None:
+    """Resize the private PTY and notify its tmux client process group.
+
+    ``TIOCSWINSZ`` on a PTY master updates the slave geometry but, unlike an
+    ioctl on the slave, does not reliably signal the foreground process group.
+    Without SIGWINCH tmux keeps its old client dimensions while the headless
+    screen uses the new size, so bottom-row mouse clicks are misclassified as
+    pane clicks.
+    """
+    _set_winsize(master_fd, width, height)
+    try:
+        os.killpg(pid, signal.SIGWINCH)
+    except ProcessLookupError:
+        # The serve loop will observe the exited attach client immediately.
+        pass
+
+
 def _spawn_tmux_client(session_id: str, width: int, height: int) -> tuple[int, int]:
     """Start an exact tmux attach client and return ``(pid, master_fd)``."""
     master_fd, slave_fd = os.openpty()
@@ -1145,7 +1164,7 @@ def _serve_attached(
         if (new_width, new_height) == (width, height):
             return
         discard_unsent_update()
-        _set_winsize(master_fd, new_width, new_height)
+        _resize_tmux_client(pid, master_fd, new_width, new_height)
         screen.resize(lines=new_height, columns=new_width)
         width, height = new_width, new_height
         force_keyframe = True

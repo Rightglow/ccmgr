@@ -1806,8 +1806,13 @@ def run(args: argparse.Namespace) -> int:
     ) -> None:
         nonlocal route_refresh_needed
         if isinstance(part, SgrMouseEvent):
+            displayed_height = (
+                latest_screen.height
+                if latest_screen is not None
+                else current_size.lines
+            )
             part = surface.translate_mouse_event(
-                part, logical_height=current_size.lines
+                part, logical_height=displayed_height
             )
             # Keep a frozen viewport stable across reported clicks and drags.
             # Terminal-native selection overrides never arrive here.

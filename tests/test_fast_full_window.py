@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import io
 import os
+import signal
 import struct
 import subprocess
 import time
@@ -423,6 +424,18 @@ def test_terminal_surface_maps_projected_mouse_rows_to_logical_screen():
 
     assert (top.x, top.y, top.raw) == (8, 19, b"\x1b[<64;8;19M")
     assert (status.x, status.y, status.raw) == (8, 22, b"\x1b[<0;8;22m")
+
+
+def test_resize_notifies_private_tmux_client_process_group(monkeypatch):
+    set_size = MagicMock()
+    notify = MagicMock()
+    monkeypatch.setattr(fast_display_server, "_set_winsize", set_size)
+    monkeypatch.setattr(fast_display_server.os, "killpg", notify)
+
+    fast_display_server._resize_tmux_client(123, 9, 70, 18)
+
+    set_size.assert_called_once_with(9, 70, 18)
+    notify.assert_called_once_with(123, signal.SIGWINCH)
 
 
 def test_mode_only_patch_reconciles_terminal_modes_once_and_restores_them():

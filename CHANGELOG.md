@@ -34,6 +34,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   colours, and restore a Focus-In event when `railmux ssh` re-enables terminal
   focus reporting after reconnect. Together these prevent an active agent pane
   and its input UI from remaining incorrectly gray.
+- Deliver SIGWINCH after resizing the private `railmux ssh` tmux client and map
+  transitional mouse input against the frame actually on screen. Compact
+  status buttons therefore keep their correct bottom-row hit targets after a
+  resize, and supported compact geometry now shows guidance instead of a
+  misleading cramped-layout warning.
+- Temporarily present a dual-pane layout as compact single-page navigation
+  when a resize would force either agent below its minimum usable dimensions,
+  then restore the same split/stacked topology once space returns.
 
 ## [0.2.6] - 2026-07-23
 
