@@ -1966,7 +1966,15 @@ def test_real_tmux_status_pane_range_selects_and_keeps_zoom(
              "#{client_height}"],
             text=True,
         ).strip())
-        os.write(master_fd, f"\x1b[<0;2;{client_height}M".encode())
+        # Use the original tmux mouse encoding instead of assuming the client
+        # negotiated SGR (1006). macOS and Linux terminfo databases can choose
+        # different encodings for the same TERM; both exercise the same tmux
+        # MouseDown1Status range and managed binding.
+        assert client_height < 223
+        os.write(
+            master_fd,
+            b"\x1b[M" + bytes((32, 32 + 2, 32 + client_height)),
+        )
         assert _wait_until(
             lambda: tmux_ctl.active_pane_id(owner_pane) == owner_pane)
         assert subprocess.check_output(
