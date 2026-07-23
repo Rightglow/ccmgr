@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-07-23
+
 ### Added
 
 - Check PyPI once before a normal outer Railmux launch and offer
@@ -42,12 +44,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add an intermediate responsive view before compact mode: when a dual layout
   no longer fits, keep the sidebar and current Target agent attached while the
   other agent continues in Running, then restore both original slots and their
-  split/stacked topology once space returns.
+  split/stacked topology once space returns. Entering compact now reconstructs
+  both physical agent panes first, including after a narrow soft restart, so
+  every visible `R`/`A1`/`A2` page remains a real selectable target without
+  stopping either agent.
 - Snapshot the live wide-view divider ratios before compact zoom and replay
   both the sidebar and Agent 1/2 split when returning to a larger terminal.
+  A missing snapshot falls back to safe 20% sidebar and 50/50 agent
+  proportions instead of retaining the currently zoomed page's absolute width.
 - Mark only the private `railmux ssh` tmux client as RGB-capable on tmux 3.2+,
   preventing live red/green diff backgrounds from collapsing to the same gray
   while leaving history capture and other attached terminals untouched.
+- Keep compact status-page clicks working through `railmux ssh` after resize,
+  local-history routing, and page changes by recognizing the painted
+  navigation row as remote tmux chrome and invalidating stale pointer routes.
+- Preserve exact live Running entries while a responsive single-agent
+  projection temporarily hides one slot, fenced by immutable tmux session
+  identity so a reused name can never be adopted.
 
 ## [0.2.6] - 2026-07-23
 
@@ -663,7 +676,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial PyPI release under the Railmux name.
 
-[Unreleased]: https://github.com/Rightglow/Railmux/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/Rightglow/Railmux/compare/v0.2.7...HEAD
+[0.2.7]: https://github.com/Rightglow/Railmux/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/Rightglow/Railmux/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/Rightglow/Railmux/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/Rightglow/Railmux/compare/v0.2.3...v0.2.4
