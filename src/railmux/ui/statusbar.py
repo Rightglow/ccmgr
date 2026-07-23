@@ -24,7 +24,6 @@ TIPS: tuple[str, ...] = (
     "Returning to one pane leaves the hidden second agent running",
     "Codex mode lists interactive sessions and hides codex exec threads",
     "railmux doctor reports the last detected tmux incident",
-    "In tmux copy-mode, press Esc twice to return to agent input",
 )
 
 

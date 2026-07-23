@@ -21,7 +21,9 @@ from railmux.ui.workspace import (
     AgentWorkspace,
     SlotRestoreState,
     WorkspaceLayout,
+    WorkspacePresentation,
 )
+from railmux.settings import LayoutProfile
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -613,6 +615,10 @@ def test_restore_workspace_geometry_fallback_remembers_validated_secondary(
     monkeypatch.setattr(
         "railmux.ui.app.tmux_ctl.session_exists", lambda _name: True)
     monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.session_topology",
+        lambda _name: MagicMock(session_id="$secondary"),
+    )
+    monkeypatch.setattr(
         "railmux.ui.app.tmux_ctl.select_pane", lambda _pane: True)
     saved = {
         "layout": "stacked",
@@ -633,7 +639,67 @@ def test_restore_workspace_geometry_fallback_remembers_validated_secondary(
 
     assert workspace.layout is WorkspaceLayout.SINGLE
     assert workspace.collapsed_secondary_agent == "cx-secondary"
+    assert app._adaptive_single_state == {
+        "workspace": saved,
+        "profile": LayoutProfile("always", "stacked", 200, 500),
+        "visible": AgentWorkspace.PRIMARY,
+    }
+    assert app._adaptive_single_running_guards == {
+        "cx-secondary": (
+            app._running["secondary-session"],
+            "$secondary",
+        ),
+    }
     transport.create_secondary.assert_not_called()
+
+
+def test_restore_workspace_rebuilds_dual_directly_in_compact_mode(monkeypatch):
+    app = _minimal_app()
+    workspace = app._agent_workspace()
+    workspace.presentation = WorkspacePresentation.COMPACT
+    transport = MagicMock()
+    transport.displayed_real_pane.return_value = None
+    app._display_transport_manager = transport
+    app._agent_region_size = MagicMock(return_value=(30, 10))
+    app._layout_fits = MagicMock(return_value=False)
+    app._set_railmux_focus = MagicMock()
+    app._paint_slot_active_target = MagicMock()
+    app._install_tmux_bindings = MagicMock()
+    app._apply_layout_profile = MagicMock(return_value=False)
+
+    def create_primary():
+        workspace.primary.pane_id = "%2"
+        return True
+
+    def create_secondary(layout):
+        workspace.layout = layout
+        workspace.secondary.pane_id = "%3"
+        return True
+
+    transport.create_primary.side_effect = create_primary
+    transport.create_secondary.side_effect = create_secondary
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.select_pane", lambda _pane: True)
+    app._railmux_pane_id = "%1"
+    saved = {
+        "layout": "side-by-side",
+        "target": "secondary",
+        "focus": "sidebar",
+        "slots": {
+            "primary": {"kind": "empty"},
+            "secondary": {"kind": "empty"},
+        },
+    }
+
+    assert app._restore_workspace({}, saved)
+
+    assert workspace.layout is WorkspaceLayout.SIDE_BY_SIDE
+    assert workspace.secondary.pane_id == "%3"
+    assert app._pre_compact_layout_profile == LayoutProfile(
+        "always", "side-by-side", 200, 500)
+    app._layout_fits.assert_not_called()
+    transport.create_secondary.assert_called_once_with(
+        WorkspaceLayout.SIDE_BY_SIDE)
 
 
 def test_restore_workspace_keeps_layout_when_primary_content_falls_back_empty(

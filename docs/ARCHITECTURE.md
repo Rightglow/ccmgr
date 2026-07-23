@@ -489,10 +489,16 @@ routing with focus, selection, or history.
   A resize may temporarily project an undersized dual layout as Sidebar plus
   its current Target agent; the other agent returns home without being killed.
   The exact slot identities, focus, orientation, and proportions must return
-  when both panes fit again. Single-agent layout assigns about 30% of the outer
-  width to the sidebar; either dual layout assigns about 20%, clamped to at
-  least 30 columns. Ratio changes are best-effort and must not make layout
-  creation or recovery fail.
+  when both panes fit again. Entering compact presentation reconstructs both
+  physical agent panes before zooming one full-window page, including after a
+  soft restart that first degraded to the responsive single projection. Thus
+  `R`, `A1`, and `A2` are backed by real pane targets; compact changes
+  presentation, never the logical layout. Returning wide reapplies the
+  pre-compact proportions (or safe 20% sidebar and 50/50 agent defaults) rather
+  than retaining the zoomed page's tmux reflow. Single-agent layout assigns
+  about 30% of the outer width to the sidebar; either dual layout assigns about
+  20%, clamped to at least 30 columns. Ratio changes are best-effort and must
+  not make layout creation or recovery fail.
 - A saved proportional profile may override those responsive ratios after pane
   topology exists. It is applied after exact workspace restoration, and only a
   successful explicit F8/divider operation may become newer preference

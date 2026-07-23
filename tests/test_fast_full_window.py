@@ -426,6 +426,46 @@ def test_terminal_surface_maps_projected_mouse_rows_to_logical_screen():
     assert (status.x, status.y, status.raw) == (8, 22, b"\x1b[<0;8;22m")
 
 
+def test_compact_status_row_finds_styled_top_or_bottom_bar():
+    screen = ScreenModel().apply(
+        ClientScreenUpdateDecoder().feed(
+            encode_update(_keyframe(width=40, height=4))
+        )[0],
+        os.terminal_size((40, 4)),
+    )
+    assert screen is not None
+    compact = b"\x1b[0;38;5;0m[Railmux][A1][A2] Codex "
+
+    assert fast_display_client.compact_status_row(
+        fast_display_client.replace(
+            screen, rows=(compact, b"", b"", b""),
+        )
+    ) == 1
+    assert fast_display_client.compact_status_row(
+        fast_display_client.replace(
+            screen, rows=(b"", b"", b"", compact),
+        )
+    ) == 4
+
+
+def test_status_row_click_bypasses_stale_local_pointer_capture():
+    view = LocalHistoryView()
+    view._local_pointer_capture = True
+    view.visible_routes = (
+        HistorySnapshot(
+            1, "%9", x=0, y=0, width=80, height=24, lines=(),
+        ),
+    )
+    event = SgrMouseEvent(b"\x1b[<0;2;24M", 0, 2, 24, True)
+
+    action = view.pointer_event(event, "%9", status_row=24)
+
+    assert action.forwarded_input == event.raw
+    assert action.refresh_routes is True
+    assert view._local_pointer_capture is False
+    assert view.visible_routes == ()
+
+
 def test_resize_notifies_private_tmux_client_process_group(monkeypatch):
     set_size = MagicMock()
     notify = MagicMock()

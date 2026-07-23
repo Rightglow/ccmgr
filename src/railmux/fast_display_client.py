@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import select
 import selectors
 import shlex
@@ -52,6 +53,7 @@ from railmux.fast_display_protocol import (
 
 LOCAL_ESCAPE = b"\x1d"  # Ctrl-]
 _SGR_MOUSE_PREFIX = b"\x1b[<"
+_SGR_STYLE_RE = re.compile(rb"\x1b\[[0-9;]*m")
 _HISTORY_SCROLL_LINES = 3
 _HISTORY_PREFETCH_LINES = 300
 _HISTORY_FULL_LINES = 2000
@@ -151,6 +153,22 @@ def full_repaint(screen: AppliedScreen) -> AppliedScreen:
         changed_rows=tuple(range(screen.height)),
         clear=True,
     )
+
+
+def compact_status_row(screen: AppliedScreen) -> int | None:
+    """Return the 1-based compact navigation row at either tmux bar edge."""
+    prefixes = (
+        b"[R][1][2] ",
+        b"[Railmux][A1][A2] ",
+        b"[Railmux][Agent 1][Agent 2] ",
+    )
+    for index in dict.fromkeys((0, screen.height - 1)):
+        if not 0 <= index < len(screen.rows):
+            continue
+        plain = _SGR_STYLE_RE.sub(b"", screen.rows[index])
+        if plain.startswith(prefixes):
+            return index + 1
+    return None
 
 
 class ProbeError(RuntimeError):
@@ -631,7 +649,21 @@ class LocalHistoryView:
         self,
         event: SgrMouseEvent,
         focused_pane_id: str | None = None,
+        status_row: int | None = None,
     ) -> HistoryAction:
+        if status_row is not None and event.y == status_row:
+            # The tmux status line is navigation chrome, never agent history.
+            # Forward it even if a prior local selection capture missed its
+            # release or a stale pane route briefly overlaps the bottom row.
+            # A press can switch compact pages, so invalidate route geometry
+            # immediately; the next prefetch repopulates the new visible pane.
+            changes_page = event.pressed and not event.button & 32
+            restore_live = self.invalidate_routes() if changes_page else False
+            return HistoryAction(
+                forwarded_input=event.raw,
+                restore_live=restore_live,
+                refresh_routes=changes_page,
+            )
         if self._forwarded_pointer_capture:
             if not event.pressed:
                 self._forwarded_pointer_capture = False
@@ -1823,7 +1855,14 @@ def run(args: argparse.Namespace) -> int:
                     latest_screen.cursor_x, latest_screen.cursor_y
                 )
             )
-            action = history.pointer_event(part, focused_pane_id)
+            action = history.pointer_event(
+                part,
+                focused_pane_id,
+                status_row=(
+                    compact_status_row(latest_screen)
+                    if latest_screen is not None else None
+                ),
+            )
             apply_history_action(
                 coalesce_forwarded_wheel(action, part, forwarded_wheels)
             )

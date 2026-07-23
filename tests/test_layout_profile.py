@@ -6,7 +6,7 @@ import subprocess
 from unittest.mock import MagicMock
 
 from railmux.settings import LayoutProfile
-from railmux.ui.app import App
+from railmux.ui.app import App, _Running
 from railmux.ui.modals import LayoutSaveModal
 from railmux.ui.workspace import (
     AgentWorkspace,
@@ -137,12 +137,51 @@ def test_compact_transition_captures_and_restores_runtime_geometry(monkeypatch):
     assert app._pre_compact_layout_profile is None
 
 
-def test_adaptive_single_view_keeps_secondary_target_attached_in_primary():
+def test_compact_exit_without_snapshot_restores_safe_dual_ratio(monkeypatch):
+    app = _app(WorkspaceLayout.SIDE_BY_SIDE)
+    app._workspace.presentation = WorkspacePresentation.COMPACT
+    app._pre_compact_layout_profile = None
+    app._pre_compact_wide_zoom_pane = None
+    app._window_is_zoomed = MagicMock(return_value=False)
+    app._restore_transient_layout_profile = MagicMock(return_value=True)
+    app._apply_layout_profile = MagicMock(return_value=False)
+    app._reconcile_focus_from_tmux = MagicMock()
+    app._apply_tmux_bar = MagicMock()
+
+    assert app._set_workspace_presentation(
+        WorkspacePresentation.WIDE) is True
+
+    app._restore_transient_layout_profile.assert_called_once_with(
+        LayoutProfile("always", "side-by-side", 200, 500))
+    assert app._pre_compact_layout_profile is None
+
+
+def test_adaptive_single_view_keeps_secondary_target_attached_in_primary(
+    monkeypatch,
+):
     app = _app(WorkspaceLayout.SIDE_BY_SIDE)
     workspace = app._agent_workspace()
     workspace.primary.agent_tmux_name = "cx-primary"
     workspace.secondary.agent_tmux_name = "cx-target"
     workspace.set_target(AgentWorkspace.SECONDARY)
+    primary_running = _Running(
+        key="primary-session",
+        tmux_name="cx-primary",
+        label="project/primary",
+    )
+    target_running = _Running(
+        key="target-session",
+        tmux_name="cx-target",
+        label="project/target",
+    )
+    app._running = {
+        primary_running.key: primary_running,
+        target_running.key: target_running,
+    }
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.session_topology",
+        lambda name: MagicMock(session_id=f"${name}"),
+    )
     saved = {
         "layout": WorkspaceLayout.SIDE_BY_SIDE.value,
         "target": AgentWorkspace.SECONDARY,
@@ -180,7 +219,14 @@ def test_adaptive_single_view_keeps_secondary_target_attached_in_primary():
     assert workspace.primary.agent_tmux_name == "cx-target"
     assert workspace.collapsed_secondary_agent == "cx-primary"
     assert app._adaptive_single_state == {
-        "workspace": saved, "profile": profile}
+        "workspace": saved,
+        "profile": profile,
+        "visible": AgentWorkspace.SECONDARY,
+    }
+    assert app._adaptive_single_running_guards == {
+        "cx-primary": (primary_running, "$cx-primary"),
+        "cx-target": (target_running, "$cx-target"),
+    }
 
 
 def test_adaptive_dual_restore_returns_target_to_its_original_slot(monkeypatch):
@@ -237,6 +283,174 @@ def test_adaptive_dual_restore_returns_target_to_its_original_slot(monkeypatch):
     assert workspace.secondary.agent_tmux_name == "cx-target"
     assert workspace.target is workspace.secondary
     assert app._adaptive_single_state is None
+
+
+def test_compact_transition_rebuilds_deferred_dual_before_zoom(monkeypatch):
+    app = _app(WorkspaceLayout.SINGLE)
+    workspace = app._agent_workspace()
+    workspace.primary.agent_tmux_name = "cx-primary"
+    saved = {
+        "layout": WorkspaceLayout.SIDE_BY_SIDE.value,
+        "target": AgentWorkspace.SECONDARY,
+        "focus": "sidebar",
+        "slots": {
+            AgentWorkspace.PRIMARY: {
+                "kind": "agent", "tmux": "cx-primary"},
+            AgentWorkspace.SECONDARY: {
+                "kind": "agent", "tmux": "cx-secondary"},
+        },
+    }
+    profile = LayoutProfile("always", "side-by-side", 200, 500)
+    app._adaptive_single_state = {
+        "workspace": saved,
+        "profile": profile,
+        "visible": AgentWorkspace.PRIMARY,
+    }
+    app._adaptive_single_running_guards = {}
+    app._railmux_has_focus = True
+    app._slot_recovery_state_data = MagicMock(return_value={
+        "kind": "agent", "tmux": "cx-primary",
+    })
+    app._replace_slot_content = MagicMock(return_value=True)
+    app._set_railmux_focus = MagicMock()
+    app._paint_slot_active_target = MagicMock()
+    app._install_tmux_bindings = MagicMock()
+    app._select_workspace_page = MagicMock(return_value=True)
+    app._window_is_zoomed = MagicMock(side_effect=[False, True])
+    app._restore_transient_layout_profile = MagicMock(return_value=True)
+    app._apply_layout_profile = MagicMock(return_value=True)
+    app._reconcile_focus_from_tmux = MagicMock()
+    app._apply_tmux_bar = MagicMock()
+    transport = MagicMock()
+
+    def create_secondary(layout):
+        workspace.secondary.pane_id = "%3"
+        workspace.layout = layout
+        return True
+
+    transport.create_secondary.side_effect = create_secondary
+    app._display_transport_manager = transport
+    active = iter(("%2", "%1", "%1"))
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.active_pane_id",
+        lambda _pane: next(active),
+    )
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.select_pane", lambda _pane: True)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.toggle_pane_zoom", lambda _pane: True)
+
+    assert app._set_workspace_presentation(
+        WorkspacePresentation.COMPACT) is True
+
+    assert workspace.presentation is WorkspacePresentation.COMPACT
+    assert workspace.layout is WorkspaceLayout.SIDE_BY_SIDE
+    assert workspace.secondary.pane_id == "%3"
+    assert app._adaptive_single_state is None
+    assert app._pre_compact_layout_profile == profile
+    app._replace_slot_content.assert_called_once_with(
+        workspace.secondary, saved["slots"][AgentWorkspace.SECONDARY])
+    app._select_workspace_page.assert_called_once()
+
+    assert app._set_workspace_presentation(
+        WorkspacePresentation.WIDE) is True
+    app._restore_transient_layout_profile.assert_called_once_with(profile)
+
+
+def test_adaptive_recovery_updates_visible_primary_not_saved_secondary():
+    app = _app(WorkspaceLayout.SINGLE)
+    app._railmux_has_focus = False
+    logical = {
+        "layout": WorkspaceLayout.SIDE_BY_SIDE.value,
+        "target": AgentWorkspace.SECONDARY,
+        "focus": "sidebar",
+        "slots": {
+            AgentWorkspace.PRIMARY: {
+                "kind": "agent", "tmux": "cx-old-primary"},
+            AgentWorkspace.SECONDARY: {
+                "kind": "agent", "tmux": "cx-secondary"},
+        },
+    }
+    app._adaptive_single_state = {
+        "workspace": logical,
+        "profile": LayoutProfile("always", "side-by-side", 200, 500),
+        "visible": AgentWorkspace.PRIMARY,
+    }
+    app._slot_recovery_state_data = MagicMock(return_value={
+        "kind": "agent",
+        "tmux": "cx-new-primary",
+        "session": "new-primary-session",
+    })
+
+    saved = app._workspace_recovery_state_data()
+
+    assert saved["target"] == AgentWorkspace.PRIMARY
+    assert saved["focus"] == AgentWorkspace.PRIMARY
+    assert saved["slots"][AgentWorkspace.PRIMARY]["tmux"] == "cx-new-primary"
+    assert saved["slots"][AgentWorkspace.SECONDARY]["tmux"] == "cx-secondary"
+
+
+def test_adaptive_guard_recovers_hidden_running_entry_and_retries(monkeypatch):
+    app = _app(WorkspaceLayout.SINGLE)
+    session_id = "12345678-1234-1234-1234-1234567890ab"
+    running = _Running(
+        key=session_id,
+        tmux_name="cx-hidden",
+        label="project/hidden",
+        session_type="codex",
+    )
+    app._running = {}
+    app._adaptive_single_state = {
+        "workspace": {
+            "layout": WorkspaceLayout.SIDE_BY_SIDE.value,
+            "target": AgentWorkspace.PRIMARY,
+            "focus": AgentWorkspace.PRIMARY,
+            "slots": {
+                AgentWorkspace.PRIMARY: {"kind": "agent", "tmux": "cx-primary"},
+                AgentWorkspace.SECONDARY: {"kind": "agent", "tmux": "cx-hidden"},
+            },
+        },
+        "profile": LayoutProfile("always", "side-by-side", 200, 500),
+    }
+    app._adaptive_single_running_guards = {
+        "cx-hidden": (running, "$42"),
+    }
+    app._adaptive_single_failed_geometry = (136, 30)
+    topology = MagicMock(session_id="$42")
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.session_topology",
+        lambda _name: topology,
+    )
+    app._agent_session_alive = MagicMock(return_value=True)
+
+    assert app._repair_adaptive_running_guards() == 1
+
+    assert app._running == {session_id: running}
+    assert app._adaptive_single_failed_geometry is None
+
+
+def test_adaptive_guard_rejects_reused_tmux_name(monkeypatch):
+    app = _app(WorkspaceLayout.SINGLE)
+    running = _Running(
+        key="12345678-1234-1234-1234-1234567890ab",
+        tmux_name="cx-hidden",
+        label="project/hidden",
+        session_type="codex",
+    )
+    app._running = {}
+    app._adaptive_single_state = {"workspace": {}, "profile": None}
+    app._adaptive_single_running_guards = {
+        "cx-hidden": (running, "$42"),
+    }
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.session_topology",
+        lambda _name: MagicMock(session_id="$99"),
+    )
+    app._agent_session_alive = MagicMock(return_value=True)
+
+    assert app._repair_adaptive_running_guards() == 0
+    assert app._running == {}
+    app._agent_session_alive.assert_not_called()
 
 
 def test_adaptive_recovery_keeps_live_target_as_agent_not_preview():

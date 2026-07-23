@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 from railmux.settings import LayoutProfile
 from railmux.ui.app import App, PALETTE
 from railmux.ui.workspace import (
+    AgentWorkspace,
     WorkspaceLayout,
     WorkspacePresentation,
     presentation_for_geometry,
@@ -115,6 +116,27 @@ def test_dual_layout_uses_single_agent_before_physical_compact():
     assert presentation_for_geometry(
         WorkspacePresentation.WIDE, 79, 30,
     ) is WorkspacePresentation.COMPACT
+
+
+def test_wide_resize_reflows_sidebar_from_old_absolute_width(monkeypatch):
+    app = _app()
+    app._workspace = AgentWorkspace()
+    app._workspace.layout = WorkspaceLayout.SIDE_BY_SIDE
+    app._railmux_pane_id = "%1"
+    app._last_workspace_size = (120, 54)
+    app._last_size_class = "comfortable"
+    app._active_sidebar_permille = None
+    resize = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.window_size", lambda _pane: (171, 54))
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.pane_size", lambda _pane: (24, 54))
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.resize_pane_width", resize)
+
+    app._check_terminal_size((171, 54))
+
+    resize.assert_called_once_with("%1", 34)
 
 
 def test_agent_pane_warns_after_divider_makes_its_area_too_small(monkeypatch):
