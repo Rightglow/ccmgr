@@ -728,10 +728,33 @@ def _resize_tmux_client(
         pass
 
 
+@lru_cache(maxsize=1)
+def _tmux_client_feature_args() -> tuple[str, ...]:
+    """Request per-client RGB output when the installed tmux supports it."""
+    try:
+        version_text = subprocess.check_output(
+            tmux_server.tmux_argv("-V"),
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2.0,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return ()
+    match = re.search(r"(\d+)\.(\d+)", version_text)
+    if match is None:
+        return ()
+    version = int(match.group(1)), int(match.group(2))
+    # tmux 3.2 introduced both terminal-features and the client-scoped -T
+    # override. Older supported releases retain their existing 256-colour
+    # behavior rather than receiving an option they cannot parse.
+    return ("-T", "RGB") if version >= (3, 2) else ()
+
+
 def _spawn_tmux_client(session_id: str, width: int, height: int) -> tuple[int, int]:
     """Start an exact tmux attach client and return ``(pid, master_fd)``."""
     master_fd, slave_fd = os.openpty()
     _set_winsize(slave_fd, width, height)
+    feature_args = _tmux_client_feature_args()
     pid = os.fork()
     if pid == 0:  # pragma: no cover - exercised only by a real PTY smoke test
         try:
@@ -746,7 +769,7 @@ def _spawn_tmux_client(session_id: str, width: int, height: int) -> tuple[int, i
             env["TERM"] = "xterm-256color"
             env.setdefault("COLORTERM", "truecolor")
             argv = tmux_server.tmux_argv(
-                "attach-session", "-t", session_id, env=env
+                *feature_args, "attach-session", "-t", session_id, env=env
             )
             os.execvpe(
                 "tmux", argv, env

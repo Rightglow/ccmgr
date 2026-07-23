@@ -1334,6 +1334,15 @@ def test_real_tmux_single_sidebar_focus_clears_stale_target_format(isolated_tmux
 
 def test_real_private_tmux_client_applies_runtime_pty_resize(isolated_tmux):
     session_name, _sidebar_pane, socket_path = isolated_tmux
+    subprocess.run(
+        [
+            "tmux", "-S", socket_path, "respawn-pane", "-k",
+            "-t", session_name,
+            "printf '\\033[48;2;33;58;43mGREEN\\033[0m "
+            "\\033[48;2;74;34;29mRED\\033[0m'; sleep 60",
+        ],
+        check=True,
+    )
     master_fd, slave_fd = pty.openpty()
     fcntl.ioctl(
         slave_fd,
@@ -1347,6 +1356,7 @@ def test_real_private_tmux_client_applies_runtime_pty_resize(isolated_tmux):
     process = subprocess.Popen(
         [
             "tmux", "-S", socket_path,
+            *fast_display_server._tmux_client_feature_args(),
             "attach-session", "-t", session_name,
         ],
         stdin=slave_fd,
@@ -1365,6 +1375,18 @@ def test_real_private_tmux_client_applies_runtime_pty_resize(isolated_tmux):
             ).strip()
 
         assert _wait_until(lambda: client_size() == "80x24")
+        if fast_display_server._tmux_client_feature_args():
+            initial = b""
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and not (
+                b"\033[48;2;33;58;43m" in initial
+                and b"\033[48;2;74;34;29m" in initial
+            ):
+                readable, _, _ = select.select([master_fd], [], [], 0.1)
+                if readable:
+                    initial += os.read(master_fd, 65536)
+            assert b"\033[48;2;33;58;43m" in initial
+            assert b"\033[48;2;74;34;29m" in initial
         fast_display_server._resize_tmux_client(
             process.pid, master_fd, 70, 18)
         assert _wait_until(lambda: client_size() == "70x18")
@@ -1386,6 +1408,51 @@ def test_real_private_tmux_client_applies_runtime_pty_resize(isolated_tmux):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=2.0)
+
+
+def test_real_transient_compact_profile_restores_both_dividers(isolated_tmux):
+    display_session, sidebar, _socket_path = isolated_tmux
+    subprocess.run(
+        ["tmux", "resize-window", "-t", display_session, "-x", "180", "-y", "40"],
+        check=True,
+    )
+    primary = subprocess.check_output(
+        [
+            "tmux", "split-window", "-d", "-h", "-t", sidebar,
+            "-l", "143", "-P", "-F", "#{pane_id}", "sleep 60",
+        ],
+        text=True,
+    ).strip()
+    secondary = subprocess.check_output(
+        [
+            "tmux", "split-window", "-d", "-h", "-t", primary,
+            "-l", "81", "-P", "-F", "#{pane_id}", "sleep 60",
+        ],
+        text=True,
+    ).strip()
+    app = App.__new__(App)
+    app._workspace = AgentWorkspace()
+    app._workspace.layout = WorkspaceLayout.SIDE_BY_SIDE
+    app._workspace.primary.pane_id = primary
+    app._workspace.secondary.pane_id = secondary
+    app._railmux_pane_id = sidebar
+    app._active_sidebar_permille = None
+    app._active_primary_permille = None
+
+    profile = app._capture_layout_profile("always")
+    assert profile is not None
+    subprocess.run(
+        ["tmux", "resize-pane", "-t", sidebar, "-x", "60"], check=True)
+    subprocess.run(
+        ["tmux", "resize-pane", "-t", primary, "-x", "50"], check=True)
+
+    assert app._restore_transient_layout_profile(profile)
+    restored = app._capture_layout_profile("always")
+    assert restored is not None
+    assert restored.sidebar_permille == profile.sidebar_permille
+    assert abs(
+        restored.primary_permille - profile.primary_permille
+    ) <= 2
 
 
 def test_real_tmux_agent_focus_heals_external_gray_border_drift(isolated_tmux):

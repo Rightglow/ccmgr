@@ -364,6 +364,24 @@ def test_compact_layout_cycle_bypasses_only_pane_fit_gate():
     app._layout_fits.assert_not_called()
 
 
+def test_compact_layout_cycle_discards_hidden_wide_ratio_snapshot():
+    app = _bare_app(
+        _pre_compact_layout_profile=object(),
+        _active_sidebar_permille=200,
+        _active_primary_permille=500,
+        _layout_geometry_user_owned=False,
+        _layout_profile_fallback=False,
+    )
+    app._agent_workspace().presentation = WorkspacePresentation.COMPACT
+    app._rotate_split_attempt = MagicMock(return_value=True)
+    app._restore_compact_page = MagicMock(return_value=True)
+
+    app._rotate_split()
+
+    assert app._pre_compact_layout_profile is None
+    assert app._layout_geometry_user_owned is True
+
+
 def test_compact_page_switch_retargets_and_rezooms_without_losing_layout(
     monkeypatch,
 ):

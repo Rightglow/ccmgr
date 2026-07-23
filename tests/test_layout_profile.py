@@ -8,7 +8,11 @@ from unittest.mock import MagicMock
 from railmux.settings import LayoutProfile
 from railmux.ui.app import App
 from railmux.ui.modals import LayoutSaveModal
-from railmux.ui.workspace import AgentWorkspace, WorkspaceLayout
+from railmux.ui.workspace import (
+    AgentWorkspace,
+    WorkspaceLayout,
+    WorkspacePresentation,
+)
 
 
 def _app(layout: WorkspaceLayout = WorkspaceLayout.SINGLE) -> App:
@@ -88,6 +92,49 @@ def test_apply_saved_dual_layout_can_create_second_pane(monkeypatch):
         WorkspaceLayout.SIDE_BY_SIDE)
     resize.assert_called_once_with("%2", 84)
     assert app._workspace.layout is WorkspaceLayout.SIDE_BY_SIDE
+
+
+def test_restore_transient_compact_profile_replays_both_dividers(monkeypatch):
+    app = _app(WorkspaceLayout.SIDE_BY_SIDE)
+    profile = LayoutProfile("always", "side-by-side", 220, 600)
+    app._resize_sidebar_for_layout = MagicMock(return_value=True)
+    app._agent_region_size = MagicMock(return_value=(141, 40))
+    app._layout_fits = MagicMock(return_value=True)
+    resize = MagicMock(return_value=True)
+    monkeypatch.setattr("railmux.ui.app.tmux_ctl.resize_pane_width", resize)
+
+    assert app._restore_transient_layout_profile(profile) is True
+
+    assert app._active_sidebar_permille == 220
+    assert app._active_primary_permille == 600
+    app._resize_sidebar_for_layout.assert_called_once_with(
+        WorkspaceLayout.SIDE_BY_SIDE)
+    resize.assert_called_once_with("%2", 84)
+
+
+def test_compact_transition_captures_and_restores_runtime_geometry(monkeypatch):
+    app = _app(WorkspaceLayout.SIDE_BY_SIDE)
+    profile = LayoutProfile("always", "side-by-side", 220, 600)
+    app._capture_layout_profile = MagicMock(return_value=profile)
+    app._select_workspace_page = MagicMock(return_value=True)
+    app._restore_transient_layout_profile = MagicMock(return_value=True)
+    app._apply_layout_profile = MagicMock(return_value=True)
+    app._reconcile_focus_from_tmux = MagicMock()
+    app._apply_tmux_bar = MagicMock()
+    app._window_is_zoomed = MagicMock(side_effect=[False, True])
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.active_pane_id", lambda _pane: "%2")
+    monkeypatch.setattr(
+        "railmux.ui.app.tmux_ctl.toggle_pane_zoom", lambda _pane: True)
+
+    assert app._set_workspace_presentation(
+        WorkspacePresentation.COMPACT) is True
+    assert app._pre_compact_layout_profile == profile
+    assert app._set_workspace_presentation(
+        WorkspacePresentation.WIDE) is True
+
+    app._restore_transient_layout_profile.assert_called_once_with(profile)
+    assert app._pre_compact_layout_profile is None
 
 
 def test_failed_new_secondary_ratio_rolls_back_to_single(monkeypatch):

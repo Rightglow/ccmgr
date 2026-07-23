@@ -42,6 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Temporarily present a dual-pane layout as compact single-page navigation
   when a resize would force either agent below its minimum usable dimensions,
   then restore the same split/stacked topology once space returns.
+- Snapshot the live wide-view divider ratios before compact zoom and replay
+  both the sidebar and Agent 1/2 split when returning to a larger terminal.
+- Mark only the private `railmux ssh` tmux client as RGB-capable on tmux 3.2+,
+  preventing live red/green diff backgrounds from collapsing to the same gray
+  while leaving history capture and other attached terminals untouched.
 
 ## [0.2.6] - 2026-07-23
 

@@ -2235,8 +2235,13 @@ class App:
         if presentation is WorkspacePresentation.COMPACT:
             owner = getattr(self, "_railmux_pane_id", None)
             active = tmux_ctl.active_pane_id(owner) if owner else None
-            self._pre_compact_wide_zoom_pane = (
-                active if self._window_is_zoomed() else None)
+            was_zoomed = self._window_is_zoomed()
+            self._pre_compact_wide_zoom_pane = active if was_zoomed else None
+            self._pre_compact_layout_profile = (
+                None
+                if was_zoomed
+                else self._capture_layout_profile("always")
+            )
             slot = workspace.slot_for_pane(active) if active else None
             if active == owner:
                 page = WorkspacePage.SIDEBAR
@@ -2270,7 +2275,11 @@ class App:
             if active is not None and not tmux_ctl.toggle_pane_zoom(active):
                 return False
         workspace.presentation = presentation
-        self._resize_sidebar_for_layout(workspace.layout)
+        compact_profile = getattr(
+            self, "_pre_compact_layout_profile", None)
+        self._pre_compact_layout_profile = None
+        if not self._restore_transient_layout_profile(compact_profile):
+            self._resize_sidebar_for_layout(workspace.layout)
         self._apply_layout_profile(allow_create=True)
         self._reconcile_focus_from_tmux()
         restore_zoom = getattr(
@@ -2394,6 +2403,55 @@ class App:
             primary_permille=primary_permille,
         )
 
+    def _resize_primary_for_ratio(
+        self,
+        region: tuple[int, int],
+        ratio: int | None,
+    ) -> bool:
+        """Restore the primary share of one already-existing dual layout."""
+        workspace = self._agent_workspace()
+        primary = workspace.primary.pane_id
+        if (workspace.layout is WorkspaceLayout.SINGLE
+                or primary is None or ratio is None):
+            return True
+        if workspace.layout is WorkspaceLayout.SIDE_BY_SIDE:
+            usable = region[0] - 1
+            minimum = self._MINIMUM_AGENT_PANE_SIZE[0]
+            if usable < minimum * 2:
+                return False
+            desired = min(usable - minimum, max(
+                minimum, round(usable * ratio / 1000)))
+            return tmux_ctl.resize_pane_width(primary, desired)
+        usable = region[1] - 1
+        minimum = self._MINIMUM_AGENT_PANE_SIZE[1]
+        if usable < minimum * 2:
+            return False
+        desired = min(usable - minimum, max(
+            minimum, round(usable * ratio / 1000)))
+        return tmux_ctl.resize_pane_height(primary, desired)
+
+    def _restore_transient_layout_profile(
+        self, profile: LayoutProfile | None,
+    ) -> bool:
+        """Replay the pre-compact geometry without persisting new settings."""
+        workspace = self._agent_workspace()
+        if profile is None or profile.layout != workspace.layout.value:
+            return False
+        old_sidebar = getattr(self, "_active_sidebar_permille", None)
+        old_primary = getattr(self, "_active_primary_permille", None)
+        self._active_sidebar_permille = profile.sidebar_permille
+        self._active_primary_permille = profile.primary_permille
+        restored = self._resize_sidebar_for_layout(workspace.layout)
+        region = self._agent_region_size() if restored else None
+        if (region is not None
+                and self._layout_fits(region, workspace.layout)
+                and self._resize_primary_for_ratio(
+                    region, profile.primary_permille)):
+            return True
+        self._active_sidebar_permille = old_sidebar
+        self._active_primary_permille = old_primary
+        return False
+
     def _layout_profile_failed_to_fit(self) -> bool:
         """Retain the preference while returning this run to safe defaults."""
         self._layout_profile_fallback = True
@@ -2466,24 +2524,10 @@ class App:
                 workspace.layout = WorkspaceLayout.SINGLE
             return self._layout_profile_failed_to_fit()
 
-        primary = workspace.primary.pane_id
         ratio = profile.primary_permille
         if (workspace.layout is not WorkspaceLayout.SINGLE
-                and primary is not None and region is not None
-                and ratio is not None):
-            if workspace.layout is WorkspaceLayout.SIDE_BY_SIDE:
-                usable = region[0] - 1
-                minimum = self._MINIMUM_AGENT_PANE_SIZE[0]
-                desired = min(usable - minimum, max(
-                    minimum, round(usable * ratio / 1000)))
-                resized = tmux_ctl.resize_pane_width(primary, desired)
-            else:
-                usable = region[1] - 1
-                minimum = self._MINIMUM_AGENT_PANE_SIZE[1]
-                desired = min(usable - minimum, max(
-                    minimum, round(usable * ratio / 1000)))
-                resized = tmux_ctl.resize_pane_height(primary, desired)
-            if not resized:
+                and region is not None and ratio is not None):
+            if not self._resize_primary_for_ratio(region, ratio):
                 if created_secondary:
                     self._display_transport().close_slot(workspace.secondary)
                     workspace.layout = WorkspaceLayout.SINGLE
@@ -2623,6 +2667,12 @@ class App:
                 is WorkspacePresentation.COMPACT):
             self._restore_compact_page()
         if committed:
+            if (self._agent_workspace().presentation
+                    is WorkspacePresentation.COMPACT):
+                # F8 intentionally changed topology while the old wide
+                # geometry was hidden; do not replay that stale orientation
+                # if the user later cycles back to the same layout.
+                self._pre_compact_layout_profile = None
             self._layout_geometry_user_owned = True
             self._layout_profile_fallback = False
             return

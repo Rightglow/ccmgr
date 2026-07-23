@@ -438,6 +438,31 @@ def test_resize_notifies_private_tmux_client_process_group(monkeypatch):
     notify.assert_called_once_with(123, signal.SIGWINCH)
 
 
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        ("tmux 3.4\n", ("-T", "RGB")),
+        ("tmux 3.2a\n", ("-T", "RGB")),
+        ("tmux 3.1c\n", ()),
+        ("tmux 2.7\n", ()),
+        ("unexpected\n", ()),
+    ],
+)
+def test_private_tmux_client_enables_rgb_only_when_supported(
+    monkeypatch, version, expected,
+):
+    monkeypatch.setattr(
+        fast_display_server.subprocess,
+        "check_output",
+        lambda *_args, **_kwargs: version,
+    )
+    fast_display_server._tmux_client_feature_args.cache_clear()
+    try:
+        assert fast_display_server._tmux_client_feature_args() == expected
+    finally:
+        fast_display_server._tmux_client_feature_args.cache_clear()
+
+
 def test_mode_only_patch_reconciles_terminal_modes_once_and_restores_them():
     decoder = ClientScreenUpdateDecoder()
     model = ScreenModel()
