@@ -21,6 +21,7 @@ ruff check src tests tools
 pytest -q
 python -m build
 twine check dist/*
+python tools/wheel_smoke.py dist/*.whl
 ```
 
 Tests live in `tests/` and run against the package installed in editable mode. Please add a test alongside any bugfix or new behavior.
@@ -63,5 +64,5 @@ maintainer-only detail belong under [`docs/`](docs/README.md).
 
 File an issue at https://github.com/Rightglow/Railmux/issues with:
 
-- output from `railmux --doctor` (designed to omit private environment data)
+- output from `railmux doctor` (designed to omit private environment data)
 - Steps to reproduce and what you expected vs. what happened

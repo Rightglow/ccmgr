@@ -41,6 +41,10 @@ COMPACT_ENTER_WIDTH = 80
 COMPACT_ENTER_HEIGHT = 24
 COMPACT_EXIT_WIDTH = 84
 COMPACT_EXIT_HEIGHT = 26
+SINGLE_SIDEBAR_PERCENT = 30
+DUAL_SIDEBAR_PERCENT = 20
+DUAL_SIDEBAR_MIN_WIDTH = 30
+MINIMUM_AGENT_PANE_SIZE = (50, 12)
 
 
 def presentation_for_geometry(
@@ -82,6 +86,68 @@ def projected_agent_size(
     if layout is WorkspaceLayout.STACKED:
         return width, max(0, (height - 1) // 2)
     return width, height
+
+
+def sidebar_width_for_layout(
+    layout: WorkspaceLayout,
+    window_width: int,
+    sidebar_permille: int | None = None,
+) -> int:
+    """Return the bounded responsive width of the sidebar divider."""
+    if sidebar_permille is None:
+        percent = (
+            SINGLE_SIDEBAR_PERCENT
+            if layout is WorkspaceLayout.SINGLE
+            else DUAL_SIDEBAR_PERCENT
+        )
+        width = round(window_width * percent / 100)
+    else:
+        width = round(window_width * sidebar_permille / 1000)
+    if layout is not WorkspaceLayout.SINGLE:
+        width = max(DUAL_SIDEBAR_MIN_WIDTH, width)
+    return min(max(1, width), max(1, window_width - 2))
+
+
+def wide_layout_fits_geometry(
+    width: int,
+    height: int,
+    layout: WorkspaceLayout,
+    *,
+    sidebar_permille: int | None = None,
+    exit_margin: bool = False,
+) -> bool:
+    """Whether an unzoomed logical layout can keep every agent pane usable."""
+    if layout is WorkspaceLayout.SINGLE:
+        return True
+    sidebar_width = sidebar_width_for_layout(
+        layout,
+        width,
+        sidebar_permille,
+    )
+    agent_region = (max(0, width - sidebar_width - 1), height)
+    pane_width, pane_height = projected_agent_size(agent_region, layout)
+    min_width, min_height = MINIMUM_AGENT_PANE_SIZE
+    if exit_margin:
+        min_width += 2
+        min_height += 1
+    return pane_width >= min_width and pane_height >= min_height
+
+
+def terminal_size_class(
+    width: int,
+    height: int,
+    *,
+    minimum: tuple[int, int],
+    recommended: tuple[int, int],
+) -> str:
+    """Classify one outer terminal without coupling policy to UI effects."""
+    min_width, min_height = minimum
+    rec_width, rec_height = recommended
+    if width < min_width or height < min_height:
+        return "critical"
+    if width < rec_width or height < rec_height:
+        return "reduced"
+    return "comfortable"
 
 
 class DisplayTransportKind(str, Enum):

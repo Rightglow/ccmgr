@@ -363,6 +363,9 @@ command. Editable source installations are reported but never overwritten.
 railmux doctor
 ```
 
+Use `railmux doctor --json` for the same privacy-safe snapshot in a versioned,
+machine-readable form suitable for issue tooling.
+
 The doctor command works even when `tmux` is missing. It reports component versions, terminal capability
 hints, configuration health, dedicated-server reachability, watchdog state,
 the number of legacy candidates on the default server, the age and bounded
@@ -473,6 +476,21 @@ terminal update. Install Railmux locally, then run:
 ```bash
 railmux ssh your-server
 ```
+
+Add `--reconnect` to keep an established display available through a brief
+network interruption:
+
+```bash
+railmux ssh --reconnect your-server
+```
+
+Automatic reconnect retries for up to 60 seconds while leaving the last screen
+visible. Press `Ctrl-]` or `Ctrl-C` while it is retrying to stop immediately.
+It starts only after the first screen has arrived and never retries an explicit
+detach, soft quit, hard quit, or local disconnect. Retries use non-interactive
+SSH authentication and never install, upgrade, replace, detach, or kill
+anything remotely. If the connection needs a new password or MFA interaction,
+Railmux restores the terminal and asks you to rerun the ordinary command.
 
 Before the remote helper attaches to tmux, both ends exchange package and
 private-protocol versions. If Railmux is absent remotely, the local client asks

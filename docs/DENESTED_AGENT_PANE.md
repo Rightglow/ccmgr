@@ -303,6 +303,14 @@ enumeration to close the race, and never kills the session, panes, or agents.
 The client first starts one fresh ordinary helper after BUSY, so transient v7
 attach contention completes without presenting the legacy takeover prompt.
 
+The optional local `--reconnect` loop lasts long enough to outlive the
+45-second lease. It retains the last painted frame, uses non-interactive
+authentication, and performs only ordinary non-replacement attaches. Local
+`Ctrl-]`, `Ctrl-C`, or EOF cancels every handshake/backoff immediately.
+Compatibility changes, exhaustion, and persistent BUSY restore the terminal
+and require a fresh ordinary command; retry never installs, upgrades, takes
+over, detaches, or kills remote state.
+
 Every input byte other than `Ctrl-]` goes to the real tmux client. Consequently
 `Ctrl-B d`, prefix navigation, F8/F9, sidebar input, and agent input follow the
 server's actual tmux configuration. `Ctrl-]` is intercepted before SSH and

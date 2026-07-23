@@ -115,7 +115,20 @@ def test_doctor_runs_before_tmux_preflight(monkeypatch, tmp_path):
     result = main(["doctor", "--claude-home", str(tmp_path)])
 
     assert result == 0
-    doctor.assert_called_once_with(claude_home=tmp_path)
+    doctor.assert_called_once_with(claude_home=tmp_path, json_output=False)
+    preflight.assert_not_called()
+
+
+def test_doctor_json_is_forwarded_before_tmux_preflight(monkeypatch, tmp_path):
+    doctor = MagicMock(return_value=0)
+    preflight = MagicMock(return_value=False)
+    monkeypatch.setattr("railmux.cli.run_doctor", doctor)
+    monkeypatch.setattr("railmux.cli.ensure_tmux_available", preflight)
+
+    result = main(["doctor", "--json", "--claude-home", str(tmp_path)])
+
+    assert result == 0
+    doctor.assert_called_once_with(claude_home=tmp_path, json_output=True)
     preflight.assert_not_called()
 
 

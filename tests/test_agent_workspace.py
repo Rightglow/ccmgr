@@ -14,6 +14,9 @@ from railmux.ui.workspace import (
     WorkspacePresentation,
     next_workspace_layout,
     presentation_for_geometry,
+    sidebar_width_for_layout,
+    terminal_size_class,
+    wide_layout_fits_geometry,
 )
 
 
@@ -114,6 +117,38 @@ def test_compact_presentation_uses_two_dimensional_hysteresis():
     assert presentation_for_geometry(
         WorkspacePresentation.COMPACT, 84, 26,
     ) is WorkspacePresentation.WIDE
+
+
+def test_workspace_geometry_policy_is_pure_and_ratio_based():
+    assert sidebar_width_for_layout(WorkspaceLayout.SINGLE, 160) == 48
+    assert sidebar_width_for_layout(
+        WorkspaceLayout.SIDE_BY_SIDE, 180, 220
+    ) == 40
+    assert sidebar_width_for_layout(WorkspaceLayout.STACKED, 120) == 30
+
+    assert wide_layout_fits_geometry(
+        130, 30, WorkspaceLayout.SIDE_BY_SIDE
+    ) is False
+    assert wide_layout_fits_geometry(
+        136,
+        30,
+        WorkspaceLayout.SIDE_BY_SIDE,
+        sidebar_permille=200,
+        exit_margin=True,
+    ) is True
+    assert wide_layout_fits_geometry(
+        100, 60, WorkspaceLayout.STACKED
+    ) is True
+
+    assert terminal_size_class(
+        39, 12, minimum=(40, 12), recommended=(120, 30)
+    ) == "critical"
+    assert terminal_size_class(
+        80, 24, minimum=(40, 12), recommended=(120, 30)
+    ) == "reduced"
+    assert terminal_size_class(
+        120, 30, minimum=(40, 12), recommended=(120, 30)
+    ) == "comfortable"
 
 
 def _reconcile_app() -> tuple[App, AgentWorkspace, MagicMock]:

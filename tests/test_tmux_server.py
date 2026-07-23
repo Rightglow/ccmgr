@@ -22,6 +22,17 @@ def test_tmux_argv_always_selects_a_nondefault_label():
     ) == ["tmux", "-L", "rx-test-12", "list-sessions"]
 
 
+def test_launcher_argv_preserves_multi_argument_python_module_prefix():
+    assert tmux_server.launcher_argv(
+        ["/usr/bin/python3", "-m", "railmux"],
+        ["--mode", "codex"],
+    ) == [
+        "tmux", "-L", "railmux", "new-session", "-A", "-s", "railmux",
+        "/usr/bin/python3", "-m", "railmux", "--inside-tmux",
+        "--mode", "codex",
+    ]
+
+
 def test_current_socket_parser_allows_commas_in_the_path():
     env = {"TMUX": "/tmp/with,comma/railmux,123,0"}
     assert tmux_server.current_socket_path(env) == "/tmp/with,comma/railmux"

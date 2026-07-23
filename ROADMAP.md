@@ -68,30 +68,6 @@ application synchronized-output support, and the existing swap transport.
 Any workaround must remain opt-in until its history tradeoff and Codex
 version compatibility are clear.
 
-### Compact/portrait navigation
-
-For a narrow or portrait terminal, consider showing sidebar and agent as two
-exclusive views instead of squeezing them side by side. Activating an item in
-the sidebar would switch to the agent view. A very small top menu/status pane
-could preserve mode, current project/session, and a clear `Back to sidebar`
-action without pretending the agent is fullscreen.
-
-This can be a good responsive layout, but should not be implemented as an
-implicit resize side effect until these questions are answered:
-
-- Is the switch triggered only below a startup threshold, or manually?
-- How does mouse/keyboard focus return without intercepting agent input?
-- Does F9 mean terminal fullscreen or merely hide the compact top menu?
-- Can tmux rearrange the panes without resizing/reflowing a running agent TUI?
-- What state is preserved when moving between compact and regular layouts?
-
-A promising implementation is two outer tmux windows (`sidebar` and `agent`)
-rather than two panes squeezed to near-zero width. Window switching keeps both
-processes alive and gives each view the full terminal. The existing Railmux tmux
-status line could move to the top in compact mode and act as the small feedback/
-navigation surface; a dedicated menu pane would cost space and add another
-focus target. This remains a hypothesis to prototype, not an agreed design.
-
 ### Provider adapters
 
 The mode registry now supports a third stable mode and independent view state.
@@ -99,6 +75,25 @@ Extract backend operations behind a provider adapter before adding a provider
 whose discovery/launch/delete model differs from both existing backends.
 
 ## Completed foundations
+
+### Responsive compact workspace
+
+Cramped terminals use one full-window page at a time without changing the
+logical one/two-agent layout. The tmux status map provides portable
+sidebar/A1/A2 navigation, an intermediate projection temporarily hides the
+second agent before full compact mode, and widening restores slot identities,
+Target, orientation, and proportional dividers. Short mobile terminals keep
+their remote logical size while a soft keyboard locally projects the bottom of
+the live screen.
+
+### Latest-state SSH display
+
+The version-negotiated SSH transport coalesces screen state, provides bounded
+styled local history per agent pane, supports safe remote user installation,
+and keeps each helper behind an exact heartbeat lease. An opt-in bounded
+reconnect loop can replace an unexpectedly lost display without takeover or
+remote mutation. Diagnostics expose the same privacy-safe snapshot as human
+text or versioned JSON.
 
 ### Multi-instance restart state
 

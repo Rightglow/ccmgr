@@ -87,6 +87,10 @@ from railmux.ui.statusbar import ButtonBar, HintBar, TIPS
 from railmux.ui.workspace import (
     AgentSlot,
     AgentWorkspace,
+    DUAL_SIDEBAR_MIN_WIDTH,
+    DUAL_SIDEBAR_PERCENT,
+    MINIMUM_AGENT_PANE_SIZE,
+    SINGLE_SIDEBAR_PERCENT,
     SlotRestoreState,
     WorkspaceLayout,
     WorkspacePage,
@@ -94,6 +98,9 @@ from railmux.ui.workspace import (
     next_workspace_layout,
     presentation_for_geometry,
     projected_agent_size,
+    sidebar_width_for_layout,
+    terminal_size_class,
+    wide_layout_fits_geometry,
 )
 
 
@@ -513,10 +520,10 @@ class App:
     # reported as reduced, but a normal phone portrait is not a red error.
     _MINIMUM_TERMINAL_SIZE = (40, 12)
     _RECOMMENDED_AGENT_PANE_SIZE = (80, 20)
-    _MINIMUM_AGENT_PANE_SIZE = (50, 12)
-    _SINGLE_SIDEBAR_PERCENT = 30
-    _DUAL_SIDEBAR_PERCENT = 20
-    _DUAL_SIDEBAR_MIN_WIDTH = 30
+    _MINIMUM_AGENT_PANE_SIZE = MINIMUM_AGENT_PANE_SIZE
+    _SINGLE_SIDEBAR_PERCENT = SINGLE_SIDEBAR_PERCENT
+    _DUAL_SIDEBAR_PERCENT = DUAL_SIDEBAR_PERCENT
+    _DUAL_SIDEBAR_MIN_WIDTH = DUAL_SIDEBAR_MIN_WIDTH
 
     # -- compatibility shims -------------------------------------------------
     # Tests and third-party extensions built against pre-workspace releases may
@@ -2353,21 +2360,12 @@ class App:
         window_width: int,
         sidebar_permille: int | None = None,
     ) -> int:
-        """Responsive sidebar width for one workspace layout."""
-        if sidebar_permille is None:
-            percent = (
-                cls._SINGLE_SIDEBAR_PERCENT
-                if layout is WorkspaceLayout.SINGLE
-                else cls._DUAL_SIDEBAR_PERCENT
-            )
-            width = round(window_width * percent / 100)
-        else:
-            width = round(window_width * sidebar_permille / 1000)
-        if layout is not WorkspaceLayout.SINGLE:
-            width = max(cls._DUAL_SIDEBAR_MIN_WIDTH, width)
-        # The layout-fit gate rejects dual panes before a tiny window can reach
-        # this clamp; the final bound keeps every best-effort tmux request valid.
-        return min(max(1, width), max(1, window_width - 2))
+        """Compatibility wrapper around the pure workspace geometry policy."""
+        return sidebar_width_for_layout(
+            layout,
+            window_width,
+            sidebar_permille,
+        )
 
     def _resize_sidebar_for_layout(self, layout: WorkspaceLayout) -> bool:
         """Apply the layout's sidebar ratio without making layout depend on it."""
@@ -8265,13 +8263,12 @@ class App:
 
     @classmethod
     def _terminal_size_class(cls, width: int, height: int) -> str:
-        min_width, min_height = cls._MINIMUM_TERMINAL_SIZE
-        rec_width, rec_height = cls._RECOMMENDED_TERMINAL_SIZE
-        if width < min_width or height < min_height:
-            return "critical"
-        if width < rec_width or height < rec_height:
-            return "reduced"
-        return "comfortable"
+        return terminal_size_class(
+            width,
+            height,
+            minimum=cls._MINIMUM_TERMINAL_SIZE,
+            recommended=cls._RECOMMENDED_TERMINAL_SIZE,
+        )
 
     def _workspace_size(self) -> tuple[int, int] | None:
         """Return the full Railmux workspace size, not the sidebar TTY size."""
@@ -8303,24 +8300,16 @@ class App:
         """
         workspace = self._agent_workspace()
         layout = layout or workspace.layout
-        if layout is WorkspaceLayout.SINGLE:
-            return True
         if sidebar_permille is None:
             sidebar_permille = getattr(
                 self, "_active_sidebar_permille", None)
-        sidebar_width = self._sidebar_width_for_layout(
-            layout,
+        return wide_layout_fits_geometry(
             width,
-            sidebar_permille,
+            height,
+            layout,
+            sidebar_permille=sidebar_permille,
+            exit_margin=exit_margin,
         )
-        agent_region = (max(0, width - sidebar_width - 1), height)
-        pane_width, pane_height = projected_agent_size(
-            agent_region, layout)
-        min_width, min_height = self._MINIMUM_AGENT_PANE_SIZE
-        if exit_margin:
-            min_width += 2
-            min_height += 1
-        return pane_width >= min_width and pane_height >= min_height
 
     def _sync_adaptive_single_view(
         self, width: int, height: int,

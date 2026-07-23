@@ -21,6 +21,7 @@ jobs:
       - run: python -m ruff check src tests tools
       - run: python -m build
       - run: python -m twine check dist/*
+      - run: python tools/wheel_smoke.py dist/*.whl
 
   pytest:
     runs-on: ubuntu-latest

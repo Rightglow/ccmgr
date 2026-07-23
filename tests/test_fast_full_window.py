@@ -23,6 +23,7 @@ from railmux.fast_display_protocol import (
     REMOTE_ATTACH_BUSY,
     REMOTE_HELLO_PREFIX,
     REMOTE_START,
+    RemoteExit,
     ScreenUpdate,
     ScreenUpdateDecoder as ClientScreenUpdateDecoder,
     ServerMessageDecoder,
@@ -1382,6 +1383,39 @@ def test_remote_startup_rejects_an_old_wire_protocol_without_timing_out():
         process.wait(timeout=2.0)
 
 
+@pytest.mark.parametrize("waiter", ["hello", "attach"])
+def test_reconnect_handshake_waits_are_locally_cancellable(waiter):
+    process = subprocess.Popen(
+        [
+            fast_display_client.sys.executable,
+            "-c",
+            "import time; time.sleep(5)",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+    )
+    read_fd, write_fd = os.pipe()
+    try:
+        os.write(write_fd, LOCAL_ESCAPE)
+        with pytest.raises(
+            fast_display_client.ReconnectCancelled
+        ) as exc:
+            if waiter == "hello":
+                await_remote_startup(
+                    process, timeout=2.0, cancel_fd=read_fd
+                )
+            else:
+                fast_display_client.await_remote_attach_status(
+                    process, timeout=2.0, cancel_fd=read_fd
+                )
+        assert exc.value.exit_code == 0
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+        process.terminate()
+        process.wait(timeout=2.0)
+
+
 @pytest.mark.parametrize(
     ("status", "expected"),
     [
@@ -1407,6 +1441,190 @@ def test_remote_attach_status_stops_at_line_before_display_frames(
         process, timeout=2.0) is expected
     assert os.read(process.stdout.fileno(), len(DISPLAY_MAGIC)) == DISPLAY_MAGIC
     process.wait(timeout=2.0)
+
+
+def test_reconnect_flag_is_opt_in_and_preserved_in_raw_argv():
+    default = parse_client_args(["server"])
+    enabled = parse_client_args(["server", "--reconnect"])
+
+    assert default.reconnect is False
+    assert enabled.reconnect is True
+    assert enabled.raw_argv == ("server", "--reconnect")
+
+
+@pytest.mark.parametrize(
+    ("enabled", "frames", "local_exit", "returncode", "expected"),
+    [
+        (True, 1, False, 255, True),
+        (False, 1, False, 255, False),
+        (True, 0, False, 255, False),
+        (True, 1, True, 255, False),
+        (True, 1, False, None, False),
+        (True, 1, False, int(RemoteExit.DETACHED), False),
+        (True, 1, False, int(RemoteExit.SOFT_QUIT), False),
+        (True, 1, False, int(RemoteExit.HARD_QUIT), False),
+    ],
+)
+def test_automatic_reconnect_classifies_only_unexpected_established_exit(
+    enabled, frames, local_exit, returncode, expected,
+):
+    assert fast_display_client.should_automatically_reconnect(
+        enabled=enabled,
+        painted_frames=frames,
+        local_exit=local_exit,
+        returncode=returncode,
+    ) is expected
+
+
+def test_reconnect_wait_local_ctrl_c_and_escape_are_cancellable():
+    for byte, exit_code in ((b"\x03", 130), (LOCAL_ESCAPE, 0), (b"", 0)):
+        read_fd, write_fd = os.pipe()
+        try:
+            if byte:
+                os.write(write_fd, byte)
+            else:
+                os.close(write_fd)
+                write_fd = -1
+            with pytest.raises(
+                fast_display_client.ReconnectCancelled
+            ) as exc:
+                fast_display_client._consume_reconnect_input(read_fd)
+            assert exc.value.exit_code == exit_code
+        finally:
+            os.close(read_fd)
+            if write_fd >= 0:
+                os.close(write_fd)
+
+
+def test_automatic_reconnect_never_requests_takeover_or_interactive_auth(
+    monkeypatch,
+):
+    process = _PreflightProcess()
+    reconnect = MagicMock(
+        return_value=(process, RemoteAttachKind.ACCEPTED)
+    )
+    monkeypatch.setattr(
+        fast_display_client, "_reconnect_remote_attach", reconnect
+    )
+    surface = MagicMock()
+    args = parse_client_args(["server", "--reconnect"])
+
+    selected = fast_display_client._automatic_reconnect(
+        args,
+        os.terminal_size((120, 40)),
+        surface,
+        9,
+    )
+
+    assert selected is process
+    reconnect.assert_called_once()
+    assert reconnect.call_args.kwargs == {
+        "replace_existing_client": False,
+        "cancel_fd": 9,
+        "timeout": fast_display_client._RECONNECT_ATTEMPT_TIMEOUT,
+        "noninteractive": True,
+    }
+    surface.show_local_status.assert_called_once()
+
+
+def test_automatic_reconnect_waits_for_busy_helper_lease_without_takeover(
+    monkeypatch,
+):
+    busy = _PreflightProcess()
+    accepted = _PreflightProcess()
+    reconnect = MagicMock(side_effect=(
+        (busy, RemoteAttachKind.BUSY),
+        (accepted, RemoteAttachKind.ACCEPTED),
+    ))
+    wait = MagicMock()
+    monkeypatch.setattr(
+        fast_display_client, "_reconnect_remote_attach", reconnect
+    )
+    monkeypatch.setattr(fast_display_client, "_wait_reconnect_delay", wait)
+    args = parse_client_args(["server", "--reconnect"])
+
+    selected = fast_display_client._automatic_reconnect(
+        args,
+        os.terminal_size((120, 40)),
+        MagicMock(),
+        9,
+    )
+
+    assert selected is accepted
+    assert busy.terminated
+    assert reconnect.call_count == 2
+    assert all(
+        call.kwargs["replace_existing_client"] is False
+        for call in reconnect.call_args_list
+    )
+    wait.assert_called_once_with(0.5, 9)
+
+
+def test_reconnect_window_outlives_the_remote_half_open_lease():
+    assert (
+        fast_display_client._RECONNECT_WINDOW
+        > fast_display_server._CLIENT_LEASE_TIMEOUT
+    )
+
+
+def test_reconnect_attach_forces_noninteractive_bounded_ssh(monkeypatch):
+    process = _PreflightProcess()
+    built = MagicMock(return_value=["ssh", "remote"])
+    monkeypatch.setattr(fast_display_client, "build_ssh_argv", built)
+    monkeypatch.setattr(
+        fast_display_client, "_spawn_remote", lambda _argv: process
+    )
+    monkeypatch.setattr(
+        fast_display_client,
+        "await_remote_startup",
+        lambda *_args, **_kwargs: RemoteStartup(
+            RemoteStartKind.HELLO,
+            RemoteHello(
+                fast_display_client.__version__, PROTOCOL_VERSION, True
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        fast_display_client,
+        "await_remote_attach_status",
+        lambda *_args, **_kwargs: RemoteAttachKind.ACCEPTED,
+    )
+    args = parse_client_args([
+        "server",
+        "--ssh-arg=-J",
+        "--ssh-arg=jump",
+    ])
+
+    selected, status = fast_display_client._reconnect_remote_attach(
+        args,
+        os.terminal_size((120, 40)),
+        replace_existing_client=False,
+        cancel_fd=9,
+        timeout=5.0,
+        noninteractive=True,
+    )
+
+    assert selected is process
+    assert status is RemoteAttachKind.ACCEPTED
+    ssh_args = built.call_args.kwargs["ssh_args"]
+    assert ssh_args[:4] == [
+        "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+    ]
+    assert ssh_args[4:] == ["-J", "jump"]
+    assert built.call_args.kwargs["replace_existing_client"] is False
+
+
+def test_local_reconnect_status_is_bounded_to_terminal_bottom_row():
+    output = io.BytesIO()
+    surface = TerminalSurface(output)
+    surface.set_physical_size(os.terminal_size((12, 4)))
+
+    surface.show_local_status("retry\x1b-secret-is-long")
+
+    painted = output.getvalue()
+    assert b"\033[?1049h" in painted
+    assert b"\033[4;1H\033[2Kretry -secre" in painted
+    assert b"is-long" not in painted
 
 
 class _PreflightProcess:

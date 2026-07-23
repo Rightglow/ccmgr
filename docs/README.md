@@ -62,9 +62,8 @@ Related repository-level documents have different roles:
   disposable once their durable conclusions and unresolved risks have reached
   the authoritative documents.
 
-`DENESTED_AGENT_PANE.md` remains temporarily active for the first release with
-swap as the default, because its reproducible recovery evidence and explicit
-tmux 2.7/2.8 limitations still protect the compatibility boundary. After that
-release is field-tested, retain only useful benchmark reproduction and move any
-new lasting contracts into `ARCHITECTURE.md`; Git history can preserve the full
-experiment narrative.
+`DENESTED_AGENT_PANE.md` retains the reproducible transaction experiments,
+benchmark method, falsifiable default decision, and explicit tmux 2.7/2.8
+limitations. Swap has now received multiple field releases; current behavior
+and safety authority live in `ARCHITECTURE.md`, so the evidence file must not
+grow into a second implementation specification.

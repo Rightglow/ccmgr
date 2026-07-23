@@ -162,8 +162,16 @@ def main(argv: list[str] | None = None) -> int:
             default=str(Path.home() / ".claude"),
             help="Override ~/.claude location (testing)",
         )
+        doctor_parser.add_argument(
+            "--json",
+            action="store_true",
+            help="print the versioned privacy-safe diagnostic snapshot as JSON",
+        )
         doctor_args = doctor_parser.parse_args(raw_args[1:])
-        return run_doctor(claude_home=Path(doctor_args.claude_home))
+        return run_doctor(
+            claude_home=Path(doctor_args.claude_home),
+            json_output=doctor_args.json,
+        )
 
     parser = argparse.ArgumentParser(
         prog="railmux",
@@ -250,8 +258,12 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
 
-        railmux_path = sys.argv[0]
-        cmd = tmux_server.launcher_argv(railmux_path, raw_args)
+        launch_prefix = (
+            [sys.executable, "-m", "railmux"]
+            if Path(sys.argv[0]).name == "__main__.py"
+            else [sys.argv[0]]
+        )
+        cmd = tmux_server.launcher_argv(launch_prefix, raw_args)
         dedicated_session_id = (
             tmux_server.target_session_id(dedicated_target, "railmux")
             if dedicated_target is not None else None

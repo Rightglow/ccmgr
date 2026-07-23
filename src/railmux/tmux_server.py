@@ -369,7 +369,7 @@ def scoped_target_environment(
 
 
 def launcher_argv(
-    executable: str,
+    launch_prefix: Sequence[str],
     forwarded_args: Sequence[str],
 ) -> list[str]:
     """Build the only supported entry into the dedicated Railmux workspace."""
@@ -378,7 +378,7 @@ def launcher_argv(
         "-A",
         "-s",
         "railmux",
-        executable,
+        *launch_prefix,
         "--inside-tmux",
         *forwarded_args,
     )

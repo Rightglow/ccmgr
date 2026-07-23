@@ -60,6 +60,17 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _source_subprocess_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """Let subprocess smoke tests execute the checkout without installing it."""
+    env = dict(os.environ if base is None else base)
+    source_root = str(Path(__file__).resolve().parents[1] / "src")
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        source_root if not existing else os.pathsep.join((source_root, existing))
+    )
+    return env
+
+
 @pytest.fixture
 def isolated_tmux(monkeypatch):
     if shutil.which("tmux") is None:
@@ -85,6 +96,13 @@ def isolated_tmux(monkeypatch):
             check=True,
             capture_output=True,
             text=True,
+        )
+        subprocess.run(
+            [
+                "tmux", "-S", socket_path, "set-environment", "-g",
+                "PYTHONPATH", _source_subprocess_env()["PYTHONPATH"],
+            ],
+            check=True,
         )
         server_pid = subprocess.check_output(
             [
@@ -338,7 +356,7 @@ def test_remote_compatibility_hello_precedes_any_tmux_server(monkeypatch):
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=os.environ.copy(),
+            env=_source_subprocess_env(),
         )
         assert process.stdout is not None
         assert process.stdout.readline().startswith(REMOTE_HELLO_PREFIX)
@@ -1040,7 +1058,7 @@ def test_real_soft_quit_disconnects_shared_clients_and_agents_survive(
     monkeypatch.setenv(tmux_server.SOCKET_LABEL_ENV, label)
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.delenv("TMUX_PANE", raising=False)
-    env = os.environ.copy()
+    env = _source_subprocess_env()
     env.update({
         "HOME": str(home),
         "XDG_CONFIG_HOME": str(home / ".config"),
@@ -1048,9 +1066,8 @@ def test_real_soft_quit_disconnects_shared_clients_and_agents_survive(
         "TERM": "xterm-256color",
     })
     clients: list[tuple[subprocess.Popen, int, threading.Thread]] = []
+    client_output: dict[int, bytearray] = {}
     stop_draining = threading.Event()
-    railmux_executable = Path(sys.executable).with_name("railmux")
-    assert railmux_executable.is_file()
 
     def tmux(*args: str, check: bool = True) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -1099,7 +1116,9 @@ def test_real_soft_quit_disconnects_shared_clients_and_agents_survive(
         )
         process = subprocess.Popen(
             [
-                str(railmux_executable),
+                sys.executable,
+                "-m",
+                "railmux",
                 "--claude-home", str(claude_home),
             ],
             stdin=slave,
@@ -1109,6 +1128,7 @@ def test_real_soft_quit_disconnects_shared_clients_and_agents_survive(
             start_new_session=True,
         )
         os.close(slave)
+        output = client_output.setdefault(process.pid, bytearray())
 
         def drain_output() -> None:
             while not stop_draining.is_set():
@@ -1116,8 +1136,10 @@ def test_real_soft_quit_disconnects_shared_clients_and_agents_survive(
                 if not readable:
                     continue
                 try:
-                    if not os.read(master, 65536):
+                    chunk = os.read(master, 65536)
+                    if not chunk:
                         return
+                    output.extend(chunk)
                 except OSError:
                     return
 
@@ -1128,7 +1150,10 @@ def test_real_soft_quit_disconnects_shared_clients_and_agents_survive(
 
     try:
         first, first_master = launch_client()
-        assert _wait_until(lambda: attached_count() == 1, timeout=8.0)
+        assert _wait_until(
+            lambda: attached_count() == 1,
+            timeout=8.0,
+        ), client_output[first.pid].decode(errors="replace")
         assert _wait_until(
             lambda: "q Quit" in captured_railmux(), timeout=8.0)
 
@@ -1179,7 +1204,7 @@ def test_real_soft_quit_disconnects_shared_clients_and_agents_survive(
 
 def test_real_remote_display_soft_quit_keeps_tmux_responsive(
         monkeypatch, tmp_path):
-    """The SSH helper observes soft quit without wedging its tmux server."""
+    """A dropped helper reattaches safely, then observes an intentional quit."""
     if shutil.which("tmux") is None:
         pytest.skip("tmux is not installed")
 
@@ -1196,7 +1221,7 @@ def test_real_remote_display_soft_quit_keeps_tmux_responsive(
     monkeypatch.setenv(tmux_server.SOCKET_LABEL_ENV, label)
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.delenv("TMUX_PANE", raising=False)
-    env = os.environ.copy()
+    env = _source_subprocess_env()
     env.update({
         "HOME": str(home),
         "XDG_CONFIG_HOME": str(home / ".config"),
@@ -1204,7 +1229,7 @@ def test_real_remote_display_soft_quit_keeps_tmux_responsive(
         "TERM": "xterm-256color",
     })
     process = None
-    drain_thread = None
+    drain_threads: list[threading.Thread] = []
 
     def tmux(*args: str, check: bool = True) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -1231,8 +1256,8 @@ def test_real_remote_display_soft_quit_keeps_tmux_responsive(
         ):
             return ""
 
-    try:
-        process = subprocess.Popen(
+    def launch_helper() -> subprocess.Popen:
+        helper = subprocess.Popen(
             [
                 sys.executable,
                 "-m",
@@ -1250,24 +1275,45 @@ def test_real_remote_display_soft_quit_keeps_tmux_responsive(
             stderr=subprocess.PIPE,
             env=env,
         )
-        assert process.stdin is not None
-        assert process.stdout is not None
-        assert process.stdout.readline().startswith(REMOTE_HELLO_PREFIX)
-        process.stdin.write(REMOTE_START)
-        process.stdin.flush()
-        assert process.stdout.readline() == REMOTE_ATTACH_ACCEPTED
+        assert helper.stdin is not None
+        assert helper.stdout is not None
+        assert helper.stdout.readline().startswith(REMOTE_HELLO_PREFIX)
+        helper.stdin.write(REMOTE_START)
+        helper.stdin.flush()
+        assert helper.stdout.readline() == REMOTE_ATTACH_ACCEPTED
 
-        def drain_output() -> None:
-            assert process is not None and process.stdout is not None
-            while process.stdout.read(65536):
+        def drain_output(target: subprocess.Popen) -> None:
+            assert target.stdout is not None
+            while target.stdout.read(65536):
                 pass
 
-        drain_thread = threading.Thread(target=drain_output, daemon=True)
+        drain_thread = threading.Thread(
+            target=drain_output,
+            args=(helper,),
+            daemon=True,
+        )
         drain_thread.start()
+        drain_threads.append(drain_thread)
+        return helper
+
+    try:
+        process = launch_helper()
         assert _wait_until(
             lambda: "q Quit" in captured_railmux(), timeout=8.0)
 
         tmux("new-session", "-d", "-s", "integration-agent", "sleep", "60")
+        process.terminate()
+        process.wait(timeout=3.0)
+        assert tmux(
+            "has-session", "-t", "railmux", check=False
+        ).returncode == 0
+        assert tmux(
+            "has-session", "-t", "integration-agent", check=False
+        ).returncode == 0
+
+        process = launch_helper()
+        assert _wait_until(
+            lambda: "q Quit" in captured_railmux(), timeout=8.0)
         process.stdin.write(encode_input(b"q"))
         process.stdin.flush()
         assert _wait_until(
@@ -1296,7 +1342,7 @@ def test_real_remote_display_soft_quit_keeps_tmux_responsive(
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=2.0)
-        if drain_thread is not None:
+        for drain_thread in drain_threads:
             drain_thread.join(timeout=1.0)
         tmux("kill-server", check=False)
         shutil.rmtree(socket_root, ignore_errors=True)

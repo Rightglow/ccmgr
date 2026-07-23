@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.10] - 2026-07-23
+
+### Added
+
+- Add opt-in `railmux ssh --reconnect`. After an established display loses its
+  connection unexpectedly, the client keeps the last frame visible and retries
+  ordinary non-replacement attaches for up to 60 seconds. Reconnect remains
+  locally cancellable, uses non-interactive authentication, and never retries
+  detach, soft quit, hard quit, or a deliberate local disconnect.
+- Add `railmux doctor --json`, a versioned machine-readable rendering of the
+  same privacy-safe diagnostic snapshot used by the human report.
+
+### Changed
+
+- Move responsive sidebar, dual-pane fit, and terminal-size classification into
+  pure workspace policy functions, leaving tmux commands and lifecycle
+  authority in the application controller.
+- Install and exercise each built wheel from an isolated offline prefix during
+  normal and release CI, including the console entry point, SSH extra import,
+  and structured doctor output.
+- Consolidate compact/mobile behavior as a completed foundation in the design
+  roadmap and document automatic reconnect and diagnostic privacy invariants.
+
 ## [0.2.9] - 2026-07-23
 
 ### Fixed
@@ -701,7 +724,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial PyPI release under the Railmux name.
 
-[Unreleased]: https://github.com/Rightglow/Railmux/compare/v0.2.9...HEAD
+[Unreleased]: https://github.com/Rightglow/Railmux/compare/v0.2.10...HEAD
+[0.2.10]: https://github.com/Rightglow/Railmux/compare/v0.2.9...v0.2.10
 [0.2.9]: https://github.com/Rightglow/Railmux/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/Rightglow/Railmux/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/Rightglow/Railmux/compare/v0.2.6...v0.2.7

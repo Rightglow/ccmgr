@@ -72,6 +72,14 @@ _MIN_TERMINAL_LINES = 12
 _MAX_TERMINAL_COLUMNS = 1000
 _MAX_TERMINAL_LINES = 500
 _TERMINAL_SIZE_POLL_INTERVAL = 0.1
+_RECONNECT_WINDOW = 60.0
+_RECONNECT_ATTEMPT_TIMEOUT = 5.0
+_RECONNECT_MAX_DELAY = 5.0
+_KNOWN_REMOTE_EXITS = {
+    int(RemoteExit.DETACHED): "detached; the Railmux session is still running",
+    int(RemoteExit.SOFT_QUIT): "soft-quit; agent sessions were left running",
+    int(RemoteExit.HARD_QUIT): "hard-quit; the managed Railmux session ended",
+}
 
 
 @dataclass(frozen=True)
@@ -175,6 +183,14 @@ class ProbeError(RuntimeError):
     """A bounded, user-facing SSH display failure."""
 
 
+class ReconnectCancelled(Exception):
+    """A local Ctrl-]/Ctrl-C/EOF cancelled an in-progress reconnect."""
+
+    def __init__(self, exit_code: int) -> None:
+        super().__init__("automatic reconnect cancelled")
+        self.exit_code = exit_code
+
+
 @dataclass(frozen=True)
 class RemoteHello:
     version: str
@@ -207,6 +223,8 @@ class RemoteStartup:
 def await_remote_attach_status(
     process: subprocess.Popen,
     timeout: float = _REMOTE_ATTACH_TIMEOUT,
+    *,
+    cancel_fd: int | None = None,
 ) -> RemoteAttachKind:
     """Read one post-start status without consuming the first display frame."""
     assert process.stdout is not None
@@ -217,10 +235,18 @@ def await_remote_attach_status(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return RemoteAttachKind.TIMEOUT
+        readers = [process.stdout.fileno()]
+        if cancel_fd is not None:
+            readers.append(cancel_fd)
         readable, _writable, _exceptional = select.select(
-            [process.stdout.fileno()], [], [], remaining)
+            readers, [], [], remaining
+        )
         if not readable:
             return RemoteAttachKind.TIMEOUT
+        if cancel_fd is not None and cancel_fd in readable:
+            _consume_reconnect_input(cancel_fd)
+            if process.stdout.fileno() not in readable:
+                continue
         chunk = os.read(process.stdout.fileno(), 1)
         if not chunk:
             process.wait()
@@ -273,6 +299,8 @@ def parse_remote_hello(line: bytes) -> RemoteHello:
 def await_remote_startup(
     process: subprocess.Popen,
     timeout: float = _REMOTE_HELLO_TIMEOUT,
+    *,
+    cancel_fd: int | None = None,
 ) -> RemoteStartup:
     """Wait before raw mode until the remote proves its compatibility state."""
     assert process.stdout is not None
@@ -288,11 +316,18 @@ def await_remote_startup(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return RemoteStartup(RemoteStartKind.TIMEOUT)
+        readers = [process.stdout.fileno()]
+        if cancel_fd is not None:
+            readers.append(cancel_fd)
         readable, _writable, _exceptional = select.select(
-            [process.stdout.fileno()], [], [], remaining
+            readers, [], [], remaining
         )
         if not readable:
             return RemoteStartup(RemoteStartKind.TIMEOUT)
+        if cancel_fd is not None and cancel_fd in readable:
+            _consume_reconnect_input(cancel_fd)
+            if process.stdout.fileno() not in readable:
+                continue
         chunk = os.read(process.stdout.fileno(), 1)
         if not chunk:
             returncode = process.wait()
@@ -316,6 +351,15 @@ def await_remote_startup(
             return RemoteStartup(RemoteStartKind.FAILED)
         return RemoteStartup(RemoteStartKind.HELLO, hello=hello)
     return RemoteStartup(RemoteStartKind.FAILED)
+
+
+def _consume_reconnect_input(fd: int) -> None:
+    """Discard unavailable-connection input, stopping on local escape/Ctrl-C."""
+    data = os.read(fd, 4096)
+    if b"\x03" in data:
+        raise ReconnectCancelled(130)
+    if not data or LOCAL_ESCAPE in data:
+        raise ReconnectCancelled(0)
 
 
 @dataclass(frozen=True)
@@ -970,6 +1014,23 @@ class TerminalSurface:
         self.stream.flush()
         self.active = True
 
+    def show_local_status(self, message: str) -> None:
+        """Temporarily replace the bottom row without leaving alt-screen."""
+        self.start()
+        height = 1 if self.physical_size is None else self.physical_size.lines
+        safe = "".join(
+            character if character.isprintable() and character != "\x1b" else " "
+            for character in message
+        )
+        if self.physical_size is not None:
+            safe = safe[:self.physical_size.columns]
+        self.stream.write(
+            f"\033[0m\033[{max(1, height)};1H\033[2K{safe}\033[?25l".encode(
+                "utf-8"
+            )
+        )
+        self.stream.flush()
+
     def _reconcile_terminal_modes(
         self, requested: TerminalMode,
     ) -> TerminalMode:
@@ -1361,6 +1422,21 @@ def _stop_unstarted_remote(process: subprocess.Popen) -> None:
         process.wait()
 
 
+def _reap_remote(process: subprocess.Popen, *, terminate: bool = False) -> int:
+    """Bound one SSH child's lifetime while preserving its natural status."""
+    if terminate and process.poll() is None:
+        process.terminate()
+    try:
+        return process.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            return process.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            return process.wait()
+
+
 def _local_upgrade_argv(version: str) -> list[str]:
     from railmux.self_update import upgrade_argv
     return upgrade_argv(version)
@@ -1492,20 +1568,37 @@ def _reconnect_remote_attach(
     current_size: os.terminal_size,
     *,
     replace_existing_client: bool,
+    cancel_fd: int | None = None,
+    timeout: float | None = None,
+    noninteractive: bool = False,
 ) -> tuple[subprocess.Popen, RemoteAttachKind]:
     """Start one already-negotiated helper and return its attach status."""
+    ssh_args = list(args.ssh_arg)
+    if noninteractive:
+        ssh_args = [
+            "-o", "BatchMode=yes",
+            "-o", f"ConnectTimeout={max(1, int(timeout or 5))}",
+            *ssh_args,
+        ]
     argv = build_ssh_argv(
         args.destination,
         session=args.session,
         width=current_size.columns,
         height=current_size.lines,
         fps=args.fps,
-        ssh_args=args.ssh_arg,
+        ssh_args=ssh_args,
         replace_existing_client=replace_existing_client,
     )
     process = _spawn_remote(argv)
     try:
-        startup = await_remote_startup(process)
+        if cancel_fd is None and timeout is None:
+            startup = await_remote_startup(process)
+        else:
+            startup = await_remote_startup(
+                process,
+                timeout=timeout or _REMOTE_HELLO_TIMEOUT,
+                cancel_fd=cancel_fd,
+            )
         hello = startup.hello
         if (startup.kind is not RemoteStartKind.HELLO
                 or hello is None
@@ -1517,11 +1610,119 @@ def _reconnect_remote_attach(
                 "the Railmux session and agents were left intact"
             )
         _send_start(process)
-        status = await_remote_attach_status(process)
-    except Exception:
+        if cancel_fd is None and timeout is None:
+            status = await_remote_attach_status(process)
+        else:
+            status = await_remote_attach_status(
+                process,
+                timeout=timeout or _REMOTE_ATTACH_TIMEOUT,
+                cancel_fd=cancel_fd,
+            )
+    except BaseException:
         _stop_unstarted_remote(process)
         raise
     return process, status
+
+
+def _wait_reconnect_delay(delay: float, cancel_fd: int) -> None:
+    """Wait without making a disconnected raw terminal feel trapped."""
+    deadline = time.monotonic() + delay
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        readable, _writable, _exceptional = select.select(
+            [cancel_fd], [], [], remaining
+        )
+        if readable:
+            _consume_reconnect_input(cancel_fd)
+
+
+def _automatic_reconnect(
+    args: argparse.Namespace,
+    current_size: os.terminal_size,
+    surface: TerminalSurface,
+    cancel_fd: int,
+) -> subprocess.Popen:
+    """Reconnect one display without install, upgrade, takeover, or prompts."""
+    deadline = time.monotonic() + _RECONNECT_WINDOW
+    delay = 0.0
+    attempt = 0
+    last_reason = "the remote display did not accept a new client"
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProbeError(
+                "automatic reconnect timed out; the Railmux session and agents "
+                "were left intact. Rerun the command to reconnect."
+            )
+        if delay:
+            wait_for = min(delay, remaining)
+            surface.show_local_status(
+                "Connection lost; retrying in "
+                f"{wait_for:.1f}s (Ctrl-] or Ctrl-C stops)"
+            )
+            _wait_reconnect_delay(wait_for, cancel_fd)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            continue
+        attempt += 1
+        surface.show_local_status(
+            f"Reconnecting (attempt {attempt}; Ctrl-] or Ctrl-C stops)"
+        )
+        timeout = min(_RECONNECT_ATTEMPT_TIMEOUT, max(0.1, remaining / 2))
+        try:
+            process, status = _reconnect_remote_attach(
+                args,
+                current_size,
+                replace_existing_client=False,
+                cancel_fd=cancel_fd,
+                timeout=timeout,
+                noninteractive=True,
+            )
+        except ReconnectCancelled:
+            raise
+        except ProbeError as exc:
+            last_reason = str(exc)
+        else:
+            if status is RemoteAttachKind.ACCEPTED:
+                return process
+            _stop_unstarted_remote(process)
+            if status is RemoteAttachKind.BUSY:
+                last_reason = (
+                    "the previous remote helper is still releasing its lease"
+                )
+            elif status is RemoteAttachKind.TIMEOUT:
+                last_reason = "the remote attach timed out"
+            else:
+                last_reason = "the remote display rejected the attach"
+        delay = min(
+            _RECONNECT_MAX_DELAY,
+            0.5 if delay == 0 else delay * 2,
+        )
+        if time.monotonic() + delay >= deadline:
+            raise ProbeError(
+                f"automatic reconnect timed out ({last_reason}); the Railmux "
+                "session and agents were left intact. Rerun the command to "
+                "reconnect."
+            )
+
+
+def should_automatically_reconnect(
+    *,
+    enabled: bool,
+    painted_frames: int,
+    local_exit: bool,
+    returncode: int | None,
+) -> bool:
+    """Classify only an established, unexpectedly ended display as retryable."""
+    return (
+        enabled
+        and painted_frames > 0
+        and not local_exit
+        and returncode is not None
+        and returncode not in _KNOWN_REMOTE_EXITS
+    )
 
 
 def _finish_remote_attach(
@@ -1768,6 +1969,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="do not capture mouse events (allows ordinary terminal selection)",
     )
     parser.add_argument(
+        "--reconnect",
+        action="store_true",
+        help=(
+            "retry an established display for up to 60 seconds after an "
+            "unexpected connection loss"
+        ),
+    )
+    parser.add_argument(
         "--ssh-arg", action="append", default=[],
         help="extra ssh argument; repeat and use --ssh-arg=VALUE",
     )
@@ -1809,14 +2018,21 @@ def run(args: argparse.Namespace) -> int:
     painted_rows = 0
     wire_bytes = 0
     local_exit = False
+    reconnect_cancel_code: int | None = None
     remote_closed = False
     awaiting_keyframe = False
     latest_screen: AppliedScreen | None = None
     route_refresh_needed = False
 
     def send_protocol_frame(frame: bytes) -> None:
-        process.stdin.write(frame)
-        process.stdin.flush()
+        nonlocal remote_closed
+        if remote_closed:
+            return
+        try:
+            process.stdin.write(frame)
+            process.stdin.flush()
+        except BrokenPipeError:
+            remote_closed = True
 
     def apply_history_action(action: HistoryAction) -> None:
         nonlocal route_refresh_needed
@@ -1899,7 +2115,8 @@ def run(args: argparse.Namespace) -> int:
 
     print(
         "railmux ssh: Ctrl-] disconnects locally; Ctrl-B d detaches; "
-        f"mouse forwarding is {'off' if args.no_mouse else 'on'}",
+        f"mouse forwarding is {'off' if args.no_mouse else 'on'}; "
+        f"automatic reconnect is {'on' if args.reconnect else 'off'}",
         file=sys.stderr,
     )
     try:
@@ -1949,10 +2166,9 @@ def run(args: argparse.Namespace) -> int:
                             surface.paint(full_repaint(latest_screen))
                         history.clear_cache()
                         route_refresh_needed = True
-                        process.stdin.write(encode_resize(
+                        send_protocol_frame(encode_resize(
                             observed_size.columns, observed_size.lines
                         ))
-                        process.stdin.flush()
                         current_size = observed_size
                         awaiting_keyframe = True
                 events = selector.select(timeout=terminal_input.next_timeout())
@@ -1977,8 +2193,9 @@ def run(args: argparse.Namespace) -> int:
                             applied = model.apply(update, current_size)
                             if applied is None:
                                 if not awaiting_keyframe:
-                                    process.stdin.write(encode_keyframe_request())
-                                    process.stdin.flush()
+                                    send_protocol_frame(
+                                        encode_keyframe_request()
+                                    )
                                     awaiting_keyframe = True
                                 continue
                             saw_screen_update = True
@@ -2024,9 +2241,54 @@ def run(args: argparse.Namespace) -> int:
                         handle_terminal_part(part, set())
                 if local_exit:
                     break
-                if remote_closed:
-                    break
-                if process.poll() is not None and not events:
+                connection_ended = remote_closed or (
+                    process.poll() is not None and not events
+                )
+                if connection_ended:
+                    old_fd = process.stdout.fileno()
+                    _reap_remote(process)
+                    if should_automatically_reconnect(
+                        enabled=args.reconnect,
+                        painted_frames=frames,
+                        local_exit=local_exit,
+                        returncode=process.returncode,
+                    ):
+                        selector.unregister(old_fd)
+                        for stream in (process.stdin, process.stdout):
+                            try:
+                                stream.close()
+                            except OSError:
+                                pass
+                        try:
+                            process = _automatic_reconnect(
+                                args,
+                                current_size,
+                                surface,
+                                sys.stdin.fileno(),
+                            )
+                        except ReconnectCancelled as exc:
+                            reconnect_cancel_code = exc.exit_code
+                            local_exit = True
+                            break
+                        selector.register(
+                            process.stdout.fileno(),
+                            selectors.EVENT_READ,
+                            "remote",
+                        )
+                        decoder = ServerMessageDecoder()
+                        model = ScreenModel()
+                        terminal_input = TerminalInputDecoder()
+                        history = LocalHistoryView()
+                        remote_closed = False
+                        awaiting_keyframe = False
+                        route_refresh_needed = False
+                        now = time.monotonic()
+                        next_history_prefetch = now
+                        next_heartbeat = now + _HEARTBEAT_INTERVAL
+                        surface.show_local_status(
+                            "Reconnected; waiting for a fresh screen"
+                        )
+                        continue
                     break
                 now = time.monotonic()
                 if now >= next_heartbeat:
@@ -2046,22 +2308,10 @@ def run(args: argparse.Namespace) -> int:
         # Raw mode normally forwards Ctrl-C. This only handles an external
         # signal and follows the conventional shell exit status.
         return 130
-    except BrokenPipeError:
-        remote_closed = True
     finally:
         selector.close()
         surface.close()
-        if local_exit and process.poll() is None:
-            process.terminate()
-        try:
-            process.wait(timeout=2.0)
-        except subprocess.TimeoutExpired:
-            process.terminate()
-            try:
-                process.wait(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+        _reap_remote(process, terminate=local_exit)
 
     elapsed = max(0.001, time.monotonic() - started)
     print(
@@ -2070,13 +2320,14 @@ def run(args: argparse.Namespace) -> int:
         f"received {wire_bytes / 1024:.1f} KiB",
         file=sys.stderr,
     )
-    known_exit = {
-        int(RemoteExit.DETACHED): "detached; the Railmux session is still running",
-        int(RemoteExit.SOFT_QUIT): "soft-quit; agent sessions were left running",
-        int(RemoteExit.HARD_QUIT): "hard-quit; the managed Railmux session ended",
-    }
-    if process.returncode in known_exit:
-        print(f"railmux ssh: {known_exit[process.returncode]}", file=sys.stderr)
+    if reconnect_cancel_code is not None:
+        print("railmux ssh: automatic reconnect cancelled", file=sys.stderr)
+        return reconnect_cancel_code
+    if process.returncode in _KNOWN_REMOTE_EXITS:
+        print(
+            f"railmux ssh: {_KNOWN_REMOTE_EXITS[process.returncode]}",
+            file=sys.stderr,
+        )
         return 0
     if frames == 0 and not local_exit:
         raise ProbeError("remote display helper exited before its first frame")

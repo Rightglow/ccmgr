@@ -62,6 +62,14 @@ cannot be misreported or queried concurrently by its closing SSH views. These
 sentinels classify lifecycle only; they never authorize session mutation or
 recovery.
 
+Doctor collection has one versioned structured snapshot authority. Human text
+and `doctor --json` are renderers of that same snapshot, not independent probe
+paths. Stable JSON fields contain only bounded status/category values, numeric
+versions and counts, booleans, coarse incident age, home-relative paths, or the
+literal `<custom>`. Neither renderer may expose hostnames, usernames, session
+or pane IDs, transcripts, environment values, configured commands, socket
+paths, credentials, or raw custom paths.
+
 The SSH display's headless terminal must implement every screen-content
 operation that its private tmux client advertises through `TERM`; sending a
 new keyframe cannot repair divergence already present in that server-side
@@ -115,6 +123,19 @@ pane, or provider process.
 One BUSY status is treated as ordinary v7 attach contention: the local client
 starts one fresh non-replacement helper before offering takeover. Only a second
 BUSY is persistent enough to justify the destructive-sounding consent prompt.
+
+Opt-in automatic reconnect is a narrower post-attach path. It becomes eligible
+only after at least one valid screen frame and only for an unexpected reaped
+process status; local EOF/escape, native detach, soft quit, and hard quit are
+terminal outcomes. A retry uses a fresh compatibility hello and ordinary
+`replace_existing_client=false` attach with non-interactive SSH authentication.
+It never enters install, upgrade, confirmation, or takeover paths and never
+detaches or kills a tmux client, session, pane, or provider. The bounded retry
+window exceeds the remote helper's 45-second half-open lease, while each hello,
+attach wait, and backoff also watches local stdin so `Ctrl-]`, `Ctrl-C`, or EOF
+restores the terminal immediately. The last valid frame may remain painted
+with a local reconnect status; a new decoder/model accepts only a fresh
+keyframe as the new display authority.
 
 ## Modes are registered providers, not a boolean
 
