@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-07-23
+
+### Fixed
+
+- Keep the compact **Railmux**, **A1**, and **A2** status buttons clickable on
+  long-running tmux servers whose pane IDs have multiple digits. Railmux now
+  escapes pane IDs through tmux's status-line time formatting, and the real
+  tmux regression test uses a multi-digit target without the stock status-click
+  fallback.
+
 ## [0.2.7] - 2026-07-23
 
 ### Added
@@ -676,7 +686,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial PyPI release under the Railmux name.
 
-[Unreleased]: https://github.com/Rightglow/Railmux/compare/v0.2.7...HEAD
+[Unreleased]: https://github.com/Rightglow/Railmux/compare/v0.2.8...HEAD
+[0.2.8]: https://github.com/Rightglow/Railmux/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/Rightglow/Railmux/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/Rightglow/Railmux/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/Rightglow/Railmux/compare/v0.2.4...v0.2.5

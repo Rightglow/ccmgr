@@ -1428,7 +1428,13 @@ def status_pane_range(pane_id: str, content: str) -> str:
     # ``=`` still resolves to the pane geometrically below the status cell,
     # not to X. A user range preserves the strict pane ID as its argument, so
     # the managed binding can select the intended compact page explicitly.
-    return f"#[range=user|{pane_id}]{content}#[norange]"
+    #
+    # Status strings also pass through tmux's strftime expansion.  Escape the
+    # pane-ID percent sign so IDs such as ``%76`` are not parsed as padding
+    # syntax before they become ``mouse_status_range``.  ``%%76`` renders and
+    # reports as the intended literal ``%76``.
+    escaped_pane_id = pane_id.replace("%", "%%", 1)
+    return f"#[range=user|{escaped_pane_id}]{content}#[norange]"
 
 
 def _select_pane_preserving_zoom_shell(target: str) -> str:

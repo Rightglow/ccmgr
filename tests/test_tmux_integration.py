@@ -2046,7 +2046,7 @@ def test_real_tmux_binding_manager_round_trip_and_user_reload(
 
 def test_real_tmux_status_pane_range_selects_and_keeps_zoom(
         isolated_tmux, monkeypatch, tmp_path):
-    """A compact status control targets its declared pane, not the pane below."""
+    """A compact status control targets a multi-digit pane and keeps zoom."""
     if sys.platform == "darwin":
         pytest.skip(
             "a bare macOS PTY cannot answer tmux 3.7 terminal capability "
@@ -2059,10 +2059,30 @@ def test_real_tmux_status_pane_range_selects_and_keeps_zoom(
         "railmux.tmux_binding_manager.restart_state.runtime_state_dir",
         lambda: tmp_path,
     )
+    # Do not let tmux's stock status fallback accidentally make the synthetic
+    # click look successful when Railmux's user-range condition is false.
+    subprocess.run(
+        ["tmux", "unbind-key", "-T", "root", "MouseDown1Status"],
+        check=True,
+    )
     manager = SharedTmuxBindingManager("status-range-server", owner_pane)
     assert manager.open()
     assert manager.status_navigation_available
     subprocess.run(["tmux", "set-option", "-g", "mouse", "on"], check=True)
+    # tmux starts this isolated server at %0. Advance the monotonically
+    # increasing pane ID so the real click covers the strftime-sensitive
+    # ``%10`` shape that failed in long-running Railmux servers.
+    for _index in range(10):
+        disposable = subprocess.check_output(
+            [
+                "tmux", "split-window", "-h", "-t", owner_pane,
+                "-P", "-F", "#{pane_id}", "sleep 60",
+            ],
+            text=True,
+        ).strip()
+        subprocess.run(
+            ["tmux", "kill-pane", "-t", disposable], check=True,
+        )
     other_pane = subprocess.check_output(
         [
             "tmux", "split-window", "-h", "-t", owner_pane,
@@ -2070,10 +2090,11 @@ def test_real_tmux_status_pane_range_selects_and_keeps_zoom(
         ],
         text=True,
     ).strip()
+    assert int(other_pane[1:]) >= 10
     subprocess.run(
         [
             "tmux", "set-option", "-t", display_session, "status-left",
-            tmux_ctl.status_pane_range(owner_pane, "[R]"),
+            tmux_ctl.status_pane_range(other_pane, "[R]"),
         ],
         check=True,
     )
@@ -2083,7 +2104,7 @@ def test_real_tmux_status_pane_range_selects_and_keeps_zoom(
         check=True,
     )
     subprocess.run(
-        ["tmux", "resize-pane", "-Z", "-t", other_pane], check=True)
+        ["tmux", "resize-pane", "-Z", "-t", owner_pane], check=True)
     master_fd, slave_fd = pty.openpty()
     fcntl.ioctl(
         slave_fd,
@@ -2152,9 +2173,9 @@ def test_real_tmux_status_pane_range_selects_and_keeps_zoom(
             click = b"\x1b[M" + bytes((32, 32 + 1, 32 + client_height - 1))
         os.write(master_fd, click)
         assert _wait_until(
-            lambda: tmux_ctl.active_pane_id(owner_pane) == owner_pane)
+            lambda: tmux_ctl.active_pane_id(owner_pane) == other_pane)
         assert subprocess.check_output(
-            ["tmux", "display-message", "-p", "-t", owner_pane,
+            ["tmux", "display-message", "-p", "-t", other_pane,
              "#{window_zoomed_flag}"],
             text=True,
         ).strip() == "1"

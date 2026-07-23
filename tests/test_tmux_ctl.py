@@ -555,7 +555,7 @@ def test_status_pane_range_requires_tmux_34_and_valid_pane():
         assert tmux_ctl.status_pane_range("%7", "[1]") == "[1]"
     with patch.object(tmux_ctl, "tmux_version", return_value=(3, 4)):
         assert tmux_ctl.status_pane_range("%7", "#[fg=white][1]") == (
-            "#[range=user|%7]#[fg=white][1]#[norange]"
+            "#[range=user|%%7]#[fg=white][1]#[norange]"
         )
         try:
             tmux_ctl.status_pane_range("session:0.1", "[1]")
@@ -581,6 +581,7 @@ def test_root_status_click_scopes_pane_range_and_keeps_zoom():
     assert argv[5:7] == ["if-shell", "-F"]
     assert "-t" not in argv[5:8]
     assert "mouse_status_range" in argv[7]
+    assert "^%[0-9]+$" in argv[7]
     assert tmux_ctl.RAILMUX_CONTROLLER_OPTION in argv[7]
     assert "railmux-status-pane-v1-owner123" in argv[7]
     assert "tmux select-pane -Z -t '#{mouse_status_range}'" in argv[8]
