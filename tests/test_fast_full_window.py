@@ -687,7 +687,7 @@ def test_local_history_view_scrolls_cached_lines_and_restores_at_bottom():
     request_id, x, y, max_lines = decode_history_request(framed.data)
     assert (x, y, max_lines) == (50, 4, 2000)
     assert request.render_history is True
-    assert view.overlays()[0][1] == (b"line-4", b"line-5", b"line-6")
+    assert view.overlays()[0][1] == (b"line-6", b"line-7", b"line-8")
     click = SgrMouseEvent(b"\x1b[<0;50;4M", 0, 50, 4, True)
     assert view.pointer_event(click, "%8").forwarded_input == b""
     assert view.active is True
@@ -704,11 +704,93 @@ def test_local_history_view_scrolls_cached_lines_and_restores_at_bottom():
     accepted = view.accept(snapshot)
 
     assert accepted.render_history is True
-    assert view.overlays()[0][1] == (b"line-4", b"line-5", b"line-6")
+    assert view.overlays()[0][1] == (b"line-6", b"line-7", b"line-8")
     wheel_down = SgrMouseEvent(b"\x1b[<65;50;4M", 65, 50, 4, True)
     restored = view.wheel(wheel_down)
     assert restored.restore_live is True
     assert view.active is False
+
+
+def test_local_history_wheel_accelerates_only_during_a_continuous_burst():
+    view = LocalHistoryView()
+    prefetch = InputFrameDecoder().feed(view.begin_prefetch(1.0))[0]
+    prefetch_id, _limit = decode_history_prefetch(prefetch.data)
+    route = HistorySnapshot(
+        prefetch_id,
+        "%8",
+        30,
+        0,
+        30,
+        3,
+        tuple(f"line-{index}".encode() for index in range(40)),
+    )
+    view.accept_prefetch(HistoryBatch(prefetch_id, (route,)))
+    wheel_up = SgrMouseEvent(b"up", 64, 40, 2, True)
+
+    view.wheel(wheel_up, now=1.00)
+    assert view.viewports["%8"].offset == 1
+    for now in (1.02, 1.04, 1.06):
+        view.wheel(wheel_up, now=now)
+    assert view.viewports["%8"].offset == 4
+
+    view.wheel(wheel_up, now=1.08)
+    assert view.viewports["%8"].offset == 6
+    for now in (1.10, 1.12, 1.14):
+        view.wheel(wheel_up, now=now)
+    view.wheel(wheel_up, now=1.16)
+    assert view.viewports["%8"].offset == 15
+
+    view.wheel(wheel_up, now=1.30)
+    assert view.viewports["%8"].offset == 16
+    wheel_down = SgrMouseEvent(b"down", 65, 40, 2, True)
+    view.wheel(wheel_down, now=1.31)
+    assert view.viewports["%8"].offset == 15
+
+
+def test_local_history_wheel_acceleration_does_not_cross_panes():
+    view = LocalHistoryView()
+    prefetch = InputFrameDecoder().feed(view.begin_prefetch(1.0))[0]
+    prefetch_id, _limit = decode_history_prefetch(prefetch.data)
+    snapshots = (
+        HistorySnapshot(prefetch_id, "%8", 30, 0, 30, 3, (b"a",) * 40),
+        HistorySnapshot(prefetch_id, "%9", 61, 0, 30, 3, (b"b",) * 40),
+    )
+    view.accept_prefetch(HistoryBatch(prefetch_id, snapshots))
+    wheel_a = SgrMouseEvent(b"up-a", 64, 40, 2, True)
+    wheel_b = SgrMouseEvent(b"up-b", 64, 70, 2, True)
+    for index in range(9):
+        view.wheel(wheel_a, now=1.0 + index * 0.02)
+    assert view.viewports["%8"].offset == 15
+
+    view.wheel(wheel_b, now=1.17)
+    view.wheel(wheel_a, now=1.18)
+
+    assert view.viewports["%9"].offset == 1
+    assert view.viewports["%8"].offset == 16
+
+
+def test_local_history_pointer_press_ends_wheel_acceleration():
+    view = LocalHistoryView()
+    prefetch = InputFrameDecoder().feed(view.begin_prefetch(1.0))[0]
+    prefetch_id, _limit = decode_history_prefetch(prefetch.data)
+    route = HistorySnapshot(
+        prefetch_id, "%8", 30, 0, 30, 3, (b"line",) * 40
+    )
+    view.accept_prefetch(HistoryBatch(prefetch_id, (route,)))
+    wheel_up = SgrMouseEvent(b"up", 64, 40, 2, True)
+    for index in range(5):
+        view.wheel(wheel_up, now=1.0 + index * 0.02)
+    assert view.viewports["%8"].offset == 6
+
+    assert view.pointer_event(
+        SgrMouseEvent(b"press", 0, 40, 2, True), "%8"
+    ) == HistoryAction()
+    assert view.pointer_event(
+        SgrMouseEvent(b"release", 0, 40, 2, False), "%8"
+    ) == HistoryAction()
+    view.wheel(wheel_up, now=1.10)
+
+    assert view.viewports["%8"].offset == 7
 
 
 def test_local_history_routes_sidebar_immediately_and_owns_agent_wheel():
@@ -932,13 +1014,13 @@ def test_local_history_wheel_over_another_pane_preserves_both_viewports():
 
     action = view.wheel(SgrMouseEvent(b"up-b", 64, 70, 2, True))
 
-    assert old_lines == (b"a-2", b"a-3", b"a-4")
+    assert old_lines == (b"a-4", b"a-5", b"a-6")
     assert action.restore_live is False
     assert action.render_history is True
     assert tuple(view.viewports) == ("%8", "%9")
     assert tuple(lines for _snapshot, lines in view.overlays()) == (
-        (b"a-2", b"a-3", b"a-4"),
-        (b"b-2", b"b-3", b"b-4"),
+        (b"a-4", b"a-5", b"a-6"),
+        (b"b-4", b"b-5", b"b-6"),
     )
 
 
@@ -966,7 +1048,7 @@ def test_local_history_reaching_bottom_restores_only_that_pane():
 
     assert action.restore_live is True
     assert tuple(view.viewports) == ("%8",)
-    assert view.overlays()[0][1] == (b"%8-2", b"%8-3", b"%8-4")
+    assert view.overlays()[0][1] == (b"%8-4", b"%8-5", b"%8-6")
 
 
 def test_local_history_input_restores_only_its_routed_pane():
@@ -1012,7 +1094,7 @@ def test_deep_history_response_keeps_the_visible_anchor_when_output_advances():
     request_id = decode_history_request(
         InputFrameDecoder().feed(request.protocol_frame)[0].data
     )[0]
-    assert view.overlays()[0][1] == (b"line-4", b"line-5", b"line-6")
+    assert view.overlays()[0][1] == (b"line-6", b"line-7", b"line-8")
 
     deep = HistorySnapshot(
         request_id,
@@ -1026,7 +1108,7 @@ def test_deep_history_response_keeps_the_visible_anchor_when_output_advances():
     action = view.accept(deep)
 
     assert action.render_history is True
-    assert view.overlays()[0][1] == (b"line-4", b"line-5", b"line-6")
+    assert view.overlays()[0][1] == (b"line-6", b"line-7", b"line-8")
 
 
 def test_history_progressively_extends_to_configured_limit_without_jumping():
@@ -1057,7 +1139,7 @@ def test_history_progressively_extends_to_configured_limit_without_jumping():
     assert view.overlays()[0][1] == before
 
     extension = HistoryAction()
-    for _ in range(700):
+    for _ in range(2100):
         extension = view.wheel(wheel_up)
         if extension.protocol_frame:
             break
@@ -1078,7 +1160,7 @@ def test_history_progressively_extends_to_configured_limit_without_jumping():
     assert second_action.protocol_frame == b""
 
     extension = HistoryAction()
-    for _ in range(700):
+    for _ in range(2100):
         extension = view.wheel(wheel_up)
         if extension.protocol_frame:
             break
@@ -1213,7 +1295,7 @@ def test_deep_history_response_with_duplicate_anchor_does_not_jump_viewport():
         InputFrameDecoder().feed(request.protocol_frame)[0].data
     )[0]
     before = view.overlays()
-    assert before[0][1] == (b"repeat-a", b"repeat-b", b"repeat-c")
+    assert before[0][1] == (b"repeat-c", b"4", b"5")
 
     action = view.accept(HistorySnapshot(
         request_id,

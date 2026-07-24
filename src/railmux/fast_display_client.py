@@ -61,7 +61,12 @@ from railmux.fast_display_protocol import (
 LOCAL_ESCAPE = b"\x1d"  # Ctrl-]
 _SGR_MOUSE_PREFIX = b"\x1b[<"
 _SGR_STYLE_RE = re.compile(rb"\x1b\[[0-9;]*m")
-_HISTORY_SCROLL_LINES = 3
+_HISTORY_SCROLL_BASE_LINES = 1
+_HISTORY_SCROLL_ACCELERATED_LINES = 2
+_HISTORY_SCROLL_FAST_LINES = 3
+_HISTORY_SCROLL_BURST_INTERVAL = 0.075
+_HISTORY_SCROLL_ACCELERATE_AFTER = 5
+_HISTORY_SCROLL_FAST_AFTER = 9
 _HISTORY_PREFETCH_LINES = 300
 _HISTORY_INITIAL_LINES = 2000
 _HISTORY_PAGE_LINES = 2000
@@ -538,6 +543,10 @@ class LocalHistoryView:
         self._local_pointer_capture = False
         self._forwarded_pointer_capture = False
         self._suppress_forwarded_drag = False
+        self._wheel_pane_id: str | None = None
+        self._wheel_direction = 0
+        self._wheel_streak = 0
+        self._wheel_at: float | None = None
         self._next_request_id = 1
 
     @property
@@ -674,6 +683,7 @@ class LocalHistoryView:
         self,
         route: HistorySnapshot,
         event: SgrMouseEvent,
+        now: float | None,
     ) -> HistoryAction:
         assert route.pane_id is not None
         cached = self.content_cache.get(route.pane_id, route)
@@ -681,12 +691,16 @@ class LocalHistoryView:
             cached = route
         maximum = max(0, len(cached.lines) - cached.height)
         if maximum == 0:
+            self._reset_wheel_gesture()
             return HistoryAction()
         self.cancel_pane(route.pane_id)
+        scroll_lines = self._wheel_scroll_lines(
+            route.pane_id, event.wheel_direction, now
+        )
         loaded_limit = min(len(cached.lines), self.history_limit)
         viewport = _HistoryViewport(
             cached,
-            min(maximum, _HISTORY_SCROLL_LINES),
+            min(maximum, scroll_lines),
             loaded_limit,
         )
         self.viewports[route.pane_id] = viewport
@@ -743,12 +757,56 @@ class LocalHistoryView:
             target_lines,
         )
 
-    def wheel(self, event: SgrMouseEvent) -> HistoryAction:
+    def _reset_wheel_gesture(self) -> None:
+        self._wheel_pane_id = None
+        self._wheel_direction = 0
+        self._wheel_streak = 0
+        self._wheel_at = None
+
+    def _wheel_scroll_lines(
+        self,
+        pane_id: str,
+        direction: int,
+        now: float | None,
+    ) -> int:
+        """Keep isolated ticks fine-grained while accelerating a wheel burst."""
+        if now is None:
+            self._reset_wheel_gesture()
+            return _HISTORY_SCROLL_BASE_LINES
+        elapsed = (
+            None if self._wheel_at is None else now - self._wheel_at
+        )
+        if (
+            pane_id == self._wheel_pane_id
+            and direction == self._wheel_direction
+            and elapsed is not None
+            and 0.0 <= elapsed <= _HISTORY_SCROLL_BURST_INTERVAL
+        ):
+            self._wheel_streak += 1
+        else:
+            self._wheel_streak = 1
+        self._wheel_pane_id = pane_id
+        self._wheel_direction = direction
+        self._wheel_at = now
+        if self._wheel_streak >= _HISTORY_SCROLL_FAST_AFTER:
+            return _HISTORY_SCROLL_FAST_LINES
+        if self._wheel_streak >= _HISTORY_SCROLL_ACCELERATE_AFTER:
+            return _HISTORY_SCROLL_ACCELERATED_LINES
+        return _HISTORY_SCROLL_BASE_LINES
+
+    def wheel(
+        self,
+        event: SgrMouseEvent,
+        *,
+        now: float | None = None,
+    ) -> HistoryAction:
         direction = event.wheel_direction
         if direction == 0:
+            self._reset_wheel_gesture()
             return HistoryAction(forwarded_input=event.raw)
         route = self._route_at(event)
         if route is None:
+            self._reset_wheel_gesture()
             # Stock tmux WheelUpPane enters copy-mode. Until the current
             # prefetch establishes exact pane geometry, or on the one-cell
             # border around a known agent, dropping a wheel tick is safer than
@@ -763,6 +821,9 @@ class LocalHistoryView:
         assert route.pane_id is not None
         viewport = self.viewports.get(route.pane_id)
         if viewport is not None:
+            scroll_lines = self._wheel_scroll_lines(
+                route.pane_id, direction, now
+            )
             maximum = max(
                 0, len(viewport.snapshot.lines) - viewport.snapshot.height
             )
@@ -770,7 +831,7 @@ class LocalHistoryView:
                 0,
                 min(
                     maximum,
-                    viewport.offset + direction * _HISTORY_SCROLL_LINES,
+                    viewport.offset + direction * scroll_lines,
                 ),
             )
             if viewport.offset == 0:
@@ -786,15 +847,19 @@ class LocalHistoryView:
         # layer exclusively owns vertical wheel input. This avoids also
         # triggering tmux copy-mode or its pane scroll bindings.
         if direction < 0:
+            self._reset_wheel_gesture()
             return HistoryAction()
-        return self._start_history(route, event)
+        return self._start_history(route, event, now)
 
     def pointer_event(
         self,
         event: SgrMouseEvent,
         focused_pane_id: str | None = None,
         status_row: int | None = None,
+        now: float | None = None,
     ) -> HistoryAction:
+        if event.wheel_direction == 0 and event.pressed:
+            self._reset_wheel_gesture()
         if status_row is not None and event.y == status_row:
             # The tmux status line is navigation chrome, never agent history.
             # Forward it even if a prior local selection capture missed its
@@ -816,7 +881,7 @@ class LocalHistoryView:
                 # Keep agent wheel input local even while a click capture is
                 # active. If the pointer has moved to the sidebar, wheel()
                 # finds no agent route and preserves normal forwarding.
-                return self.wheel(event)
+                return self.wheel(event, now=now)
             elif self._suppress_forwarded_drag and event.button & 32:
                 # A press that began over an agent is forwarded so tmux can
                 # focus that pane. Do not forward its motion reports: tmux's
@@ -829,7 +894,7 @@ class LocalHistoryView:
                 self._local_pointer_capture = False
             return HistoryAction()
         if event.wheel_direction:
-            return self.wheel(event)
+            return self.wheel(event, now=now)
         frozen = next(
             (
                 viewport.snapshot
@@ -949,6 +1014,8 @@ class LocalHistoryView:
 
     def cancel_pane(self, pane_id: str) -> bool:
         was_active = self.viewports.pop(pane_id, None) is not None
+        if self._wheel_pane_id == pane_id:
+            self._reset_wheel_gesture()
         self._deep_pending = {
             request_id: pending
             for request_id, pending in self._deep_pending.items()
@@ -970,6 +1037,7 @@ class LocalHistoryView:
         self._local_pointer_capture = False
         self._forwarded_pointer_capture = False
         self._suppress_forwarded_drag = False
+        self._reset_wheel_gesture()
         return was_active
 
 
@@ -2218,6 +2286,7 @@ def run(args: argparse.Namespace) -> int:
                     compact_status_row(latest_screen)
                     if latest_screen is not None else None
                 ),
+                now=time.monotonic(),
             )
             apply_history_action(
                 coalesce_forwarded_wheel(action, part, forwarded_wheels)
