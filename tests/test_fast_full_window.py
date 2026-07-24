@@ -1276,6 +1276,61 @@ def test_deep_history_response_without_anchor_does_not_jump_viewport():
     assert view.overlays() == before
 
 
+def test_deep_history_tolerates_one_dynamic_line_in_visible_anchor():
+    view = LocalHistoryView()
+    prefetch = InputFrameDecoder().feed(view.begin_prefetch(1.0))[0]
+    prefetch_id, _limit = decode_history_prefetch(prefetch.data)
+    cached = HistorySnapshot(
+        prefetch_id,
+        "%8",
+        30,
+        0,
+        30,
+        4,
+        (
+            b"oldest",
+            b"stable-a",
+            b"spinner-old",
+            b"stable-b",
+            b"stable-c",
+            b"newest",
+        ),
+    )
+    view.accept_prefetch(HistoryBatch(prefetch_id, (cached,)))
+    request = view.wheel(SgrMouseEvent(b"up", 64, 40, 2, True))
+    request_id = decode_history_request(
+        InputFrameDecoder().feed(request.protocol_frame)[0].data
+    )[0]
+    assert view.overlays()[0][1] == (
+        b"stable-a", b"spinner-old", b"stable-b", b"stable-c",
+    )
+
+    action = view.accept(HistorySnapshot(
+        request_id,
+        "%8",
+        30,
+        0,
+        30,
+        4,
+        (
+            b"older-a",
+            b"older-b",
+            b"stable-a",
+            b"spinner-new",
+            b"stable-b",
+            b"stable-c",
+            b"newest",
+        ),
+    ))
+
+    assert action.render_history is True
+    assert view.viewports["%8"].offset == 1
+    assert view.viewports["%8"].loaded_limit == 2000
+    assert view.overlays()[0][1] == (
+        b"stable-a", b"spinner-new", b"stable-b", b"stable-c",
+    )
+
+
 def test_deep_history_response_with_duplicate_anchor_does_not_jump_viewport():
     view = LocalHistoryView()
     prefetch = InputFrameDecoder().feed(view.begin_prefetch(1.0))[0]

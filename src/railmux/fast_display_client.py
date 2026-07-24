@@ -996,13 +996,60 @@ class LocalHistoryView:
     ) -> int | None:
         if not anchor or len(anchor) > len(snapshot.lines):
             return None
+        # Prefer an exact whole-viewport match. This is both cheapest and
+        # preserves the strongest ambiguity check when the live pane did not
+        # change while the deeper capture was in flight.
         matched_offset: int | None = None
         for start in range(len(snapshot.lines) - len(anchor), -1, -1):
             if snapshot.lines[start:start + len(anchor)] == anchor:
                 if matched_offset is not None:
                     return None
                 matched_offset = len(snapshot.lines) - (start + len(anchor))
-        return matched_offset
+        if matched_offset is not None:
+            return matched_offset
+
+        # Agent status rows (for example a Codex spinner) can change between
+        # the 300-line hot snapshot and the first deep response. Requiring the
+        # entire visible viewport to remain byte-identical then strands the
+        # user at the hot-cache boundary. Align on a majority of stable,
+        # non-blank lines instead, but only when each evidence line occurs
+        # exactly once on both sides and all winning lines agree on one
+        # position. Repeated output and unrelated captures remain rejected.
+        anchor_positions: dict[bytes, list[int]] = {}
+        snapshot_positions: dict[bytes, list[int]] = {}
+        for index, line in enumerate(anchor):
+            if _SGR_STYLE_RE.sub(b"", line).strip():
+                anchor_positions.setdefault(line, []).append(index)
+        for index, line in enumerate(snapshot.lines):
+            if line in anchor_positions:
+                snapshot_positions.setdefault(line, []).append(index)
+
+        unique_anchor_lines = {
+            line: positions[0]
+            for line, positions in anchor_positions.items()
+            if len(positions) == 1
+        }
+        votes: dict[int, int] = {}
+        latest_start = len(snapshot.lines) - len(anchor)
+        for line, anchor_index in unique_anchor_lines.items():
+            positions = snapshot_positions.get(line, ())
+            if len(positions) != 1:
+                continue
+            start = positions[0] - anchor_index
+            if 0 <= start <= latest_start:
+                votes[start] = votes.get(start, 0) + 1
+
+        if not votes:
+            return None
+        required_votes = max(2, (len(unique_anchor_lines) + 1) // 2)
+        best_votes = max(votes.values())
+        best_starts = [
+            start for start, count in votes.items() if count == best_votes
+        ]
+        if best_votes < required_votes or len(best_starts) != 1:
+            return None
+        start = best_starts[0]
+        return len(snapshot.lines) - (start + len(anchor))
 
     def overlays(
         self,
