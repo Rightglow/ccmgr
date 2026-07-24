@@ -13,6 +13,14 @@ The single source of truth is `__version__` in `src/railmux/__init__.py`;
 - **MINOR** — backwards-compatible new features
 - **MAJOR** — breaking changes
 
+Field-test builds for the next patch may use the PEP 440 form
+`MAJOR.MINOR.PATCH.devN`, where `N` is a monotonically increasing numeric
+identifier. A development tag is published to PyPI normally and marked as a
+GitHub pre-release; pip excludes it from ordinary stable upgrades unless the
+version is explicitly requested or pre-releases are enabled. Never append
+`.devN` to an already released final version: `0.2.10.devN` sorts before
+`0.2.10`, so development builds after 0.2.10 must target `0.2.11.devN`.
+
 ## One-time publishing setup
 
 1. Create a GitHub environment named `pypi` and require maintainer approval for

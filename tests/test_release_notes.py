@@ -37,6 +37,24 @@ def test_renders_exact_release_section_and_comparison_link():
     )
 
 
+def test_renders_development_release_section():
+    changelog = (
+        "## [0.2.11.dev202607240] - 2026-07-24\n\n"
+        "- Development release.\n\n"
+        "[0.2.11.dev202607240]: "
+        "https://example.test/compare/v0.2.10...v0.2.11.dev202607240\n"
+    )
+
+    assert render_release_notes(
+        changelog, "v0.2.11.dev202607240"
+    ) == (
+        "- Development release.\n\n"
+        "**Full Changelog**: "
+        "https://example.test/compare/"
+        "v0.2.10...v0.2.11.dev202607240\n"
+    )
+
+
 def test_last_section_does_not_include_changelog_link_definitions():
     notes = render_release_notes(CHANGELOG, "0.2.30")
 
@@ -45,7 +63,10 @@ def test_last_section_does_not_include_changelog_link_definitions():
     assert notes.count("**Full Changelog**:") == 1
 
 
-@pytest.mark.parametrize("version", ["0.2.4", "Unreleased", "v0.2"])
+@pytest.mark.parametrize(
+    "version",
+    ["0.2.4", "Unreleased", "v0.2", "0.2.3-dev1", "0.2.3.dev"],
+)
 def test_rejects_missing_or_invalid_release(version):
     with pytest.raises(ValueError):
         render_release_notes(CHANGELOG, version)

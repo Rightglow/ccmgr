@@ -336,6 +336,10 @@ poll_interval_ms = 1000
 # Agent display mode (default: "swap").
 # Set "nested" only when troubleshooting an unusual tmux environment.
 agent_transport = "swap" # or "nested"
+
+[ssh]
+# Local railmux ssh history cap (default: 5000; range: 2000-20000)
+history_lines = 5000
 ```
 
 Most users should leave `agent_transport` unchanged. Railmux automatically uses
@@ -343,10 +347,12 @@ the compatible `nested` display when the default `swap` mode is not safe for the
 current tmux environment.
 
 This is Railmux's only user settings file. Manual edits and the in-app Options
-screen update the same values; Options preserves comments, formatting, order,
-and unknown keys. A one-run Codex choice is kept only in memory. A `This time`
-layout profile is stored here until it is successfully applied on the next
-launch, then removed.
+screen update the same values that Options exposes; Options preserves comments,
+formatting, order, and unknown keys. The local-only `ssh.history_lines` setting
+is intentionally file/command-line controlled because the remote TUI cannot
+configure the machine that initiated `railmux ssh`. A one-run Codex choice is
+kept only in memory. A `This time` layout profile is stored here until it is
+successfully applied on the next launch, then removed.
 
 When the default `auto_update = "ask"` finds a newer stable PyPI release,
 Railmux offers **Always**, **This time**, **No**, or **Never** before opening
@@ -511,7 +517,20 @@ wheel or source checkout.
 The default remote session is started automatically when absent. `Ctrl-B d`
 detaches normally; `Ctrl-]` is an emergency local disconnect. Mouse forwarding
 is on by default. The client refreshes a 300-line hot cache for each agent pane;
-wheel-up displays it immediately and fills up to 2000 lines in the background.
+wheel-up displays it immediately and loads the first 2000 lines in the
+background. When scrolling approaches the oldest loaded content, Railmux
+fetches another 2000-line cumulative page until it reaches the local history
+cap. The default cap is 5000 lines; set `history_lines` under `[ssh]` in
+`~/.config/railmux/config.toml`, or override it for one connection:
+
+```bash
+railmux ssh --history-lines 10000 your-server
+```
+
+The supported range is 2000-20000. Higher limits consume more local memory and
+make deep background captures more expensive, but do not change the remote
+tmux history limit.
+
 Agent-pane wheel events are then handled only locally, while sidebar scrolling
 continues to reach Railmux normally. Scroll to the bottom or press `Esc` to
 return to live output. Each agent pane keeps an independent history position;
@@ -552,7 +571,7 @@ restarts tmux or a system crash collector; provider rollout files are untouched.
 The SSH client also sends a private heartbeat. If a network outage leaves SSH
 half-open, the remote helper expires its own 45-second lease and detaches only
 the exact private tmux client it created; the Railmux session, panes, and agents
-stay alive. Protocol-v7 helpers use only a short attach mutex, so another
+stay alive. Protocol-v8 helpers use only a short attach mutex, so another
 current client can connect during that cleanup. If an older helper still owns
 the historical lifetime lock, reconnecting presents an explicit replacement
 prompt. Approving it may detach every terminal attached to that managed

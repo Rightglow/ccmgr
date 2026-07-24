@@ -9,13 +9,13 @@ import sys
 from pathlib import Path
 
 
-_VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
+_VERSION_RE = re.compile(r"\d+\.\d+\.\d+(?:\.dev\d+)?")
 _SECTION_RE = re.compile(r"^## \[([^]]+)](?:\s+-\s+.+)?\s*$")
 _LINK_RE = re.compile(r"^\[([^]]+)]\s*:\s*(\S+)\s*$")
 
 
 def normalize_version(value: str) -> str:
-    """Return a plain semantic version accepted by the changelog format."""
+    """Return a stable or developmental version for the changelog."""
     version = value.removeprefix("v")
     if not _VERSION_RE.fullmatch(version):
         raise ValueError(f"invalid release version: {value!r}")
@@ -62,7 +62,13 @@ def render_release_notes(changelog: str, requested_version: str) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Render a GitHub Release body from CHANGELOG.md.")
-    parser.add_argument("version", help="release version or tag, for example 0.2.3 or v0.2.3")
+    parser.add_argument(
+        "version",
+        help=(
+            "release version or tag, for example 0.2.3, v0.2.3, or "
+            "v0.2.4.dev1"
+        ),
+    )
     parser.add_argument(
         "--changelog", type=Path, default=Path("CHANGELOG.md"),
         help="changelog path (default: CHANGELOG.md)")

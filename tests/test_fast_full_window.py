@@ -108,7 +108,7 @@ def test_compressed_keyframe_crosses_standalone_client_decoder_in_parts():
     assert update.terminal_modes is TerminalMode.NONE
 
 
-def test_v7_wire_round_trips_allowlisted_terminal_modes_and_rejects_unknown():
+def test_v8_wire_round_trips_allowlisted_terminal_modes_and_rejects_unknown():
     modes = TerminalMode.BRACKETED_PASTE | TerminalMode.FOCUS_EVENTS
     update = ClientScreenUpdateDecoder().feed(
         encode_update(_keyframe(terminal_modes=modes))
@@ -124,13 +124,13 @@ def test_v7_wire_round_trips_allowlisted_terminal_modes_and_rejects_unknown():
     assert ClientScreenUpdateDecoder().feed(malformed) == []
 
 
-def test_v7_decoder_does_not_accept_a_v6_packet_prefix():
-    old_packet = b"RMUXD6\x00" + struct.pack(">I", 32) + bytes(32)
+def test_v8_decoder_does_not_accept_a_v7_packet_prefix():
+    old_packet = b"RMUXD7\x00" + struct.pack(">I", 32) + bytes(32)
 
     assert ClientScreenUpdateDecoder().feed(old_packet) == []
 
 
-def test_v7_unified_decoder_round_trips_history_between_screen_updates():
+def test_v8_unified_decoder_round_trips_history_between_screen_updates():
     snapshot = HistorySnapshot(
         request_id=7,
         pane_id="%42",
@@ -153,6 +153,22 @@ def test_v7_unified_decoder_round_trips_history_between_screen_updates():
     assert messages == [_keyframe(), snapshot, _keyframe(sequence=2)]
 
 
+def test_v8_history_snapshot_round_trips_the_maximum_line_count():
+    snapshot = HistorySnapshot(
+        request_id=8,
+        pane_id="%42",
+        x=30,
+        y=1,
+        width=50,
+        height=2,
+        lines=(b"x",) * 20000,
+    )
+
+    assert ServerMessageDecoder().feed(
+        encode_history_snapshot(snapshot)
+    ) == [snapshot]
+
+
 def test_rejected_history_response_is_bounded_and_screen_decoder_ignores_it():
     rejected = HistorySnapshot(9, None)
     packet = encode_history_snapshot(rejected) + encode_update(_keyframe())
@@ -169,11 +185,14 @@ def test_history_request_round_trip_validates_pointer_and_line_limit():
     assert decode_history_request(message.data) == (12, 80, 24, 1500)
     with pytest.raises(ValueError):
         encode_history_request(1, 0, 24)
+    assert decode_history_request(
+        decoder.feed(encode_history_request(1, 80, 24, 20000))[0].data
+    ) == (1, 80, 24, 20000)
     with pytest.raises(ValueError):
-        encode_history_request(1, 80, 24, 5000)
+        encode_history_request(1, 80, 24, 20001)
 
 
-def test_v7_history_prefetch_batch_round_trip_is_atomic_and_bounded():
+def test_v8_history_prefetch_batch_round_trip_is_atomic_and_bounded():
     decoder = InputFrameDecoder()
     request = decoder.feed(encode_history_prefetch(17, 300))[0]
     assert request.kind is InputKind.PREFETCH_HISTORY
@@ -187,7 +206,7 @@ def test_v7_history_prefetch_batch_round_trip_is_atomic_and_bounded():
 
     assert ServerMessageDecoder().feed(encode_history_batch(batch)) == [batch]
     with pytest.raises(ValueError):
-        encode_history_prefetch(1, 5000)
+        encode_history_prefetch(1, 301)
 
 
 def test_client_decoder_recovers_from_false_marker_and_reads_patch():
@@ -712,6 +731,51 @@ def test_local_history_routes_sidebar_immediately_and_owns_agent_wheel():
     assert agent_action.protocol_frame == b""
 
 
+def test_local_history_never_leaks_wheel_to_tmux_before_routes_are_ready():
+    view = LocalHistoryView()
+    wheel = SgrMouseEvent(b"wheel", 64, 40, 2, True)
+
+    initial = view.wheel(wheel)
+    view.begin_prefetch(1.0)
+    pending = view.wheel(wheel)
+    view.invalidate_routes()
+    invalidated = view.wheel(wheel)
+
+    assert initial == HistoryAction(refresh_routes=True)
+    assert pending == HistoryAction(refresh_routes=True)
+    assert invalidated == HistoryAction(refresh_routes=True)
+
+
+def test_valid_empty_routes_forward_modal_wheel_after_prefetch():
+    view = LocalHistoryView()
+    prefetch = InputFrameDecoder().feed(view.begin_prefetch(1.0))[0]
+    request_id, _limit = decode_history_prefetch(prefetch.data)
+    view.accept_prefetch(HistoryBatch(request_id, ()))
+    wheel = SgrMouseEvent(b"wheel", 64, 40, 2, True)
+
+    assert view.wheel(wheel) == HistoryAction(forwarded_input=b"wheel")
+
+
+def test_agent_border_wheel_is_consumed_but_sidebar_wheel_still_forwards():
+    view = LocalHistoryView()
+    prefetch = InputFrameDecoder().feed(view.begin_prefetch(1.0))[0]
+    request_id, _limit = decode_history_prefetch(prefetch.data)
+    route = HistorySnapshot(
+        request_id, "%8", 30, 0, 40, 3, (b"old", b"one", b"two")
+    )
+    view.accept_prefetch(HistoryBatch(request_id, (route,)))
+
+    left_border = view.wheel(
+        SgrMouseEvent(b"border", 64, 30, 2, True)
+    )
+    sidebar = view.wheel(
+        SgrMouseEvent(b"sidebar", 64, 5, 2, True)
+    )
+
+    assert left_border == HistoryAction()
+    assert sidebar == HistoryAction(forwarded_input=b"sidebar")
+
+
 def test_local_history_cross_agent_click_preserves_prefetched_routes():
     view = LocalHistoryView()
     prefetch = InputFrameDecoder().feed(view.begin_prefetch(1.0))[0]
@@ -963,6 +1027,137 @@ def test_deep_history_response_keeps_the_visible_anchor_when_output_advances():
 
     assert action.render_history is True
     assert view.overlays()[0][1] == (b"line-4", b"line-5", b"line-6")
+
+
+def test_history_progressively_extends_to_configured_limit_without_jumping():
+    view = LocalHistoryView(history_limit=5000)
+    prefetch = InputFrameDecoder().feed(view.begin_prefetch(1.0))[0]
+    prefetch_id, _limit = decode_history_prefetch(prefetch.data)
+    cached_lines = tuple(f"live-{index}".encode() for index in range(10))
+    cached = HistorySnapshot(
+        prefetch_id, "%8", 30, 0, 30, 3, cached_lines
+    )
+    view.accept_prefetch(HistoryBatch(prefetch_id, (cached,)))
+    wheel_up = SgrMouseEvent(b"up", 64, 40, 2, True)
+
+    initial = view.wheel(wheel_up)
+    initial_request = decode_history_request(
+        InputFrameDecoder().feed(initial.protocol_frame)[0].data
+    )
+    assert initial_request[3] == 2000
+    first_page = (
+        *(f"older-a-{index}".encode() for index in range(1990)),
+        *cached_lines,
+    )
+    before = view.overlays()[0][1]
+    first_action = view.accept(HistorySnapshot(
+        initial_request[0], "%8", 30, 0, 30, 3, first_page
+    ))
+    assert first_action.protocol_frame == b""
+    assert view.overlays()[0][1] == before
+
+    extension = HistoryAction()
+    for _ in range(700):
+        extension = view.wheel(wheel_up)
+        if extension.protocol_frame:
+            break
+    second_request = decode_history_request(
+        InputFrameDecoder().feed(extension.protocol_frame)[0].data
+    )
+    assert second_request[3] == 4000
+
+    before = view.overlays()[0][1]
+    second_page = (
+        *(f"older-b-{index}".encode() for index in range(2000)),
+        *first_page,
+    )
+    second_action = view.accept(HistorySnapshot(
+        second_request[0], "%8", 30, 0, 30, 3, second_page
+    ))
+    assert view.overlays()[0][1] == before
+    assert second_action.protocol_frame == b""
+
+    extension = HistoryAction()
+    for _ in range(700):
+        extension = view.wheel(wheel_up)
+        if extension.protocol_frame:
+            break
+    final_request = decode_history_request(
+        InputFrameDecoder().feed(extension.protocol_frame)[0].data
+    )
+    assert final_request[3] == 5000
+
+    before = view.overlays()[0][1]
+    final_page = (
+        *(f"older-c-{index}".encode() for index in range(1000)),
+        *second_page,
+    )
+    final_action = view.accept(HistorySnapshot(
+        final_request[0], "%8", 30, 0, 30, 3, final_page
+    ))
+    assert final_action.protocol_frame == b""
+    assert final_action.render_history is True
+    assert view.overlays()[0][1] == before
+
+
+def test_history_reuses_a_previous_deep_snapshot_without_refetching_less():
+    view = LocalHistoryView(history_limit=5000)
+    prefetch = InputFrameDecoder().feed(view.begin_prefetch(1.0))[0]
+    prefetch_id, _limit = decode_history_prefetch(prefetch.data)
+    cached_lines = tuple(f"live-{index}".encode() for index in range(10))
+    cached = HistorySnapshot(
+        prefetch_id, "%8", 30, 0, 30, 3, cached_lines
+    )
+    view.accept_prefetch(HistoryBatch(prefetch_id, (cached,)))
+    wheel_up = SgrMouseEvent(b"up", 64, 40, 2, True)
+    initial = view.wheel(wheel_up)
+    request_id = decode_history_request(
+        InputFrameDecoder().feed(initial.protocol_frame)[0].data
+    )[0]
+    deep_lines = (
+        *(f"older-{index}".encode() for index in range(1990)),
+        *cached_lines,
+    )
+    view.accept(HistorySnapshot(
+        request_id, "%8", 30, 0, 30, 3, deep_lines
+    ))
+    view.cancel_pane("%8")
+
+    reopened = view.wheel(wheel_up)
+
+    assert reopened.protocol_frame == b""
+    assert view.viewports["%8"].loaded_limit == 2000
+    assert len(view.viewports["%8"].snapshot.lines) == 2000
+
+
+def test_history_stops_extending_after_a_short_deep_response():
+    view = LocalHistoryView(history_limit=20000)
+    prefetch = InputFrameDecoder().feed(view.begin_prefetch(1.0))[0]
+    prefetch_id, _limit = decode_history_prefetch(prefetch.data)
+    cached_lines = tuple(f"line-{index}".encode() for index in range(10))
+    cached = HistorySnapshot(
+        prefetch_id, "%8", 30, 0, 30, 3, cached_lines
+    )
+    view.accept_prefetch(HistoryBatch(prefetch_id, (cached,)))
+    wheel_up = SgrMouseEvent(b"up", 64, 40, 2, True)
+    initial = view.wheel(wheel_up)
+    request_id = decode_history_request(
+        InputFrameDecoder().feed(initial.protocol_frame)[0].data
+    )[0]
+
+    view.accept(HistorySnapshot(
+        request_id,
+        "%8",
+        30,
+        0,
+        30,
+        3,
+        (b"older-a", b"older-b", *cached_lines),
+    ))
+
+    for _ in range(20):
+        action = view.wheel(wheel_up)
+        assert action.protocol_frame == b""
 
 
 def test_deep_history_response_without_anchor_does_not_jump_viewport():
@@ -1452,6 +1647,21 @@ def test_reconnect_flag_is_opt_in_and_preserved_in_raw_argv():
     assert enabled.raw_argv == ("server", "--reconnect")
 
 
+def test_history_line_limit_is_optional_and_cli_bounded():
+    assert parse_client_args(["server"]).history_lines is None
+    assert parse_client_args([
+        "server", "--history-lines", "2000",
+    ]).history_lines == 2000
+    assert parse_client_args([
+        "server", "--history-lines", "20000",
+    ]).history_lines == 20000
+
+    with pytest.raises(SystemExit):
+        parse_client_args(["server", "--history-lines", "1999"])
+    with pytest.raises(SystemExit):
+        parse_client_args(["server", "--history-lines", "20001"])
+
+
 @pytest.mark.parametrize(
     ("enabled", "frames", "local_exit", "returncode", "expected"),
     [
@@ -1720,7 +1930,7 @@ def test_busy_legacy_attach_can_be_replaced_once_with_consent(monkeypatch):
             for call in built.call_args_list] == [False, True]
 
 
-def test_transient_v7_attach_contention_retries_without_takeover(monkeypatch):
+def test_transient_v8_attach_contention_retries_without_takeover(monkeypatch):
     original = _PreflightProcess()
     retry = _PreflightProcess()
     args = parse_client_args(["server"])
@@ -2448,7 +2658,7 @@ def test_remote_server_busy_status_is_machine_readable(monkeypatch):
     assert output.getvalue() == REMOTE_ATTACH_BUSY
 
 
-def test_v7_attach_lock_is_released_before_display_lifetime(monkeypatch):
+def test_v8_attach_lock_is_released_before_display_lifetime(monkeypatch):
     events = []
     monkeypatch.setattr(
         fast_display_server, "_ensure_railmux_session", lambda _session: "$4")
@@ -2903,6 +3113,65 @@ def test_server_history_capture_preserves_sgr_but_filters_controls(monkeypatch):
         destructive in calls[0][0]
         for destructive in ("kill-pane", "kill-session", "resize-pane", "send-keys")
     )
+
+
+def test_server_history_capture_honours_limits_above_the_old_4096_cap(
+    monkeypatch,
+):
+    pane = fast_display_server._PaneGeometry("%8", 31, 0, 49, 2)
+    lines = tuple(f"line-{index}".encode() for index in range(5001))
+    calls = []
+    monkeypatch.setattr(
+        subprocess,
+        "check_output",
+        lambda argv, **_kwargs: calls.append(argv) or b"\n".join(lines),
+    )
+    monkeypatch.setattr(
+        fast_display_server,
+        "_render_history_line",
+        lambda _pyte, line, _width: line,
+    )
+
+    snapshot = fast_display_server._capture_pane_history(
+        object(), pane, 7, 5000
+    )
+
+    assert snapshot is not None
+    assert len(snapshot.lines) == 5000
+    assert snapshot.lines[0] == b"line-1"
+    assert snapshot.lines[-1] == b"line-5000"
+    assert calls[0][-2:] == ["-S", "-5000"]
+
+
+def test_server_history_capture_truncates_to_newest_styled_byte_budget(
+    monkeypatch,
+):
+    pane = fast_display_server._PaneGeometry("%8", 31, 0, 49, 2)
+    monkeypatch.setattr(
+        subprocess,
+        "check_output",
+        lambda *_args, **_kwargs: b"oldest\nmiddle\nnewest\n",
+    )
+    line_bytes = (
+        fast_display_server._HISTORY_SNAPSHOT_RAW_BUDGET // 3 + 100
+    )
+    monkeypatch.setattr(
+        fast_display_server,
+        "_render_history_line",
+        lambda _pyte, line, _width: line + b"x" * line_bytes,
+    )
+
+    snapshot = fast_display_server._capture_pane_history(
+        object(), pane, 7, 20000
+    )
+
+    assert snapshot is not None
+    assert len(snapshot.lines) == 2
+    assert snapshot.lines[0].startswith(b"middle")
+    assert snapshot.lines[1].startswith(b"newest")
+    assert ServerMessageDecoder().feed(
+        encode_history_snapshot(snapshot)
+    ) == [snapshot]
 
 
 def test_server_captures_nested_history_from_real_pane_without_resizing(

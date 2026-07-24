@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.11.dev202607240] - 2026-07-24
+
+### Added
+
+- Let `railmux ssh` continue loading older agent history in cumulative
+  2000-line pages. The local cap defaults to 5000 lines and can be set to
+  2000-20000 with `[ssh].history_lines` or a one-connection
+  `--history-lines` override.
+
+### Changed
+
+- Advance the private SSH display protocol to v8 for bounded 20000-line
+  history requests. Deep captures preserve the visible anchor and stop safely
+  at the styled-response byte boundary instead of failing the remote helper.
+
+### Fixed
+
+- Prevent transitional touchpad wheel events and agent-border scrolling in
+  `railmux ssh` from leaking into tmux copy-mode and consequently freezing both
+  panes through dual-agent selection isolation.
+
 ## [0.2.10] - 2026-07-23
 
 ### Added
@@ -724,7 +745,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial PyPI release under the Railmux name.
 
-[Unreleased]: https://github.com/Rightglow/Railmux/compare/v0.2.10...HEAD
+[Unreleased]: https://github.com/Rightglow/Railmux/compare/v0.2.11.dev202607240...HEAD
+[0.2.11.dev202607240]: https://github.com/Rightglow/Railmux/compare/v0.2.10...v0.2.11.dev202607240
 [0.2.10]: https://github.com/Rightglow/Railmux/compare/v0.2.9...v0.2.10
 [0.2.9]: https://github.com/Rightglow/Railmux/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/Rightglow/Railmux/compare/v0.2.7...v0.2.8

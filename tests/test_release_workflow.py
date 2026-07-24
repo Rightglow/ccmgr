@@ -20,3 +20,11 @@ def test_tag_push_does_not_start_an_unrelated_duplicate_test_run():
     push_section = test.split("pull_request:", 1)[0]
     assert "branches:" in push_section
     assert "- main" in push_section
+
+
+def test_development_tag_creates_a_github_prerelease():
+    release = (ROOT / ".github/workflows/release.yml").read_text()
+
+    assert 'if [[ "$GITHUB_REF_NAME" == *.dev* ]]' in release
+    assert "prerelease+=(--prerelease)" in release
+    assert '"${prerelease[@]}"' in release

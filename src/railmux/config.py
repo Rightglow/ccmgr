@@ -14,6 +14,11 @@ class ConfigError(ValueError):
     """A safe, user-facing configuration error without file contents."""
 
 
+SSH_HISTORY_MIN_LINES = 2000
+SSH_HISTORY_MAX_LINES = 20000
+SSH_HISTORY_DEFAULT_LINES = 5000
+
+
 @dataclass(frozen=True)
 class Config:
     claude_binary: str = "claude"
@@ -22,6 +27,7 @@ class Config:
     poll_interval_ms: int = 1000
     agent_transport: str = "swap"
     show_empty_projects: bool = False
+    ssh_history_lines: int = SSH_HISTORY_DEFAULT_LINES
 
     def resolved_codex_home(self) -> Path:
         """The one resolved ``CODEX_HOME`` directory.
@@ -75,6 +81,7 @@ def load_config(config_path: Path | None = None) -> Config:
     codex = _table(data, "codex")
     live = _table(data, "live")
     projects = _table(data, "projects")
+    ssh = _table(data, "ssh")
 
     poll_value = live.get("poll_interval_ms", 1000)
     if isinstance(poll_value, bool):
@@ -92,6 +99,17 @@ def load_config(config_path: Path | None = None) -> Config:
         raise ConfigError(
             'live.agent_transport must be either "nested" or "swap"')
 
+    history_lines = ssh.get("history_lines", SSH_HISTORY_DEFAULT_LINES)
+    if (
+        not isinstance(history_lines, int)
+        or isinstance(history_lines, bool)
+        or not SSH_HISTORY_MIN_LINES <= history_lines <= SSH_HISTORY_MAX_LINES
+    ):
+        raise ConfigError(
+            "ssh.history_lines must be an integer between "
+            f"{SSH_HISTORY_MIN_LINES} and {SSH_HISTORY_MAX_LINES}"
+        )
+
     return Config(
         claude_binary=_string(
             claude, "binary", "claude", "claude.binary"),
@@ -100,4 +118,5 @@ def load_config(config_path: Path | None = None) -> Config:
         poll_interval_ms=poll_interval_ms,
         agent_transport=agent_transport,
         show_empty_projects=projects.get("show_empty_projects") is True,
+        ssh_history_lines=history_lines,
     )

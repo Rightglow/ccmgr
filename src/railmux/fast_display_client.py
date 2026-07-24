@@ -29,6 +29,13 @@ from typing import BinaryIO, NoReturn, Optional, Sequence
 from packaging.version import InvalidVersion, Version
 
 from railmux import __version__
+from railmux.config import (
+    ConfigError,
+    SSH_HISTORY_DEFAULT_LINES,
+    SSH_HISTORY_MAX_LINES,
+    SSH_HISTORY_MIN_LINES,
+    load_config,
+)
 from railmux.fast_display_protocol import (
     DISPLAY_MAGIC,
     HistoryBatch,
@@ -56,7 +63,9 @@ _SGR_MOUSE_PREFIX = b"\x1b[<"
 _SGR_STYLE_RE = re.compile(rb"\x1b\[[0-9;]*m")
 _HISTORY_SCROLL_LINES = 3
 _HISTORY_PREFETCH_LINES = 300
-_HISTORY_FULL_LINES = 2000
+_HISTORY_INITIAL_LINES = 2000
+_HISTORY_PAGE_LINES = 2000
+_HISTORY_LOAD_AHEAD_LINES = 120
 _HISTORY_PREFETCH_INTERVAL = 3.0
 _HISTORY_PREFETCH_TIMEOUT = 6.0
 _HISTORY_CONTENT_PANES = 8
@@ -497,18 +506,33 @@ class _HistoryViewport:
 
     snapshot: HistorySnapshot
     offset: int
+    loaded_limit: int
+    exhausted: bool = False
+
+
+@dataclass(frozen=True)
+class _PendingHistory:
+    epoch: int
+    pane_id: str
+    target_lines: int
 
 
 class LocalHistoryView:
     """Keep bounded history content separate from visible pointer routes."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self, history_limit: int = SSH_HISTORY_DEFAULT_LINES,
+    ) -> None:
+        if not SSH_HISTORY_MIN_LINES <= history_limit <= SSH_HISTORY_MAX_LINES:
+            raise ValueError("invalid local history limit")
+        self.history_limit = history_limit
         self.viewports: dict[str, _HistoryViewport] = {}
-        self._deep_pending: dict[int, tuple[int, str]] = {}
+        self._deep_pending: dict[int, _PendingHistory] = {}
         self.prefetch_pending_id: int | None = None
         self.prefetch_pending_epoch: int | None = None
         self.prefetch_started = 0.0
         self.visible_routes: tuple[HistorySnapshot, ...] = ()
+        self._routes_ready = False
         self.content_cache: dict[str, HistorySnapshot] = {}
         self.route_epoch = 1
         self._local_pointer_capture = False
@@ -555,6 +579,7 @@ class LocalHistoryView:
         # Replacement is atomic: hidden/removed panes immediately stop being
         # pointer targets, while their bounded text may remain reusable.
         self.visible_routes = batch.snapshots
+        self._routes_ready = True
         for snapshot in batch.snapshots:
             if snapshot.pane_id is not None:
                 self._remember_content(snapshot)
@@ -588,6 +613,7 @@ class LocalHistoryView:
         if self.route_epoch == 0:
             self.route_epoch = 1
         self.visible_routes = ()
+        self._routes_ready = False
         self.prefetch_pending_id = None
         self.prefetch_pending_epoch = None
         self.prefetch_started = 0.0
@@ -619,6 +645,17 @@ class LocalHistoryView:
             None,
         )
 
+    def _near_agent_route(self, event: SgrMouseEvent) -> bool:
+        """Recognize the one-cell tmux border around known agent panes."""
+        x, y = event.x - 1, event.y - 1
+        return any(
+            (
+                snapshot.x - 1 <= x <= snapshot.x + snapshot.width
+                and snapshot.y - 1 <= y <= snapshot.y + snapshot.height
+            )
+            for snapshot in self.visible_routes
+        )
+
     def pane_id_at_position(self, x: int, y: int) -> str | None:
         route = self._route_at_position(x, y)
         return None if route is None else route.pane_id
@@ -646,16 +683,64 @@ class LocalHistoryView:
         if maximum == 0:
             return HistoryAction()
         self.cancel_pane(route.pane_id)
-        self.viewports[route.pane_id] = _HistoryViewport(
-            cached, min(maximum, _HISTORY_SCROLL_LINES)
+        loaded_limit = min(len(cached.lines), self.history_limit)
+        viewport = _HistoryViewport(
+            cached,
+            min(maximum, _HISTORY_SCROLL_LINES),
+            loaded_limit,
         )
+        self.viewports[route.pane_id] = viewport
+        target_lines = min(self.history_limit, _HISTORY_INITIAL_LINES)
+        if loaded_limit >= target_lines:
+            return HistoryAction(
+                protocol_frame=self._extend_history(viewport),
+                render_history=True,
+            )
         request_id = self._allocate_request_id()
-        self._deep_pending[request_id] = (self.route_epoch, route.pane_id)
+        self._deep_pending[request_id] = _PendingHistory(
+            self.route_epoch,
+            route.pane_id,
+            target_lines,
+        )
         return HistoryAction(
             protocol_frame=encode_history_request(
-                request_id, event.x, event.y, _HISTORY_FULL_LINES
+                request_id, event.x, event.y, target_lines
             ),
             render_history=True,
+        )
+
+    def _extend_history(self, viewport: _HistoryViewport) -> bytes:
+        """Request the next cumulative page when a viewport nears its top."""
+        snapshot = viewport.snapshot
+        assert snapshot.pane_id is not None
+        if (
+            viewport.exhausted
+            or viewport.loaded_limit >= self.history_limit
+            or any(
+                pending.pane_id == snapshot.pane_id
+                for pending in self._deep_pending.values()
+            )
+        ):
+            return b""
+        maximum = max(0, len(snapshot.lines) - snapshot.height)
+        if maximum - viewport.offset > _HISTORY_LOAD_AHEAD_LINES:
+            return b""
+        target_lines = min(
+            self.history_limit,
+            max(_HISTORY_INITIAL_LINES, viewport.loaded_limit)
+            + _HISTORY_PAGE_LINES,
+        )
+        request_id = self._allocate_request_id()
+        self._deep_pending[request_id] = _PendingHistory(
+            self.route_epoch,
+            snapshot.pane_id,
+            target_lines,
+        )
+        return encode_history_request(
+            request_id,
+            snapshot.x + 1,
+            snapshot.y + 1,
+            target_lines,
         )
 
     def wheel(self, event: SgrMouseEvent) -> HistoryAction:
@@ -664,6 +749,16 @@ class LocalHistoryView:
             return HistoryAction(forwarded_input=event.raw)
         route = self._route_at(event)
         if route is None:
+            # Stock tmux WheelUpPane enters copy-mode. Until the current
+            # prefetch establishes exact pane geometry, or on the one-cell
+            # border around a known agent, dropping a wheel tick is safer than
+            # leaking it to tmux and freezing both dual-agent panes through
+            # selection isolation. A valid empty route set still forwards
+            # modal/sidebar scrolling normally.
+            if not self._routes_ready:
+                return HistoryAction(refresh_routes=True)
+            if self._near_agent_route(event):
+                return HistoryAction()
             return HistoryAction(forwarded_input=event.raw)
         assert route.pane_id is not None
         viewport = self.viewports.get(route.pane_id)
@@ -681,7 +776,12 @@ class LocalHistoryView:
             if viewport.offset == 0:
                 self.cancel_pane(route.pane_id)
                 return HistoryAction(restore_live=True)
-            return HistoryAction(render_history=True)
+            return HistoryAction(
+                protocol_frame=(
+                    self._extend_history(viewport) if direction > 0 else b""
+                ),
+                render_history=True,
+            )
         # Once a pointer is known to be over an agent pane, the local history
         # layer exclusively owns vertical wheel input. This avoids also
         # triggering tmux copy-mode or its pane scroll bindings.
@@ -773,8 +873,10 @@ class LocalHistoryView:
         pending = self._deep_pending.pop(snapshot.request_id, None)
         if pending is None:
             return HistoryAction()
-        pending_epoch, pane_id = pending
-        if pending_epoch != self.route_epoch or snapshot.pane_id != pane_id:
+        if (
+            pending.epoch != self.route_epoch
+            or snapshot.pane_id != pending.pane_id
+        ):
             return HistoryAction()
         route = next(
             (
@@ -787,12 +889,12 @@ class LocalHistoryView:
         if route is None or not self._same_geometry(route, snapshot):
             return HistoryAction()
         self._remember_content(snapshot)
-        viewport = self.viewports.get(pane_id)
+        viewport = self.viewports.get(pending.pane_id)
         if viewport is None:
             return HistoryAction()
         maximum = max(0, len(snapshot.lines) - snapshot.height)
         if maximum == 0:
-            self.cancel_pane(pane_id)
+            self.cancel_pane(pending.pane_id)
             return HistoryAction(restore_live=True)
         anchor = self._visible_lines(viewport)
         aligned_offset = self._aligned_offset(snapshot, anchor)
@@ -803,7 +905,15 @@ class LocalHistoryView:
             return HistoryAction()
         viewport.snapshot = snapshot
         viewport.offset = aligned_offset
-        return HistoryAction(render_history=True)
+        viewport.loaded_limit = pending.target_lines
+        viewport.exhausted = (
+            len(snapshot.lines) < pending.target_lines
+            or pending.target_lines >= self.history_limit
+        )
+        return HistoryAction(
+            protocol_frame=self._extend_history(viewport),
+            render_history=True,
+        )
 
     @staticmethod
     def _visible_lines(viewport: _HistoryViewport) -> tuple[bytes, ...]:
@@ -842,7 +952,7 @@ class LocalHistoryView:
         self._deep_pending = {
             request_id: pending
             for request_id, pending in self._deep_pending.items()
-            if pending[1] != pane_id
+            if pending.pane_id != pane_id
         }
         return was_active
 
@@ -1034,7 +1144,7 @@ class TerminalSurface:
     def _reconcile_terminal_modes(
         self, requested: TerminalMode,
     ) -> TerminalMode:
-        """Mirror only input-affecting modes explicitly carried by protocol v7."""
+        """Mirror only input-affecting modes explicitly carried by protocol v8."""
         disabled = self.terminal_modes & ~requested
         enabled = requested & ~self.terminal_modes
         controls: list[bytes] = []
@@ -1747,7 +1857,7 @@ def _finish_remote_attach(
         raise ProbeError("remote display helper failed before attaching")
 
     _stop_unstarted_remote(process)
-    # A current v7 helper holds the mutex only while registering its exact tmux
+    # A current v8 helper holds the mutex only while registering its exact tmux
     # child. Give that ordinary race one fresh SSH process before presenting
     # the explicit legacy-lock takeover choice.
     time.sleep(_REMOTE_ATTACH_RETRY_DELAY)
@@ -1977,6 +2087,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--history-lines",
+        type=int,
+        default=None,
+        metavar="LINES",
+        help=(
+            "local agent history limit "
+            f"({SSH_HISTORY_MIN_LINES}-{SSH_HISTORY_MAX_LINES}; "
+            "default from [ssh].history_lines)"
+        ),
+    )
+    parser.add_argument(
         "--ssh-arg", action="append", default=[],
         help="extra ssh argument; repeat and use --ssh-arg=VALUE",
     )
@@ -1984,10 +2105,29 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     args.raw_argv = tuple(raw_argv)
     if not 1.0 <= args.fps <= 60.0:
         parser.error("--fps must be between 1 and 60")
+    if (
+        args.history_lines is not None
+        and not SSH_HISTORY_MIN_LINES
+        <= args.history_lines
+        <= SSH_HISTORY_MAX_LINES
+    ):
+        parser.error(
+            "--history-lines must be between "
+            f"{SSH_HISTORY_MIN_LINES} and {SSH_HISTORY_MAX_LINES}"
+        )
     return args
 
 
 def run(args: argparse.Namespace) -> int:
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        raise ProbeError(f"configuration error: {exc}") from exc
+    history_limit = (
+        config.ssh_history_lines
+        if args.history_lines is None
+        else args.history_lines
+    )
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise ProbeError("stdin and stdout must both be interactive terminals")
     if shutil.which("ssh") is None:
@@ -2007,7 +2147,7 @@ def run(args: argparse.Namespace) -> int:
     decoder = ServerMessageDecoder()
     model = ScreenModel()
     terminal_input = TerminalInputDecoder()
-    history = LocalHistoryView()
+    history = LocalHistoryView(history_limit)
     selector = selectors.DefaultSelector()
     selector.register(process.stdout.fileno(), selectors.EVENT_READ, "remote")
     selector.register(sys.stdin.fileno(), selectors.EVENT_READ, "local")
@@ -2278,7 +2418,7 @@ def run(args: argparse.Namespace) -> int:
                         decoder = ServerMessageDecoder()
                         model = ScreenModel()
                         terminal_input = TerminalInputDecoder()
-                        history = LocalHistoryView()
+                        history = LocalHistoryView(history_limit)
                         remote_closed = False
                         awaiting_keyframe = False
                         route_refresh_needed = False

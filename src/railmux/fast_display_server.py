@@ -74,6 +74,11 @@ _ATTACH_LOCK_TIMEOUT = 2.0
 _REPLACE_LOCK_TIMEOUT = 5.0
 _CLIENT_LEASE_TIMEOUT = 45.0
 _WINDOW_SIZE_ATTEMPTS = 3
+# Leave generous headroom below both protocol byte ceilings after metadata,
+# zlib framing, and viewport padding. An unusually wide, heavily styled
+# scrollback may therefore return fewer lines than requested, which the client
+# treats as the effective end instead of allowing the helper to fail.
+_HISTORY_SNAPSHOT_RAW_BUDGET = 12 * 1024 * 1024
 
 
 def _fast_dependency_ready() -> bool:
@@ -579,10 +584,19 @@ def _capture_pane_history(
     raw_lines = output.split(b"\n")
     if raw_lines and raw_lines[-1] == b"":
         raw_lines.pop()
-    lines = tuple(
-        _render_history_line(pyte, line, pane.width)
-        for line in raw_lines[-4096:]
-    )
+    # Retain the newest suffix when the styled representation reaches its byte
+    # budget. Iterate backwards so an oversized response never sacrifices the
+    # pane's current viewport merely to retain older scrollback.
+    newest_first: list[bytes] = []
+    packed_size = 2  # history line-count prefix
+    for raw_line in reversed(raw_lines[-max_lines:]):
+        rendered = _render_history_line(pyte, raw_line, pane.width)
+        line_size = 4 + len(rendered)
+        if packed_size + line_size > _HISTORY_SNAPSHOT_RAW_BUDGET:
+            break
+        newest_first.append(rendered)
+        packed_size += line_size
+    lines = tuple(reversed(newest_first))
     if len(lines) < pane.height:
         blank = _render_history_line(pyte, b"", pane.width)
         lines += (blank,) * (pane.height - len(lines))
@@ -979,7 +993,7 @@ def render_rows(screen: object) -> tuple[bytes, ...]:
 
 
 def terminal_modes_for_screen(screen: object) -> TerminalMode:
-    """Project pyte's private-mode set onto the bounded v7 wire allowlist."""
+    """Project pyte's private-mode set onto the bounded v8 wire allowlist."""
     terminal_modes = TerminalMode.NONE
     if 2004 << 5 in screen.mode:
         terminal_modes |= TerminalMode.BRACKETED_PASTE

@@ -1,4 +1,4 @@
-"""Private v7 framing for the coalesced full-window SSH display."""
+"""Private v8 framing for the coalesced full-window SSH display."""
 
 from __future__ import annotations
 
@@ -8,9 +8,9 @@ from dataclasses import dataclass
 from enum import IntEnum, IntFlag
 
 
-DISPLAY_MAGIC = b"RMUXD7\x00"
-INPUT_MAGIC = b"RMUXK7\x00"
-PROTOCOL_VERSION = 7
+DISPLAY_MAGIC = b"RMUXD8\x00"
+INPUT_MAGIC = b"RMUXK8\x00"
+PROTOCOL_VERSION = 8
 LENGTH_BYTES = 4
 REMOTE_HELLO_PREFIX = b"RAILMUX-REMOTE/1 "
 REMOTE_START = b"RAILMUX-START/1\n"
@@ -21,7 +21,8 @@ MAX_SCREEN_BYTES = 32 * 1024 * 1024
 MAX_INPUT_BYTES = 64 * 1024
 MAX_WIDTH = 1000
 MAX_HEIGHT = 500
-MAX_HISTORY_LINES = 4096
+MAX_HISTORY_LINES = 20000
+MAX_PREFETCH_HISTORY_LINES = 300
 MAX_HISTORY_PANES = 8
 _UPDATE_METADATA = struct.Struct(">BIHHHHBHI")
 _HISTORY_METADATA = struct.Struct(">IIHHHHI")
@@ -485,7 +486,7 @@ class ServerMessageDecoder:
 
 
 class ScreenUpdateDecoder:
-    """Compatibility view which ignores v7 history response messages."""
+    """Compatibility view which ignores v8 history response messages."""
 
     def __init__(self) -> None:
         self._decoder = ServerMessageDecoder()
@@ -543,7 +544,7 @@ def encode_history_request(
 def encode_history_prefetch(request_id: int, max_lines: int = 300) -> bytes:
     if not 0 <= request_id <= 0xFFFFFFFF:
         raise ValueError("invalid history request identity")
-    if not 1 <= max_lines <= MAX_HISTORY_LINES:
+    if not 1 <= max_lines <= MAX_PREFETCH_HISTORY_LINES:
         raise ValueError("invalid history line limit")
     return _encode_input_message(
         InputKind.PREFETCH_HISTORY,
@@ -566,7 +567,7 @@ def decode_history_prefetch(data: bytes) -> tuple[int, int]:
     if len(data) != _PREFETCH_HISTORY_REQUEST.size:
         raise ValueError("invalid history prefetch request")
     request_id, max_lines = _PREFETCH_HISTORY_REQUEST.unpack(data)
-    if not 1 <= max_lines <= MAX_HISTORY_LINES:
+    if not 1 <= max_lines <= MAX_PREFETCH_HISTORY_LINES:
         raise ValueError("invalid history line limit")
     return request_id, max_lines
 

@@ -10,6 +10,7 @@ def test_load_with_no_file_uses_defaults(tmp_path):
     assert cfg.poll_interval_ms == 1000
     assert cfg.agent_transport == "swap"
     assert cfg.show_empty_projects is False
+    assert cfg.ssh_history_lines == 5000
 
 
 def test_load_partial_overrides(tmp_path):
@@ -69,6 +70,25 @@ def test_invalid_agent_transport_is_rejected(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text('[live]\nagent_transport = "teleport"\n')
     with pytest.raises(ConfigError, match="live.agent_transport"):
+        load_config(config_path=path)
+
+
+@pytest.mark.parametrize("value", (2000, 5000, 20000))
+def test_ssh_history_limit_accepts_the_documented_range(tmp_path, value):
+    path = tmp_path / "config.toml"
+    path.write_text(f"[ssh]\nhistory_lines = {value}\n")
+
+    assert load_config(config_path=path).ssh_history_lines == value
+
+
+@pytest.mark.parametrize("value", ("1999", "20001", "true", '"5000"'))
+def test_ssh_history_limit_rejects_values_outside_its_integer_range(
+    tmp_path, value,
+):
+    path = tmp_path / "config.toml"
+    path.write_text(f"[ssh]\nhistory_lines = {value}\n")
+
+    with pytest.raises(ConfigError, match="ssh.history_lines"):
         load_config(config_path=path)
 
 

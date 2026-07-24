@@ -83,9 +83,16 @@ Local SSH history is an overlay, not a pause in the live screen model. Each
 visible agent pane may own one immutable snapshot and offset; incoming live
 rows are painted first and every intersecting frozen rectangle is repainted in
 the same terminal write. Periodic prefetch may refresh routing and bounded
-cache content but must not move an existing viewport. A deep response may
-replace its hot snapshot only when the visible multi-line anchor has one exact
-match.
+cache content but must not move an existing viewport. Deep history begins with
+2000 physical lines and requests cumulative 2000-line expansions only as the
+viewport approaches the oldest loaded content. Expansion stops at the local
+`[ssh].history_lines`/CLI cap (default 5000, bounded to 2000-20000) or when the
+server returns fewer lines than requested. This setting is local-only and is
+not an in-TUI Options authority. A deep response may replace its previous
+snapshot only when the visible multi-line anchor has one exact match, so both
+live output and newly prepended history leave the viewport stationary. The
+server retains the newest suffix if styled history reaches the protocol byte
+budget; a byte-bound truncation is an effective end, never a helper failure.
 Input or bottom restores only the routed pane; layout uncertainty, resize,
 sidebar input, and `Esc` fail closed by removing every incompatible overlay.
 
@@ -109,7 +116,7 @@ The local upgrade uses its current Python environment and re-execs the original
 `railmux ssh` invocation only after pip succeeds. Failure leaves tmux untouched
 and prints a reproducible manual command.
 
-Protocol v7 reports a second bounded status after the attach boundary and
+Protocol v8 reports a second bounded status after the attach boundary and
 before the first binary display frame. Current helpers may coexist: a flock
 serializes only immutable-session validation plus exact child-PID attach, and
 is released before display service begins. Every helper sends heartbeats; 45
@@ -120,7 +127,7 @@ consent, validates the existing managed session before mutation, detaches only
 clients re-enumerated under that immutable session ID, acquires the bounded
 lock, repeats enumeration to close the attach race, and never kills a session,
 pane, or provider process.
-One BUSY status is treated as ordinary v7 attach contention: the local client
+One BUSY status is treated as ordinary v8 attach contention: the local client
 starts one fresh non-replacement helper before offering takeover. Only a second
 BUSY is persistent enough to justify the destructive-sounding consent prompt.
 
@@ -628,8 +635,13 @@ pane focus, but intervening reported drag motion is dropped so tmux's stock
 `MouseDrag1Pane` cannot enter copy-mode accidentally. Sidebar gestures are
 still forwarded, terminal-native selection overrides never enter the client,
 and the opaque keyboard sequence `Ctrl-B [` remains the explicit copy-mode
-path. This is client-side input policy and does not mutate shared remote tmux
-bindings used by ordinary attached terminals.
+path. Vertical wheel input also fails closed while agent geometry is unknown
+and on the one-cell tmux border around a known agent; losing one transitional
+wheel tick is preferable to leaking stock `WheelUpPane`, entering copy-mode,
+and activating sibling selection isolation. An authoritative empty route set
+still forwards Help/modal and sidebar scrolling. This is client-side input
+policy and does not mutate shared remote tmux bindings used by ordinary
+attached terminals.
 
 tmux routes wheel events by pointer location rather than keyboard focus. Each
 sidebar pane therefore consumes buttons 4/5 at its outer widget boundary and

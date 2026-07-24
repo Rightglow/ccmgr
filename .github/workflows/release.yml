@@ -97,8 +97,13 @@ jobs:
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          prerelease=()
+          if [[ "$GITHUB_REF_NAME" == *.dev* ]]; then
+            prerelease+=(--prerelease)
+          fi
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --verify-tag \
+            "${prerelease[@]}" \
             --notes-file release-notes/release-notes.md \
             dist/*

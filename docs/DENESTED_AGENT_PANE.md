@@ -260,7 +260,7 @@ path:
 railmux ssh your-server
 ```
 
-Protocol v7 begins with a bounded remote hello containing package version,
+Protocol v8 begins with a bounded remote hello containing package version,
 protocol version, SSH dependency readiness, and tmux availability. The server
 does not inspect or mutate tmux until the compatible client returns the exact
 start acknowledgement. Missing Railmux or its optional dependency can be
@@ -281,7 +281,7 @@ across differing package versions.
 
 If the default `railmux` tmux session is absent, the server starts Railmux in a
 detached tmux session using the same installed Python environment. A custom
-`--session` is never auto-created. Multiple protocol-v7 helpers may attach to
+`--session` is never auto-created. Multiple protocol-v8 helpers may attach to
 the same managed session. A short flock covers only validation and attachment;
 the helper confirms its own child by matching tmux's `#{client_pid}` before it
 releases that boundary. The shared window is set to `window-size=smallest`, so
@@ -300,7 +300,7 @@ local replacement. Consent warns that every client currently attached to the
 managed session may be detached. The server validates the immutable session,
 enumerates and detaches exact client names, acquires the bounded lock, repeats
 enumeration to close the race, and never kills the session, panes, or agents.
-The client first starts one fresh ordinary helper after BUSY, so transient v7
+The client first starts one fresh ordinary helper after BUSY, so transient v8
 attach contention completes without presenting the legacy takeover prompt.
 
 The optional local `--reconnect` loop lasts long enough to outlive the
@@ -328,8 +328,10 @@ and caches its latest 300 physical lines. This geometry generation routes
 sidebar wheel reports directly to Railmux without a speculative request or
 event backlog. Agent-pane vertical wheel input is owned exclusively by the
 local history layer: the first wheel-up paints the hot cache immediately and
-requests up to 2000 lines in the background, while wheel-down at the live
-bottom is consumed instead of also entering tmux copy-mode. Reported clicks
+requests the first 2000 lines in the background. Approaching the top requests
+cumulative 2000-line expansions up to the bounded local history cap, while
+wheel-down at the live bottom is consumed instead of also entering tmux
+copy-mode. Reported clicks
 and drags are consumed without discarding the frozen viewport only when the
 gesture begins inside that history pane. A press that begins over another
 agent is forwarded through release so tmux focus remains authoritative without
@@ -342,7 +344,7 @@ A terminal-native selection override can still bypass mouse reporting before
 the client sees it, but that behavior is terminal-dependent; `--no-mouse` is
 the reliable ordinary-selection option.
 
-Display protocol v7 uses monotonically sequenced, zlib-compressed keyframes and
+Display protocol v8 uses monotonically sequenced, zlib-compressed keyframes and
 row patches. Each update also carries a bounded terminal-mode bitmask. Only
 bracketed paste (`DECSET 2004`) and focus events (`DECSET 1004`) are projected;
 the client mirrors transitions and disables both modes before restoring the
@@ -361,17 +363,19 @@ server resolves the pane from current tmux geometry, excludes the controller,
 and uses `capture-pane -e` without entering copy-mode or sending keys. Raw tmux
 control sequences are parsed through `pyte`; only reconstructed text and
 allowlisted SGR character styles cross the protocol. OSC and other terminal
-actions are not forwarded. A response contains at most 4096 physical lines
-(the client requests 300 for the hot cache and 2000 for the deep cache). The
-client keeps ingesting and painting live frames, then composes every frozen
+actions are not forwarded. Protocol v8 permits at most 20000 physical lines;
+the client requests 300 for the hot cache, then cumulative deep snapshots from
+2000 lines up to its configured 2000-20000 cap. A server-side styled-byte
+budget may return a shorter newest suffix rather than fail the display helper.
+The client keeps ingesting and painting live frames, then composes every frozen
 pane rectangle over the affected live rows in the same terminal write. Each
 pane has an immutable snapshot and independent offset. Reaching bottom or
 typing restores only the routed pane; resize, layout uncertainty, sidebar
 input, or `Esc` restores all panes. A periodic prefetch refreshes routes and
-future cache content without moving a frozen viewport. The 2000-line response
-replaces its hot snapshot only when its visible multi-line anchor has one exact
-match, so repeated content or newly appended output cannot shift the user's
-view.
+future cache content without moving a frozen viewport. Every cumulative
+response replaces its prior snapshot only when its visible multi-line anchor
+has one exact match, so repeated content, newly prepended history, or newly
+appended output cannot shift the user's view.
 
 The private tmux client advertises `xterm-256color`, whose terminfo uses
 parameterized scroll-up/down and repeat-character operations. pyte 0.8.2 does
